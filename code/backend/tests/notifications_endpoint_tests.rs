@@ -2171,3 +2171,70 @@ async fn test_list_logs_with_channel_and_status_filters() {
     );
     assert!(json.get("total").is_some(), "response must include total");
 }
+
+// list_logs with actual log entries — exercises LogDto mapping (notifications.rs lines 764-771)
+#[tokio::test]
+async fn test_list_logs_with_inserted_log_covers_dto_mapping() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "logdtoadmin",
+        "logdtoadmin@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+
+    // Insert a notification log directly
+    {
+        use kubarr::models::notification_log;
+        let now = chrono::Utc::now();
+        let log_entry = notification_log::ActiveModel {
+            user_id: Set(None),
+            channel_type: Set("email".to_string()),
+            event_type: Set("test.event".to_string()),
+            recipient: Set(Some("recipient@example.com".to_string())),
+            status: Set("sent".to_string()),
+            error_message: Set(None),
+            created_at: Set(now),
+            ..Default::default()
+        };
+        log_entry.insert(&db).await.unwrap();
+    }
+
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(create_router(state.clone()), "logdtoadmin", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    let (status, body) =
+        authenticated_get(create_router(state), "/api/notifications/logs", &cookie).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "list_logs must return 200. Body: {}",
+        body
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let logs = json["logs"].as_array().expect("logs must be an array");
+    assert!(
+        !logs.is_empty(),
+        "logs must contain the inserted entry. Body: {}",
+        body
+    );
+
+    // Verify the DTO fields are populated (covers LogDto mapping lines 764-771)
+    let log = &logs[0];
+    assert!(log.get("id").is_some(), "log must have id");
+    assert!(
+        log.get("channel_type").is_some(),
+        "log must have channel_type"
+    );
+    assert!(log.get("event_type").is_some(), "log must have event_type");
+    assert!(log.get("status").is_some(), "log must have status");
+    assert!(log.get("created_at").is_some(), "log must have created_at");
+}
