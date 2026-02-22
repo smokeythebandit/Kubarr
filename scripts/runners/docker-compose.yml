@@ -6,14 +6,12 @@ x-runner-common: &runner-common
   network_mode: host
   environment:
     REPO_URL: https://github.com/bmartensNL/Kubarr
-    GITHUB_TOKEN: ${GITHUB_TOKEN}
-    RUNNER_WORKDIR: /mnt/storage/personal/runners/work
+    ACCESS_TOKEN: ${GITHUB_TOKEN}
     LABELS: self-hosted,Linux,X64
     EPHEMERAL: "1"
     DOCKER_GID: "985"
   volumes:
     - /var/run/docker.sock:/var/run/docker.sock
-    - /mnt/storage/personal/runners/work:/mnt/storage/personal/runners/work
     - /usr/local/bin/kind:/usr/local/bin/kind:ro
     - /usr/bin/kubectl:/usr/bin/kubectl:ro
     - /usr/local/bin/helm:/usr/local/bin/helm:ro
@@ -22,18 +20,96 @@ services:
   runner-1:
     <<: *runner-common
     container_name: github-runner-1
+    environment:
+      REPO_URL: https://github.com/bmartensNL/Kubarr
+      ACCESS_TOKEN: ${GITHUB_TOKEN}
+      RUNNER_WORKDIR: /mnt/storage/personal/runners/work/1
+      LABELS: self-hosted,Linux,X64
+      EPHEMERAL: "1"
+      DOCKER_GID: "985"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/storage/personal/runners/work/1:/mnt/storage/personal/runners/work/1
+      - /usr/local/bin/kind:/usr/local/bin/kind:ro
+      - /usr/bin/kubectl:/usr/bin/kubectl:ro
+      - /usr/local/bin/helm:/usr/local/bin/helm:ro
   runner-2:
     <<: *runner-common
     container_name: github-runner-2
+    environment:
+      REPO_URL: https://github.com/bmartensNL/Kubarr
+      ACCESS_TOKEN: ${GITHUB_TOKEN}
+      RUNNER_WORKDIR: /mnt/storage/personal/runners/work/2
+      LABELS: self-hosted,Linux,X64
+      EPHEMERAL: "1"
+      DOCKER_GID: "985"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/storage/personal/runners/work/2:/mnt/storage/personal/runners/work/2
+      - /usr/local/bin/kind:/usr/local/bin/kind:ro
+      - /usr/bin/kubectl:/usr/bin/kubectl:ro
+      - /usr/local/bin/helm:/usr/local/bin/helm:ro
   runner-3:
     <<: *runner-common
     container_name: github-runner-3
+    environment:
+      REPO_URL: https://github.com/bmartensNL/Kubarr
+      ACCESS_TOKEN: ${GITHUB_TOKEN}
+      RUNNER_WORKDIR: /mnt/storage/personal/runners/work/3
+      LABELS: self-hosted,Linux,X64
+      EPHEMERAL: "1"
+      DOCKER_GID: "985"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/storage/personal/runners/work/3:/mnt/storage/personal/runners/work/3
+      - /usr/local/bin/kind:/usr/local/bin/kind:ro
+      - /usr/bin/kubectl:/usr/bin/kubectl:ro
+      - /usr/local/bin/helm:/usr/local/bin/helm:ro
   runner-4:
     <<: *runner-common
     container_name: github-runner-4
+    environment:
+      REPO_URL: https://github.com/bmartensNL/Kubarr
+      ACCESS_TOKEN: ${GITHUB_TOKEN}
+      RUNNER_WORKDIR: /mnt/storage/personal/runners/work/4
+      LABELS: self-hosted,Linux,X64
+      EPHEMERAL: "1"
+      DOCKER_GID: "985"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/storage/personal/runners/work/4:/mnt/storage/personal/runners/work/4
+      - /usr/local/bin/kind:/usr/local/bin/kind:ro
+      - /usr/bin/kubectl:/usr/bin/kubectl:ro
+      - /usr/local/bin/helm:/usr/local/bin/helm:ro
   runner-5:
     <<: *runner-common
     container_name: github-runner-5
+    environment:
+      REPO_URL: https://github.com/bmartensNL/Kubarr
+      ACCESS_TOKEN: ${GITHUB_TOKEN}
+      RUNNER_WORKDIR: /mnt/storage/personal/runners/work/5
+      LABELS: self-hosted,Linux,X64
+      EPHEMERAL: "1"
+      DOCKER_GID: "985"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/storage/personal/runners/work/5:/mnt/storage/personal/runners/work/5
+      - /usr/local/bin/kind:/usr/local/bin/kind:ro
+      - /usr/bin/kubectl:/usr/bin/kubectl:ro
+      - /usr/local/bin/helm:/usr/local/bin/helm:ro
   runner-6:
     <<: *runner-common
     container_name: github-runner-6
+    environment:
+      REPO_URL: https://github.com/bmartensNL/Kubarr
+      ACCESS_TOKEN: ${GITHUB_TOKEN}
+      RUNNER_WORKDIR: /mnt/storage/personal/runners/work/6
+      LABELS: self-hosted,Linux,X64
+      EPHEMERAL: "1"
+      DOCKER_GID: "985"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/storage/personal/runners/work/6:/mnt/storage/personal/runners/work/6
+      - /usr/local/bin/kind:/usr/local/bin/kind:ro
+      - /usr/bin/kubectl:/usr/bin/kubectl:ro
+      - /usr/local/bin/helm:/usr/local/bin/helm:ro

@@ -1,0 +1,28 @@
+# False positives — all test/fake values or deleted historical files.
+# Generated from gitleaks SARIF findings. None of these are real secrets.
+
+# code/backend/src/services/security.rs — PEM header string-split in test assertion (not key material)
+d7f71a562a19b3bc5cd90001e454c673e2dc4e0b:code/backend/src/services/security.rs:private-key:643
+
+# code/backend/tests/ — "fake" / "fake-key" placeholder values in unit test fixtures
+26244bfe61300f087216312e375ceaad495b2a3d:code/backend/tests/notification_provider_tests.rs:generic-api-key:289
+26244bfe61300f087216312e375ceaad495b2a3d:code/backend/tests/notification_provider_tests.rs:generic-api-key:303
+26244bfe61300f087216312e375ceaad495b2a3d:code/backend/tests/vpn_extended_tests.rs:generic-api-key:157
+26244bfe61300f087216312e375ceaad495b2a3d:code/backend/tests/vpn_endpoint_tests.rs:generic-api-key:170
+666d6120d23c6952cf4cd932515f4b957642e747:code/backend/tests/security_tests.rs:private-key:158
+
+# code/frontend/tests/14-vpn.spec.ts — page.goto URL, not a secret
+84137871b65ff7d937ca0a2c7b2ca4037b4a485b:code/frontend/tests/14-vpn.spec.ts:generic-api-key:4
+
+# Historical chart files (deleted in c009c6d) — placeholder API keys in Helm setup configmaps
+92ad3fc234bc01c4c323624556c393a2609af10a:charts/sonarr/templates/setup-configmap.yaml:generic-api-key:21
+92ad3fc234bc01c4c323624556c393a2609af10a:charts/radarr/templates/setup-configmap.yaml:generic-api-key:21
+92ad3fc234bc01c4c323624556c393a2609af10a:charts/sabnzbd/templates/setup-configmap.yaml:generic-api-key:16
+202201418f62697edd5533b9ef244fac5a926705:charts/traefik/values.yaml:generic-api-key:34
+
+# Historical files (deleted in c009c6d) — old codebase / dev scripts
+750b1f09e1185b8ff6e46684182005d34ceb803b:kubarr-rs/src/services/security.rs:private-key:496
+033b6f5b11a70cd116540ea8d9e63aa6603e5cd3:DEPLOYMENT_SUMMARY.md:generic-api-key:71
+033b6f5b11a70cd116540ea8d9e63aa6603e5cd3:test-auth.ps1:generic-api-key:8
+e64906700080d3e60810c856fd181d2a1a8ee323:scripts/jwt-private.pem:private-key:1
+e64906700080d3e60810c856fd181d2a1a8ee323:scripts/jwt-keys-secret.yaml:kubernetes-secret-yaml:2
