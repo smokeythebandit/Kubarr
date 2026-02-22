@@ -344,3 +344,166 @@ impl Default for AppCatalog {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_app(name: &str, category: &str) -> AppConfig {
+        AppConfig {
+            name: name.to_string(),
+            display_name: format!("{} Display", name),
+            description: format!("{} description", name),
+            icon: "📦".to_string(),
+            container_image: format!("linuxserver/{}:latest", name),
+            default_port: 8080,
+            resource_requirements: ResourceRequirements {
+                cpu_request: "100m".to_string(),
+                cpu_limit: "500m".to_string(),
+                memory_request: "128Mi".to_string(),
+                memory_limit: "512Mi".to_string(),
+            },
+            volumes: vec![],
+            environment_variables: HashMap::new(),
+            category: category.to_string(),
+            is_system: false,
+            is_hidden: false,
+            is_browseable: true,
+        }
+    }
+
+    fn make_catalog() -> AppCatalog {
+        let mut apps = HashMap::new();
+        apps.insert("sonarr".to_string(), make_app("sonarr", "media"));
+        apps.insert("radarr".to_string(), make_app("radarr", "media"));
+        apps.insert("grafana".to_string(), make_app("grafana", "monitoring"));
+        AppCatalog::with_apps(apps)
+    }
+
+    #[test]
+    fn get_all_apps_returns_all() {
+        let catalog = make_catalog();
+        assert_eq!(catalog.get_all_apps().len(), 3);
+    }
+
+    #[test]
+    fn get_app_found() {
+        let catalog = make_catalog();
+        let app = catalog.get_app("sonarr");
+        assert!(app.is_some());
+        assert_eq!(app.unwrap().name, "sonarr");
+    }
+
+    #[test]
+    fn get_app_not_found() {
+        let catalog = make_catalog();
+        assert!(catalog.get_app("nonexistent").is_none());
+    }
+
+    #[test]
+    fn get_apps_by_category_media() {
+        let catalog = make_catalog();
+        let media = catalog.get_apps_by_category("media");
+        assert_eq!(media.len(), 2);
+    }
+
+    #[test]
+    fn get_apps_by_category_monitoring() {
+        let catalog = make_catalog();
+        let monitoring = catalog.get_apps_by_category("monitoring");
+        assert_eq!(monitoring.len(), 1);
+        assert_eq!(monitoring[0].name, "grafana");
+    }
+
+    #[test]
+    fn get_apps_by_category_missing() {
+        let catalog = make_catalog();
+        assert!(catalog.get_apps_by_category("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn app_exists_true() {
+        let catalog = make_catalog();
+        assert!(catalog.app_exists("sonarr"));
+    }
+
+    #[test]
+    fn app_exists_false() {
+        let catalog = make_catalog();
+        assert!(!catalog.app_exists("plex"));
+    }
+
+    #[test]
+    fn get_categories_sorted() {
+        let catalog = make_catalog();
+        let cats = catalog.get_categories();
+        // Should be sorted and contain "media" and "monitoring"
+        assert!(cats.contains(&"media".to_string()));
+        assert!(cats.contains(&"monitoring".to_string()));
+        assert_eq!(cats.len(), 2);
+        // Verify sorted
+        let mut sorted = cats.clone();
+        sorted.sort();
+        assert_eq!(cats, sorted);
+    }
+
+    #[test]
+    fn app_config_serde_roundtrip() {
+        let app = make_app("sonarr", "media");
+        let json = serde_json::to_string(&app).expect("ser");
+        let deserialized: AppConfig = serde_json::from_str(&json).expect("deser");
+        assert_eq!(deserialized.name, "sonarr");
+        assert_eq!(deserialized.category, "media");
+        assert_eq!(deserialized.resource_requirements.cpu_request, "100m");
+    }
+
+    #[test]
+    fn resource_requirements_serde() {
+        let rr = ResourceRequirements {
+            cpu_request: "250m".to_string(),
+            cpu_limit: "2000m".to_string(),
+            memory_request: "512Mi".to_string(),
+            memory_limit: "2Gi".to_string(),
+        };
+        let json = serde_json::to_string(&rr).expect("ser");
+        assert!(json.contains("\"cpu_request\":\"250m\""));
+        let deser: ResourceRequirements = serde_json::from_str(&json).expect("deser");
+        assert_eq!(deser.memory_limit, "2Gi");
+    }
+
+    #[test]
+    fn volume_config_serde() {
+        let vol = VolumeConfig {
+            name: "config".to_string(),
+            mount_path: "/config".to_string(),
+            size: "5Gi".to_string(),
+        };
+        let json = serde_json::to_string(&vol).expect("ser");
+        assert!(json.contains("\"mount_path\":\"/config\""));
+        let deser: VolumeConfig = serde_json::from_str(&json).expect("deser");
+        assert_eq!(deser.size, "5Gi");
+    }
+
+    #[test]
+    fn app_config_with_volumes_and_env() {
+        let mut app = make_app("jellyfin", "media");
+        app.volumes.push(VolumeConfig {
+            name: "config".to_string(),
+            mount_path: "/config".to_string(),
+            size: "1Gi".to_string(),
+        });
+        app.environment_variables
+            .insert("PUID".to_string(), "1000".to_string());
+        app.is_system = true;
+        app.is_hidden = true;
+        app.is_browseable = false;
+        app.default_port = 8096;
+
+        let json = serde_json::to_string(&app).expect("ser");
+        assert!(json.contains("\"is_system\":true"));
+        assert!(json.contains("\"is_hidden\":true"));
+        assert!(json.contains("\"is_browseable\":false"));
+        assert!(json.contains("\"default_port\":8096"));
+    }
+}
