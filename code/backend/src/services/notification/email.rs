@@ -135,3 +135,202 @@ impl NotificationProvider for EmailProvider {
         ).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // EmailConfig deserialization tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_config_deser_all_fields() {
+        let json = serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "username": "user@example.com",
+            "password": "secret",
+            "from_address": "noreply@example.com",
+            "from_name": "Kubarr Bot",
+            "use_tls": true
+        });
+        let cfg: EmailConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.smtp_host, "smtp.example.com");
+        assert_eq!(cfg.smtp_port, 587);
+        assert_eq!(cfg.username, "user@example.com");
+        assert_eq!(cfg.password, "secret");
+        assert_eq!(cfg.from_address, "noreply@example.com");
+        assert_eq!(cfg.from_name, Some("Kubarr Bot".to_string()));
+        assert_eq!(cfg.use_tls, Some(true));
+    }
+
+    #[test]
+    fn test_config_deser_optional_fields_absent() {
+        let json = serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 25,
+            "username": "user",
+            "password": "pass",
+            "from_address": "bot@example.com"
+        });
+        let cfg: EmailConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.from_name, None);
+        assert_eq!(cfg.use_tls, None);
+    }
+
+    #[test]
+    fn test_config_deser_missing_smtp_host_fails() {
+        let json = serde_json::json!({
+            "smtp_port": 587,
+            "username": "user",
+            "password": "pass",
+            "from_address": "bot@example.com"
+        });
+        let result: Result<EmailConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_deser_missing_smtp_port_fails() {
+        let json = serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "username": "user",
+            "password": "pass",
+            "from_address": "bot@example.com"
+        });
+        let result: Result<EmailConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_deser_missing_username_fails() {
+        let json = serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "password": "pass",
+            "from_address": "bot@example.com"
+        });
+        let result: Result<EmailConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_deser_missing_password_fails() {
+        let json = serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "username": "user",
+            "from_address": "bot@example.com"
+        });
+        let result: Result<EmailConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_deser_missing_from_address_fails() {
+        let json = serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "username": "user",
+            "password": "pass"
+        });
+        let result: Result<EmailConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // EmailProvider::from_config() tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_from_config_success_all_fields_with_tls() {
+        let config = serde_json::json!({
+            "smtp_host": "smtp.gmail.com",
+            "smtp_port": 587,
+            "username": "user@gmail.com",
+            "password": "apppassword",
+            "from_address": "user@gmail.com",
+            "from_name": "My App",
+            "use_tls": true
+        });
+        let result = EmailProvider::from_config(&config);
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.from_address, "user@gmail.com");
+        assert_eq!(provider.from_name, "My App");
+    }
+
+    #[test]
+    fn test_from_config_success_no_tls() {
+        let config = serde_json::json!({
+            "smtp_host": "localhost",
+            "smtp_port": 25,
+            "username": "user",
+            "password": "pass",
+            "from_address": "noreply@localhost",
+            "use_tls": false
+        });
+        let result = EmailProvider::from_config(&config);
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.from_address, "noreply@localhost");
+        // from_name should default to "Kubarr" when not specified
+        assert_eq!(provider.from_name, "Kubarr");
+    }
+
+    #[test]
+    fn test_from_config_success_default_from_name() {
+        let config = serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "username": "user",
+            "password": "pass",
+            "from_address": "bot@example.com"
+        });
+        let result = EmailProvider::from_config(&config);
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.from_name, "Kubarr");
+    }
+
+    #[test]
+    fn test_from_config_missing_required_field_returns_err() {
+        // Missing from_address — required field
+        let config = serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "username": "user",
+            "password": "pass"
+        });
+        let result = EmailProvider::from_config(&config);
+        assert!(result.is_err());
+        let err = result.err().expect("expected Err");
+        assert!(err.contains("Invalid email config"));
+    }
+
+    #[test]
+    fn test_from_config_invalid_json_value_returns_err() {
+        // A non-object value triggers deserialization failure
+        let config = serde_json::json!("this-is-not-an-object");
+        let result = EmailProvider::from_config(&config);
+        assert!(result.is_err());
+        let err = result.err().expect("expected Err");
+        assert!(err.contains("Invalid email config"));
+    }
+
+    #[test]
+    fn test_from_config_use_tls_defaults_to_true_when_absent() {
+        // When use_tls is absent the code defaults to true (starttls_relay path).
+        // We just verify it builds successfully without panicking.
+        let config = serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "username": "user",
+            "password": "pass",
+            "from_address": "bot@example.com"
+        });
+        let result = EmailProvider::from_config(&config);
+        assert!(result.is_ok());
+    }
+}

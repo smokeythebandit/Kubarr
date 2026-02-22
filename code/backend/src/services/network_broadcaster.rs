@@ -297,6 +297,173 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // is_excluded_namespace
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn excluded_kube_prefix() {
+        assert!(is_excluded_namespace("kube-system"));
+        assert!(is_excluded_namespace("kube-public"));
+        assert!(is_excluded_namespace("kube-"));
+    }
+
+    #[test]
+    fn excluded_exact_matches() {
+        assert!(is_excluded_namespace("local-path-storage"));
+        assert!(is_excluded_namespace("default"));
+        assert!(is_excluded_namespace("linux"));
+        assert!(is_excluded_namespace(""));
+    }
+
+    #[test]
+    fn not_excluded_regular_namespaces() {
+        assert!(!is_excluded_namespace("media"));
+        assert!(!is_excluded_namespace("kubarr"));
+        assert!(!is_excluded_namespace("my-app"));
+        assert!(!is_excluded_namespace("kube")); // no trailing dash
+    }
+
+    // -------------------------------------------------------------------------
+    // capitalize_first
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn capitalize_empty() {
+        assert_eq!(capitalize_first(""), "");
+    }
+
+    #[test]
+    fn capitalize_lowercase_word() {
+        assert_eq!(capitalize_first("media"), "Media");
+        assert_eq!(capitalize_first("kubarr"), "Kubarr");
+    }
+
+    #[test]
+    fn capitalize_already_upper() {
+        assert_eq!(capitalize_first("Media"), "Media");
+    }
+
+    #[test]
+    fn capitalize_hyphenated() {
+        assert_eq!(capitalize_first("my-app"), "My-app");
+    }
+
+    #[test]
+    fn capitalize_single_char() {
+        assert_eq!(capitalize_first("m"), "M");
+    }
+
+    // -------------------------------------------------------------------------
+    // Struct construction (serde coverage)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn network_metrics_message_serde() {
+        let msg = NetworkMetricsMessage {
+            msg_type: "network_metrics".to_string(),
+            timestamp: 1000,
+            topology: NetworkTopologyData {
+                nodes: vec![],
+                edges: vec![],
+            },
+            stats: vec![],
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains("\"type\":\"network_metrics\""));
+    }
+
+    #[test]
+    fn network_node_data_serde() {
+        let node = NetworkNodeData {
+            id: "media".to_string(),
+            name: "Media".to_string(),
+            node_type: "app".to_string(),
+            rx_bytes_per_sec: 1.5,
+            tx_bytes_per_sec: 2.5,
+            total_traffic: 4.0,
+            pod_count: 3,
+            color: "#3b82f6".to_string(),
+        };
+        let json = serde_json::to_string(&node).expect("serialize");
+        assert!(json.contains("\"type\":\"app\""));
+        assert!(json.contains("\"pod_count\":3"));
+    }
+
+    #[test]
+    fn network_edge_data_serde_with_optional_fields() {
+        let edge = NetworkEdgeData {
+            source: "a".to_string(),
+            target: "b".to_string(),
+            edge_type: "config".to_string(),
+            port: Some(80),
+            protocol: Some("HTTP".to_string()),
+            label: String::new(),
+        };
+        let json = serde_json::to_string(&edge).expect("serialize");
+        assert!(json.contains("\"port\":80"));
+        assert!(json.contains("\"protocol\":\"HTTP\""));
+    }
+
+    #[test]
+    fn network_edge_data_serde_without_optional_fields() {
+        let edge = NetworkEdgeData {
+            source: "a".to_string(),
+            target: "b".to_string(),
+            edge_type: "egress".to_string(),
+            port: None,
+            protocol: None,
+            label: String::new(),
+        };
+        let json = serde_json::to_string(&edge).expect("serialize");
+        // skip_serializing_if means None fields should be absent
+        assert!(!json.contains("\"port\""));
+        assert!(!json.contains("\"protocol\""));
+    }
+
+    #[test]
+    fn network_stats_data_serde() {
+        let stats = NetworkStatsData {
+            namespace: "media".to_string(),
+            app_name: "Media".to_string(),
+            rx_bytes_per_sec: 1.0,
+            tx_bytes_per_sec: 2.0,
+            rx_packets_per_sec: 3.0,
+            tx_packets_per_sec: 4.0,
+            rx_errors_per_sec: 0.0,
+            tx_errors_per_sec: 0.0,
+            rx_dropped_per_sec: 0.0,
+            tx_dropped_per_sec: 0.0,
+            pod_count: 2,
+        };
+        let json = serde_json::to_string(&stats).expect("serialize");
+        assert!(json.contains("\"namespace\":\"media\""));
+    }
+
+    #[test]
+    fn network_topology_data_clone() {
+        let data = NetworkTopologyData {
+            nodes: vec![NetworkNodeData {
+                id: "x".to_string(),
+                name: "X".to_string(),
+                node_type: "app".to_string(),
+                rx_bytes_per_sec: 0.0,
+                tx_bytes_per_sec: 0.0,
+                total_traffic: 0.0,
+                pod_count: 1,
+                color: "#000".to_string(),
+            }],
+            edges: vec![],
+        };
+        let cloned = data.clone();
+        assert_eq!(cloned.nodes.len(), 1);
+    }
+}
+
 /// Discover service connections from Kubernetes
 async fn discover_service_connections(
     k8s: &crate::services::K8sClient,

@@ -760,3 +760,207 @@ pub async fn save_server_config(
 pub async fn get_server_config(db: &DatabaseConnection) -> Result<Option<server_config::Model>> {
     Ok(ServerConfig::find().one(db).await?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // BOOTSTRAP_COMPONENTS constant
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn bootstrap_components_has_four_entries() {
+        assert_eq!(BOOTSTRAP_COMPONENTS.len(), 4);
+    }
+
+    #[test]
+    fn bootstrap_components_contains_postgresql() {
+        let found = BOOTSTRAP_COMPONENTS.iter().any(|(c, _)| *c == "postgresql");
+        assert!(found, "BOOTSTRAP_COMPONENTS must contain postgresql");
+    }
+
+    #[test]
+    fn bootstrap_components_contains_victoriametrics() {
+        let found = BOOTSTRAP_COMPONENTS
+            .iter()
+            .any(|(c, _)| *c == "victoriametrics");
+        assert!(found, "BOOTSTRAP_COMPONENTS must contain victoriametrics");
+    }
+
+    #[test]
+    fn bootstrap_components_contains_victorialogs() {
+        let found = BOOTSTRAP_COMPONENTS
+            .iter()
+            .any(|(c, _)| *c == "victorialogs");
+        assert!(found, "BOOTSTRAP_COMPONENTS must contain victorialogs");
+    }
+
+    #[test]
+    fn bootstrap_components_contains_fluent_bit() {
+        let found = BOOTSTRAP_COMPONENTS.iter().any(|(c, _)| *c == "fluent-bit");
+        assert!(found, "BOOTSTRAP_COMPONENTS must contain fluent-bit");
+    }
+
+    // -------------------------------------------------------------------------
+    // BootstrapEvent serde
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn event_component_started_serializes_correctly() {
+        let event = BootstrapEvent::ComponentStarted {
+            component: "postgresql".to_string(),
+            message: "Starting...".to_string(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"type\":\"component_started\""));
+        assert!(json.contains("\"component\":\"postgresql\""));
+    }
+
+    #[test]
+    fn event_component_progress_serializes_correctly() {
+        let event = BootstrapEvent::ComponentProgress {
+            component: "victoriametrics".to_string(),
+            message: "50%".to_string(),
+            progress: 50,
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"type\":\"component_progress\""));
+        assert!(json.contains("\"progress\":50"));
+    }
+
+    #[test]
+    fn event_component_completed_serializes_correctly() {
+        let event = BootstrapEvent::ComponentCompleted {
+            component: "fluent-bit".to_string(),
+            message: "Done".to_string(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"type\":\"component_completed\""));
+    }
+
+    #[test]
+    fn event_component_failed_serializes_correctly() {
+        let event = BootstrapEvent::ComponentFailed {
+            component: "victorialogs".to_string(),
+            message: "Failed".to_string(),
+            error: "helm error".to_string(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"type\":\"component_failed\""));
+        assert!(json.contains("\"error\":\"helm error\""));
+    }
+
+    #[test]
+    fn event_database_connected_serializes_correctly() {
+        let event = BootstrapEvent::DatabaseConnected {
+            message: "Connected to database".to_string(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"type\":\"database_connected\""));
+    }
+
+    #[test]
+    fn event_bootstrap_complete_serializes_correctly() {
+        let event = BootstrapEvent::BootstrapComplete {
+            message: "All components installed".to_string(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"type\":\"bootstrap_complete\""));
+    }
+
+    #[test]
+    fn bootstrap_events_round_trip() {
+        let events: Vec<BootstrapEvent> = vec![
+            BootstrapEvent::ComponentStarted {
+                component: "a".to_string(),
+                message: "m".to_string(),
+            },
+            BootstrapEvent::ComponentProgress {
+                component: "b".to_string(),
+                message: "m".to_string(),
+                progress: 42,
+            },
+            BootstrapEvent::ComponentCompleted {
+                component: "c".to_string(),
+                message: "m".to_string(),
+            },
+            BootstrapEvent::ComponentFailed {
+                component: "d".to_string(),
+                message: "m".to_string(),
+                error: "e".to_string(),
+            },
+            BootstrapEvent::DatabaseConnected {
+                message: "m".to_string(),
+            },
+            BootstrapEvent::BootstrapComplete {
+                message: "m".to_string(),
+            },
+        ];
+        for event in &events {
+            let json = serde_json::to_string(event).expect("serialize");
+            let back: BootstrapEvent = serde_json::from_str(&json).expect("deserialize");
+            // Re-serialize and compare JSON strings as a proxy for equality
+            let json2 = serde_json::to_string(&back).expect("re-serialize");
+            assert_eq!(json, json2);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // ComponentStatus struct
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn component_status_construction() {
+        let status = ComponentStatus {
+            component: "postgresql".to_string(),
+            display_name: "PostgreSQL".to_string(),
+            status: "healthy".to_string(),
+            message: Some("Running".to_string()),
+            error: None,
+        };
+        assert_eq!(status.component, "postgresql");
+        assert_eq!(status.status, "healthy");
+        assert!(status.error.is_none());
+    }
+
+    #[test]
+    fn component_status_clone() {
+        let status = ComponentStatus {
+            component: "victoriametrics".to_string(),
+            display_name: "VictoriaMetrics".to_string(),
+            status: "failed".to_string(),
+            message: None,
+            error: Some("helm error".to_string()),
+        };
+        let cloned = status.clone();
+        assert_eq!(cloned.component, status.component);
+        assert_eq!(cloned.error, status.error);
+    }
+
+    #[test]
+    fn component_status_serde_round_trip() {
+        let status = ComponentStatus {
+            component: "fluent-bit".to_string(),
+            display_name: "Fluent Bit".to_string(),
+            status: "installing".to_string(),
+            message: Some("Deploying...".to_string()),
+            error: None,
+        };
+        let json = serde_json::to_string(&status).expect("serialize");
+        let back: ComponentStatus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.component, status.component);
+        assert_eq!(back.status, status.status);
+    }
+
+    // -------------------------------------------------------------------------
+    // InMemoryStatus
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn in_memory_status_default() {
+        let s = InMemoryStatus::default();
+        assert!(s.statuses.is_empty());
+        assert!(!s.started);
+    }
+}

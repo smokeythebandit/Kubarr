@@ -665,3 +665,89 @@ fn capitalize_first(s: &str) -> String {
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // is_excluded_namespace
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn excluded_kube_prefix() {
+        assert!(is_excluded_namespace("kube-system"));
+        assert!(is_excluded_namespace("kube-public"));
+        assert!(is_excluded_namespace("kube-node-lease"));
+        assert!(is_excluded_namespace("kube-"));
+    }
+
+    #[test]
+    fn excluded_exact_matches() {
+        assert!(is_excluded_namespace("local-path-storage"));
+        assert!(is_excluded_namespace("default"));
+        assert!(is_excluded_namespace("linux"));
+    }
+
+    #[test]
+    fn excluded_empty_string() {
+        assert!(is_excluded_namespace(""));
+    }
+
+    #[test]
+    fn not_excluded_regular_namespaces() {
+        assert!(!is_excluded_namespace("media"));
+        assert!(!is_excluded_namespace("kubarr"));
+        assert!(!is_excluded_namespace("my-app"));
+        assert!(!is_excluded_namespace("production"));
+        assert!(!is_excluded_namespace("kube")); // "kube" alone, no dash
+    }
+
+    #[test]
+    fn not_excluded_default_substring() {
+        // Must be exact match, not just containing "default"
+        assert!(!is_excluded_namespace("not-default"));
+        assert!(!is_excluded_namespace("default-extra"));
+    }
+
+    // -------------------------------------------------------------------------
+    // capitalize_first
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn capitalize_empty_string() {
+        assert_eq!(capitalize_first(""), "");
+    }
+
+    #[test]
+    fn capitalize_single_lowercase() {
+        assert_eq!(capitalize_first("m"), "M");
+    }
+
+    #[test]
+    fn capitalize_already_uppercase() {
+        assert_eq!(capitalize_first("Media"), "Media");
+    }
+
+    #[test]
+    fn capitalize_lowercase_word() {
+        assert_eq!(capitalize_first("media"), "Media");
+    }
+
+    #[test]
+    fn capitalize_hyphenated_namespace() {
+        // Only first letter is capitalized; rest unchanged
+        assert_eq!(capitalize_first("my-app"), "My-app");
+    }
+
+    #[test]
+    fn capitalize_all_lowercase_preserves_rest() {
+        assert_eq!(capitalize_first("kubarr"), "Kubarr");
+        assert_eq!(capitalize_first("jellyfin"), "Jellyfin");
+    }
+
+    #[test]
+    fn capitalize_unicode_first_char() {
+        assert_eq!(capitalize_first("über"), "Über");
+    }
+}

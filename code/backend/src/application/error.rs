@@ -139,3 +139,212 @@ impl IntoResponse for AppError {
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+
+    /// Helper: convert an AppError into an HTTP response and return (status_code, body_string).
+    async fn into_parts(err: AppError) -> (u16, String) {
+        let response = err.into_response();
+        let status = response.status().as_u16();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        (status, body)
+    }
+
+    // -------------------------------------------------------------------------
+    // Simple string-wrapped variants
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_not_found_returns_404() {
+        let (status, body) = into_parts(AppError::NotFound("thing not found".into())).await;
+        assert_eq!(status, 404);
+        assert!(body.contains("thing not found"));
+    }
+
+    #[tokio::test]
+    async fn test_bad_request_returns_400() {
+        let (status, body) = into_parts(AppError::BadRequest("bad input".into())).await;
+        assert_eq!(status, 400);
+        assert!(body.contains("bad input"));
+    }
+
+    #[tokio::test]
+    async fn test_unauthorized_returns_401() {
+        let (status, body) = into_parts(AppError::Unauthorized("not logged in".into())).await;
+        assert_eq!(status, 401);
+        assert!(body.contains("not logged in"));
+    }
+
+    #[tokio::test]
+    async fn test_forbidden_returns_403() {
+        let (status, body) = into_parts(AppError::Forbidden("access denied".into())).await;
+        assert_eq!(status, 403);
+        assert!(body.contains("access denied"));
+    }
+
+    #[tokio::test]
+    async fn test_conflict_returns_409() {
+        let (status, body) = into_parts(AppError::Conflict("already exists".into())).await;
+        assert_eq!(status, 409);
+        assert!(body.contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn test_internal_returns_500() {
+        let (status, body) = into_parts(AppError::Internal("unexpected failure".into())).await;
+        assert_eq!(status, 500);
+        assert!(body.contains("unexpected failure"));
+    }
+
+    #[tokio::test]
+    async fn test_service_unavailable_returns_503() {
+        let (status, body) =
+            into_parts(AppError::ServiceUnavailable("down for maintenance".into())).await;
+        assert_eq!(status, 503);
+        assert!(body.contains("down for maintenance"));
+    }
+
+    #[tokio::test]
+    async fn test_bad_gateway_returns_502() {
+        let (status, body) = into_parts(AppError::BadGateway("upstream timeout".into())).await;
+        assert_eq!(status, 502);
+        assert!(body.contains("upstream timeout"));
+    }
+
+    // -------------------------------------------------------------------------
+    // #[from] variants – constructed via From/Into
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_database_error_returns_500() {
+        let db_err = sea_orm::DbErr::Custom("db went away".to_string());
+        let (status, body) = into_parts(AppError::Database(db_err)).await;
+        assert_eq!(status, 500);
+        // Body contains the generic message, NOT the raw DB error (for security)
+        assert!(body.contains("Database error"));
+    }
+
+    #[tokio::test]
+    async fn test_json_error_returns_400() {
+        // Trigger a real serde_json::Error
+        let raw_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let (status, body) = into_parts(AppError::Json(raw_err)).await;
+        assert_eq!(status, 400);
+        assert!(body.contains("JSON error"));
+    }
+
+    #[tokio::test]
+    async fn test_yaml_error_returns_400() {
+        // Trigger a real serde_yaml::Error via an invalid YAML value parse
+        let raw_err: serde_yaml::Error =
+            serde_yaml::from_str::<serde_json::Value>(":\ninvalid: [unclosed").unwrap_err();
+        let (status, body) = into_parts(AppError::Yaml(raw_err)).await;
+        assert_eq!(status, 400);
+        assert!(body.contains("YAML error"));
+    }
+
+    #[tokio::test]
+    async fn test_io_error_returns_500() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let (status, body) = into_parts(AppError::Io(io_err)).await;
+        assert_eq!(status, 500);
+        assert!(body.contains("IO error"));
+    }
+
+    #[tokio::test]
+    async fn test_bcrypt_error_returns_500() {
+        // BcryptError::CostNotAllowed is a simple unit-like variant
+        let bcrypt_err = bcrypt::BcryptError::CostNotAllowed(1);
+        let (status, body) = into_parts(AppError::Bcrypt(bcrypt_err)).await;
+        assert_eq!(status, 500);
+        // Generic message is returned (not the raw error)
+        assert!(body.contains("Authentication error"));
+    }
+
+    #[tokio::test]
+    async fn test_jwt_error_returns_401() {
+        // Construct a JWT error from an invalid token
+        let jwt_err =
+            jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::InvalidToken);
+        let (status, body) = into_parts(AppError::Jwt(jwt_err)).await;
+        assert_eq!(status, 401);
+        assert!(body.contains("JWT error"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Response body shape – must be JSON with a "detail" key
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_response_body_is_json_with_detail_key() {
+        let (_, body) = into_parts(AppError::NotFound("widget".into())).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(parsed.get("detail").is_some());
+        assert_eq!(parsed["detail"], "widget");
+    }
+
+    #[tokio::test]
+    async fn test_internal_response_body_detail_matches_message() {
+        let (_, body) = into_parts(AppError::Internal("something broke".into())).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["detail"], "something broke");
+    }
+
+    // -------------------------------------------------------------------------
+    // Display / thiserror formatting (does not require async)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_not_found_display() {
+        let err = AppError::NotFound("widget".into());
+        assert_eq!(format!("{}", err), "Not found: widget");
+    }
+
+    #[test]
+    fn test_bad_request_display() {
+        let err = AppError::BadRequest("missing field".into());
+        assert_eq!(format!("{}", err), "Bad request: missing field");
+    }
+
+    #[test]
+    fn test_unauthorized_display() {
+        let err = AppError::Unauthorized("token expired".into());
+        assert_eq!(format!("{}", err), "Unauthorized: token expired");
+    }
+
+    #[test]
+    fn test_forbidden_display() {
+        let err = AppError::Forbidden("no access".into());
+        assert_eq!(format!("{}", err), "Forbidden: no access");
+    }
+
+    #[test]
+    fn test_conflict_display() {
+        let err = AppError::Conflict("duplicate key".into());
+        assert_eq!(format!("{}", err), "Conflict: duplicate key");
+    }
+
+    #[test]
+    fn test_internal_display() {
+        let err = AppError::Internal("crash".into());
+        assert_eq!(format!("{}", err), "Internal server error: crash");
+    }
+
+    #[test]
+    fn test_service_unavailable_display() {
+        let err = AppError::ServiceUnavailable("offline".into());
+        assert_eq!(format!("{}", err), "Service unavailable: offline");
+    }
+
+    #[test]
+    fn test_bad_gateway_display() {
+        let err = AppError::BadGateway("proxy error".into());
+        assert_eq!(format!("{}", err), "Bad gateway: proxy error");
+    }
+}

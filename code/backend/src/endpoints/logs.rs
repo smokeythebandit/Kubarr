@@ -556,7 +556,7 @@ async fn query_vlogs(
 }
 
 /// Convert Loki LogQL query to VictoriaLogs LogsQL
-fn convert_loki_to_logsql(query: &str) -> String {
+pub fn convert_loki_to_logsql(query: &str) -> String {
     let query = query.trim();
 
     // Handle empty or wildcard queries
