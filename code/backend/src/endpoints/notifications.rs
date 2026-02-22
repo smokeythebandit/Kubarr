@@ -851,3 +851,139 @@ fn get_all_event_types() -> Vec<String> {
         AuditAction::InviteUsed.to_string(),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -------------------------------------------------------------------------
+    // mask_sensitive_config
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn mask_sensitive_config_masks_password() {
+        let config = json!({ "password": "secret123", "host": "localhost" });
+        let masked = mask_sensitive_config(&config);
+        assert_eq!(masked["password"], "********");
+        assert_eq!(masked["host"], "localhost");
+    }
+
+    #[test]
+    fn mask_sensitive_config_masks_token() {
+        let config = json!({ "api_token": "tok_abc", "port": 5432 });
+        let masked = mask_sensitive_config(&config);
+        assert_eq!(masked["api_token"], "********");
+        assert_eq!(masked["port"], 5432);
+    }
+
+    #[test]
+    fn mask_sensitive_config_masks_secret() {
+        let config = json!({ "client_secret": "s3cr3t", "name": "app" });
+        let masked = mask_sensitive_config(&config);
+        assert_eq!(masked["client_secret"], "********");
+        assert_eq!(masked["name"], "app");
+    }
+
+    #[test]
+    fn mask_sensitive_config_masks_api_key() {
+        let config = json!({ "api_key": "key-xyz", "region": "us-east-1" });
+        let masked = mask_sensitive_config(&config);
+        assert_eq!(masked["api_key"], "********");
+        assert_eq!(masked["region"], "us-east-1");
+    }
+
+    #[test]
+    fn mask_sensitive_config_does_not_mask_empty_string() {
+        let config = json!({ "password": "" });
+        let masked = mask_sensitive_config(&config);
+        // empty string is not masked (guarded by !value.as_str().unwrap_or("").is_empty())
+        assert_eq!(masked["password"], "");
+    }
+
+    #[test]
+    fn mask_sensitive_config_non_object_passthrough() {
+        let config = json!([1, 2, 3]);
+        let masked = mask_sensitive_config(&config);
+        assert_eq!(masked, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn mask_sensitive_config_non_string_sensitive_field_unchanged() {
+        // numeric value under sensitive key — should NOT be masked (only strings)
+        let config = json!({ "api_key": 12345 });
+        let masked = mask_sensitive_config(&config);
+        assert_eq!(masked["api_key"], 12345);
+    }
+
+    // -------------------------------------------------------------------------
+    // mask_destination
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn mask_destination_email_normal() {
+        assert_eq!(mask_destination("alice@example.com"), "al***@example.com");
+    }
+
+    #[test]
+    fn mask_destination_email_short_local() {
+        // local part <= 2 chars → "***@***"
+        assert_eq!(mask_destination("ab@example.com"), "***@***");
+        assert_eq!(mask_destination("a@b.com"), "***@***");
+    }
+
+    #[test]
+    fn mask_destination_phone_normal() {
+        // starts with '+', len > 4 → "+12***90"
+        assert_eq!(mask_destination("+1234567890"), "+12***90");
+    }
+
+    #[test]
+    fn mask_destination_phone_short() {
+        // starts with '+', len <= 4 → "+***"
+        assert_eq!(mask_destination("+12"), "+***");
+    }
+
+    #[test]
+    fn mask_destination_chat_id_long() {
+        // len > 5 → first 3 + *** + last 2
+        assert_eq!(mask_destination("chat1234"), "cha***34");
+    }
+
+    #[test]
+    fn mask_destination_chat_id_short() {
+        // len <= 5 → "***"
+        assert_eq!(mask_destination("chat"), "***");
+        assert_eq!(mask_destination("abc"), "***");
+    }
+
+    // -------------------------------------------------------------------------
+    // get_all_event_types
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn get_all_event_types_returns_23_entries() {
+        let types = get_all_event_types();
+        assert_eq!(types.len(), 23);
+    }
+
+    #[test]
+    fn get_all_event_types_contains_expected_values() {
+        let types = get_all_event_types();
+        assert!(types.iter().any(|t| t == "login"));
+        assert!(types.iter().any(|t| t == "logout"));
+        assert!(types.iter().any(|t| t == "login_failed"));
+        assert!(types.iter().any(|t| t == "user_created"));
+        assert!(types.iter().any(|t| t == "app_installed"));
+        assert!(types.iter().any(|t| t == "invite_used"));
+    }
+
+    #[test]
+    fn get_all_event_types_no_duplicates() {
+        let types = get_all_event_types();
+        let mut deduped = types.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(types.len(), deduped.len(), "duplicate event types found");
+    }
+}

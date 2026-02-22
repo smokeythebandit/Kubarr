@@ -336,3 +336,117 @@ impl<'a> DeploymentManager<'a> {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // DeploymentRequest deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn deployment_request_deserializes_minimal() {
+        let json = r#"{"app_name": "radarr"}"#;
+        let req: DeploymentRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.app_name, "radarr");
+        assert!(req.custom_config.is_empty());
+    }
+
+    #[test]
+    fn deployment_request_deserializes_with_custom_config() {
+        let json = r#"{
+            "app_name": "sonarr",
+            "custom_config": {
+                "image.tag": "latest",
+                "replicaCount": "2"
+            }
+        }"#;
+        let req: DeploymentRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.app_name, "sonarr");
+        assert_eq!(
+            req.custom_config.get("image.tag").map(|s| s.as_str()),
+            Some("latest")
+        );
+        assert_eq!(
+            req.custom_config.get("replicaCount").map(|s| s.as_str()),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn deployment_request_custom_config_defaults_empty() {
+        // The #[serde(default)] on custom_config means it defaults to empty map
+        let json = r#"{"app_name": "prowlarr"}"#;
+        let req: DeploymentRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.custom_config.len(), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // DeploymentStatus serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn deployment_status_serializes() {
+        let now = Utc::now();
+        let status = DeploymentStatus {
+            app_name: "radarr".to_string(),
+            namespace: "radarr".to_string(),
+            status: "installing".to_string(),
+            message: "Deploying Radarr".to_string(),
+            timestamp: now,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["app_name"], "radarr");
+        assert_eq!(json["namespace"], "radarr");
+        assert_eq!(json["status"], "installing");
+        assert_eq!(json["message"], "Deploying Radarr");
+        // timestamp should be a string (RFC 3339)
+        assert!(json["timestamp"].is_string());
+    }
+
+    #[test]
+    fn deployment_status_serializes_removing_status() {
+        let now = Utc::now();
+        let status = DeploymentStatus {
+            app_name: "sonarr".to_string(),
+            namespace: "sonarr".to_string(),
+            status: "removing".to_string(),
+            message: "Removing Sonarr".to_string(),
+            timestamp: now,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["status"], "removing");
+        assert_eq!(json["app_name"], "sonarr");
+    }
+
+    #[test]
+    fn deployment_request_clone() {
+        let req = DeploymentRequest {
+            app_name: "bazarr".to_string(),
+            custom_config: {
+                let mut m = HashMap::new();
+                m.insert("key".to_string(), "value".to_string());
+                m
+            },
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.app_name, req.app_name);
+        assert_eq!(cloned.custom_config, req.custom_config);
+    }
+
+    #[test]
+    fn deployment_status_clone() {
+        let now = Utc::now();
+        let status = DeploymentStatus {
+            app_name: "lidarr".to_string(),
+            namespace: "lidarr".to_string(),
+            status: "healthy".to_string(),
+            message: "All good".to_string(),
+            timestamp: now,
+        };
+        let cloned = status.clone();
+        assert_eq!(cloned.app_name, status.app_name);
+        assert_eq!(cloned.status, status.status);
+    }
+}

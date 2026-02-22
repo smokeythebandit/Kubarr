@@ -1499,3 +1499,60 @@ pub fn get_supported_providers() -> Vec<SupportedProvider> {
         },
     ]
 }
+
+#[cfg(test)]
+mod tests_supported_providers {
+    use super::*;
+
+    #[test]
+    fn get_supported_providers_returns_nonempty_list() {
+        let providers = get_supported_providers();
+        assert!(!providers.is_empty());
+    }
+
+    #[test]
+    fn get_supported_providers_contains_custom() {
+        let providers = get_supported_providers();
+        assert!(providers.iter().any(|p| p.id == "custom"));
+    }
+
+    #[test]
+    fn get_supported_providers_all_have_vpn_types() {
+        let providers = get_supported_providers();
+        for p in &providers {
+            assert!(
+                !p.vpn_types.is_empty(),
+                "provider {} has no vpn_types",
+                p.id
+            );
+        }
+    }
+
+    #[test]
+    fn get_supported_providers_wireguard_and_openvpn_valid_types() {
+        let providers = get_supported_providers();
+        for p in &providers {
+            for vt in &p.vpn_types {
+                assert!(
+                    *vt == "wireguard" || *vt == "openvpn",
+                    "unexpected vpn_type '{}' for provider '{}'",
+                    vt,
+                    p.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_true_returns_true() {
+        assert!(default_true());
+    }
+
+    #[test]
+    fn default_firewall_subnets_returns_private_ranges() {
+        let s = default_firewall_subnets();
+        assert!(s.contains("10.0.0.0/8"));
+        assert!(s.contains("172.16.0.0/12"));
+        assert!(s.contains("192.168.0.0/16"));
+    }
+}

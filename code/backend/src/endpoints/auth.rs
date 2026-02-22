@@ -790,3 +790,150 @@ async fn list_accounts(
 
     Ok(Json(accounts))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // create_session_cookie_for_slot
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn session_cookie_for_slot_format() {
+        let hv = create_session_cookie_for_slot(0, "tok123", false);
+        let s = hv.to_str().unwrap();
+        assert!(s.contains("kubarr_session_0=tok123"));
+        assert!(s.contains("HttpOnly"));
+        assert!(s.contains("Max-Age=604800"));
+        assert!(
+            !s.contains("Secure"),
+            "must NOT contain Secure when secure=false"
+        );
+    }
+
+    #[test]
+    fn session_cookie_for_slot_secure_flag() {
+        let hv = create_session_cookie_for_slot(2, "abc", true);
+        let s = hv.to_str().unwrap();
+        assert!(s.contains("Secure"));
+    }
+
+    #[test]
+    fn session_cookie_for_slot_different_slots() {
+        let hv1 = create_session_cookie_for_slot(1, "t1", false);
+        let hv3 = create_session_cookie_for_slot(3, "t3", false);
+        assert!(hv1.to_str().unwrap().contains("kubarr_session_1=t1"));
+        assert!(hv3.to_str().unwrap().contains("kubarr_session_3=t3"));
+    }
+
+    // -------------------------------------------------------------------------
+    // create_active_session_cookie
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn active_session_cookie_format() {
+        let hv = create_active_session_cookie(0, false);
+        let s = hv.to_str().unwrap();
+        assert!(s.contains("=0"));
+        assert!(s.contains("Max-Age=604800"));
+        assert!(
+            !s.contains("HttpOnly"),
+            "active session cookie is NOT HttpOnly"
+        );
+        assert!(!s.contains("Secure"));
+    }
+
+    #[test]
+    fn active_session_cookie_secure() {
+        let hv = create_active_session_cookie(1, true);
+        assert!(hv.to_str().unwrap().contains("Secure"));
+    }
+
+    // -------------------------------------------------------------------------
+    // create_session_cookie (legacy)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn legacy_session_cookie_format() {
+        let hv = create_session_cookie("mytoken", false);
+        let s = hv.to_str().unwrap();
+        assert!(s.contains("kubarr_session=mytoken"));
+        assert!(s.contains("HttpOnly"));
+    }
+
+    #[test]
+    fn legacy_session_cookie_secure() {
+        let hv = create_session_cookie("tok", true);
+        assert!(hv.to_str().unwrap().contains("Secure"));
+    }
+
+    // -------------------------------------------------------------------------
+    // clear_session_cookie_for_slot
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn clear_slot_cookie_sets_max_age_zero() {
+        let hv = clear_session_cookie_for_slot(0);
+        let s = hv.to_str().unwrap();
+        assert!(s.contains("Max-Age=0"));
+        assert!(s.contains("kubarr_session_0="));
+    }
+
+    // -------------------------------------------------------------------------
+    // clear_session_cookie (legacy)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn clear_legacy_cookie_sets_max_age_zero() {
+        let hv = clear_session_cookie();
+        let s = hv.to_str().unwrap();
+        assert!(s.contains("Max-Age=0"));
+        assert!(s.contains("kubarr_session="));
+    }
+
+    // -------------------------------------------------------------------------
+    // find_available_slot
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn find_slot_empty_returns_zero() {
+        let result = find_available_slot(&[], 42);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn find_slot_user_already_has_slot() {
+        let existing = vec![(1, 42_i64, "alice".to_string())];
+        // user 42 already has slot 1 → returns 1
+        assert_eq!(find_available_slot(&existing, 42), 1);
+    }
+
+    #[test]
+    fn find_slot_finds_first_unused() {
+        // slot 0 is used by user 10
+        let existing = vec![(0, 10_i64, "bob".to_string())];
+        // user 99 gets slot 1 (first unused)
+        assert_eq!(find_available_slot(&existing, 99), 1);
+    }
+
+    #[test]
+    fn find_slot_multiple_used_finds_next() {
+        let existing = vec![
+            (0, 1_i64, "u0".to_string()),
+            (1, 2_i64, "u1".to_string()),
+            (2, 3_i64, "u2".to_string()),
+        ];
+        // slots 0,1,2 used → slot 3 is next
+        assert_eq!(find_available_slot(&existing, 99), 3);
+    }
+
+    #[test]
+    fn find_slot_all_used_returns_zero() {
+        let existing: Vec<(usize, i64, String)> = (0..MAX_SESSIONS)
+            .map(|i| (i, i as i64 + 100, format!("u{}", i)))
+            .collect();
+        // All slots used → falls back to slot 0
+        assert_eq!(find_available_slot(&existing, 999), 0);
+    }
+}

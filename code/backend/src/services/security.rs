@@ -450,3 +450,150 @@ pub fn get_jwks() -> Result<serde_json::Value> {
         }]
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // generate_random_string
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn random_string_hex_length() {
+        // generate_random_string(n) returns hex of n random bytes → 2n hex chars
+        let s = generate_random_string(16);
+        assert_eq!(s.len(), 32);
+        assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn random_string_zero_length() {
+        let s = generate_random_string(0);
+        assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn random_string_is_random() {
+        let a = generate_random_string(16);
+        let b = generate_random_string(16);
+        // Extremely unlikely to be identical
+        assert_ne!(a, b);
+    }
+
+    // -------------------------------------------------------------------------
+    // generate_secure_password
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn secure_password_length() {
+        let p = generate_secure_password(20);
+        assert_eq!(p.len(), 20);
+    }
+
+    #[test]
+    fn secure_password_charset() {
+        let p = generate_secure_password(100);
+        let valid: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()";
+        assert!(p.bytes().all(|b| valid.contains(&b)));
+    }
+
+    // -------------------------------------------------------------------------
+    // generate_recovery_codes
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn recovery_codes_count() {
+        let codes = generate_recovery_codes();
+        assert_eq!(codes.len(), 8);
+    }
+
+    #[test]
+    fn recovery_codes_length_and_charset() {
+        let codes = generate_recovery_codes();
+        for code in &codes {
+            assert_eq!(code.len(), 10);
+            assert!(
+                code.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+                "unexpected char in recovery code: {}",
+                code
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // hash_recovery_code / verify_recovery_code
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn hash_and_verify_recovery_code() {
+        let code = "ABCDEF1234";
+        let hash = hash_recovery_code(code).expect("hash ok");
+        assert!(verify_recovery_code(code, &hash));
+    }
+
+    #[test]
+    fn verify_recovery_code_wrong_code() {
+        let code = "ABCDEF1234";
+        let hash = hash_recovery_code(code).expect("hash ok");
+        assert!(!verify_recovery_code("WRONG12345", &hash));
+    }
+
+    // -------------------------------------------------------------------------
+    // hash_password / verify_password
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn hash_and_verify_password() {
+        let pw = "hunter2";
+        let hash = hash_password(pw).expect("hash ok");
+        assert!(verify_password(pw, &hash));
+    }
+
+    #[test]
+    fn verify_password_wrong_password() {
+        let hash = hash_password("correct").expect("hash ok");
+        assert!(!verify_password("wrong", &hash));
+    }
+
+    // -------------------------------------------------------------------------
+    // generate_2fa_challenge_token
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn challenge_token_is_hex_64_chars() {
+        // generate_2fa_challenge_token calls generate_random_string(32) → 64 hex chars
+        let t = generate_2fa_challenge_token();
+        assert_eq!(t.len(), 64);
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // -------------------------------------------------------------------------
+    // generate_totp_secret
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn totp_secret_is_nonempty_base32() {
+        let s = generate_totp_secret();
+        assert!(!s.is_empty());
+        // Base32 alphabet: A-Z and 2-7
+        assert!(s
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)));
+    }
+
+    // -------------------------------------------------------------------------
+    // get_totp_provisioning_uri
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn totp_provisioning_uri_format() {
+        let secret = generate_totp_secret();
+        let uri = get_totp_provisioning_uri(&secret, "testuser@example.com")
+            .expect("provisioning URI ok");
+        assert!(uri.starts_with("otpauth://totp/"));
+        assert!(uri.contains("Kubarr"));
+    }
+}

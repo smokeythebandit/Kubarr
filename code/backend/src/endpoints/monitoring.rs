@@ -1099,3 +1099,267 @@ async fn check_metrics_available(
         "message": if available { "Metrics server is available" } else { "Metrics server not found" }
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // TimeSeriesPoint serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn time_series_point_serializes() {
+        let point = TimeSeriesPoint {
+            timestamp: 1708560000.0,
+            value: 42.5,
+        };
+        let json = serde_json::to_value(&point).unwrap();
+        assert_eq!(json["timestamp"], 1708560000.0_f64);
+        assert_eq!(json["value"], 42.5_f64);
+    }
+
+    #[test]
+    fn time_series_point_zero_values() {
+        let point = TimeSeriesPoint {
+            timestamp: 0.0,
+            value: 0.0,
+        };
+        let json = serde_json::to_value(&point).unwrap();
+        assert_eq!(json["timestamp"], 0.0_f64);
+        assert_eq!(json["value"], 0.0_f64);
+    }
+
+    // -------------------------------------------------------------------------
+    // AppMetrics serialization (has skip_serializing_if on optional fields)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn app_metrics_serializes_with_optional_percentages() {
+        let m = AppMetrics {
+            app_name: "radarr".to_string(),
+            namespace: "radarr".to_string(),
+            cpu_usage_cores: 0.125,
+            memory_usage_bytes: 134_217_728,
+            memory_usage_mb: 128.0,
+            cpu_usage_percent: Some(12.5),
+            memory_usage_percent: Some(6.25),
+            network_receive_bytes_per_sec: 1024.0,
+            network_transmit_bytes_per_sec: 512.0,
+        };
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["app_name"], "radarr");
+        assert_eq!(json["namespace"], "radarr");
+        assert_eq!(json["cpu_usage_cores"], 0.125_f64);
+        assert_eq!(json["memory_usage_bytes"], 134_217_728_i64);
+        assert_eq!(json["memory_usage_mb"], 128.0_f64);
+        assert_eq!(json["cpu_usage_percent"], 12.5_f64);
+        assert_eq!(json["memory_usage_percent"], 6.25_f64);
+        assert_eq!(json["network_receive_bytes_per_sec"], 1024.0_f64);
+        assert_eq!(json["network_transmit_bytes_per_sec"], 512.0_f64);
+    }
+
+    #[test]
+    fn app_metrics_omits_none_optional_percentages() {
+        let m = AppMetrics {
+            app_name: "sonarr".to_string(),
+            namespace: "sonarr".to_string(),
+            cpu_usage_cores: 0.05,
+            memory_usage_bytes: 67_108_864,
+            memory_usage_mb: 64.0,
+            cpu_usage_percent: None,
+            memory_usage_percent: None,
+            network_receive_bytes_per_sec: 0.0,
+            network_transmit_bytes_per_sec: 0.0,
+        };
+        let json = serde_json::to_value(&m).unwrap();
+        // skip_serializing_if = "Option::is_none" — keys must be absent
+        assert!(json.get("cpu_usage_percent").is_none());
+        assert!(json.get("memory_usage_percent").is_none());
+        assert_eq!(json["app_name"], "sonarr");
+    }
+
+    // -------------------------------------------------------------------------
+    // ClusterMetrics serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn cluster_metrics_serializes() {
+        let cm = ClusterMetrics {
+            total_cpu_cores: 4.0,
+            total_memory_bytes: 8_589_934_592,
+            used_cpu_cores: 1.5,
+            used_memory_bytes: 2_147_483_648,
+            cpu_usage_percent: 37.5,
+            memory_usage_percent: 25.0,
+            container_count: 10,
+            pod_count: 5,
+            network_receive_bytes_per_sec: 2048.0,
+            network_transmit_bytes_per_sec: 1024.0,
+            total_storage_bytes: 107_374_182_400,
+            used_storage_bytes: 21_474_836_480,
+            storage_usage_percent: 20.0,
+        };
+        let json = serde_json::to_value(&cm).unwrap();
+        assert_eq!(json["total_cpu_cores"], 4.0_f64);
+        assert_eq!(json["total_memory_bytes"], 8_589_934_592_i64);
+        assert_eq!(json["used_cpu_cores"], 1.5_f64);
+        assert_eq!(json["cpu_usage_percent"], 37.5_f64);
+        assert_eq!(json["memory_usage_percent"], 25.0_f64);
+        assert_eq!(json["container_count"], 10_i32);
+        assert_eq!(json["pod_count"], 5_i32);
+        assert_eq!(json["storage_usage_percent"], 20.0_f64);
+    }
+
+    // -------------------------------------------------------------------------
+    // PodQuery deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn pod_query_deserializes_full() {
+        let json = r#"{"namespace": "media", "app": "radarr"}"#;
+        let q: PodQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.namespace.as_deref(), Some("media"));
+        assert_eq!(q.app.as_deref(), Some("radarr"));
+    }
+
+    #[test]
+    fn pod_query_deserializes_empty() {
+        let json = r#"{}"#;
+        let q: PodQuery = serde_json::from_str(json).unwrap();
+        assert!(q.namespace.is_none());
+        assert!(q.app.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // AppDetailQuery deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn app_detail_query_deserializes_with_duration() {
+        let json = r#"{"duration": "3h"}"#;
+        let q: AppDetailQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.duration.as_deref(), Some("3h"));
+    }
+
+    #[test]
+    fn app_detail_query_deserializes_empty() {
+        let json = r#"{}"#;
+        let q: AppDetailQuery = serde_json::from_str(json).unwrap();
+        assert!(q.duration.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // NetworkHistoryQuery deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn network_history_query_deserializes_with_duration() {
+        let json = r#"{"duration": "1h"}"#;
+        let q: NetworkHistoryQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.duration.as_deref(), Some("1h"));
+    }
+
+    #[test]
+    fn network_history_query_deserializes_empty() {
+        let json = r#"{}"#;
+        let q: NetworkHistoryQuery = serde_json::from_str(json).unwrap();
+        assert!(q.duration.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // ClusterNetworkHistory serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn cluster_network_history_serializes() {
+        let history = ClusterNetworkHistory {
+            combined_series: vec![TimeSeriesPoint {
+                timestamp: 1708560000.0,
+                value: 1536.0,
+            }],
+            rx_series: vec![TimeSeriesPoint {
+                timestamp: 1708560000.0,
+                value: 1024.0,
+            }],
+            tx_series: vec![TimeSeriesPoint {
+                timestamp: 1708560000.0,
+                value: 512.0,
+            }],
+        };
+        let json = serde_json::to_value(&history).unwrap();
+        assert!(json["combined_series"].is_array());
+        assert!(json["rx_series"].is_array());
+        assert!(json["tx_series"].is_array());
+        assert_eq!(json["combined_series"][0]["value"], 1536.0_f64);
+        assert_eq!(json["rx_series"][0]["value"], 1024.0_f64);
+        assert_eq!(json["tx_series"][0]["value"], 512.0_f64);
+    }
+
+    #[test]
+    fn cluster_network_history_empty_series_serializes() {
+        let history = ClusterNetworkHistory {
+            combined_series: vec![],
+            rx_series: vec![],
+            tx_series: vec![],
+        };
+        let json = serde_json::to_value(&history).unwrap();
+        assert_eq!(json["combined_series"].as_array().unwrap().len(), 0);
+        assert_eq!(json["rx_series"].as_array().unwrap().len(), 0);
+        assert_eq!(json["tx_series"].as_array().unwrap().len(), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // ClusterMetricsHistory serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn cluster_metrics_history_serializes() {
+        let history = ClusterMetricsHistory {
+            cpu_series: vec![TimeSeriesPoint {
+                timestamp: 1708560000.0,
+                value: 37.5,
+            }],
+            memory_series: vec![TimeSeriesPoint {
+                timestamp: 1708560000.0,
+                value: 25.0,
+            }],
+            storage_series: vec![],
+            pod_series: vec![],
+            container_series: vec![],
+        };
+        let json = serde_json::to_value(&history).unwrap();
+        assert!(json["cpu_series"].is_array());
+        assert!(json["memory_series"].is_array());
+        assert!(json["storage_series"].is_array());
+        assert_eq!(json["cpu_series"][0]["value"], 37.5_f64);
+        assert_eq!(json["memory_series"][0]["value"], 25.0_f64);
+    }
+
+    // -------------------------------------------------------------------------
+    // AppHistoricalMetrics serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn app_historical_metrics_serializes() {
+        let h = AppHistoricalMetrics {
+            app_name: "radarr".to_string(),
+            namespace: "radarr".to_string(),
+            cpu_series: vec![],
+            memory_series: vec![],
+            network_rx_series: vec![],
+            network_tx_series: vec![],
+            cpu_usage_cores: 0.125,
+            memory_usage_bytes: 134_217_728,
+            memory_usage_mb: 128.0,
+            network_receive_bytes_per_sec: 1024.0,
+            network_transmit_bytes_per_sec: 512.0,
+        };
+        let json = serde_json::to_value(&h).unwrap();
+        assert_eq!(json["app_name"], "radarr");
+        assert_eq!(json["namespace"], "radarr");
+        assert_eq!(json["cpu_usage_cores"], 0.125_f64);
+        assert_eq!(json["memory_usage_mb"], 128.0_f64);
+        assert!(json["cpu_series"].is_array());
+    }
+}

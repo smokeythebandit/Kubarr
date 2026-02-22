@@ -764,3 +764,195 @@ async fn link_account_start(
     let redirect_url = format!("/api/oauth/{}/login?link={}", provider, auth.user_id());
     Ok(Redirect::to(&redirect_url).into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // ProviderResponse serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn provider_response_serializes_with_secret() {
+        let resp = ProviderResponse {
+            id: "google".to_string(),
+            name: "Google".to_string(),
+            enabled: true,
+            client_id: Some("my-client-id".to_string()),
+            has_secret: true,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["id"], "google");
+        assert_eq!(json["name"], "Google");
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["client_id"], "my-client-id");
+        assert_eq!(json["has_secret"], true);
+    }
+
+    #[test]
+    fn provider_response_serializes_without_client_id() {
+        let resp = ProviderResponse {
+            id: "microsoft".to_string(),
+            name: "Microsoft".to_string(),
+            enabled: false,
+            client_id: None,
+            has_secret: false,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["id"], "microsoft");
+        assert_eq!(json["enabled"], false);
+        assert!(json["client_id"].is_null());
+        assert_eq!(json["has_secret"], false);
+    }
+
+    // -------------------------------------------------------------------------
+    // AvailableProvider serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn available_provider_serializes() {
+        let provider = AvailableProvider {
+            id: "google".to_string(),
+            name: "Google".to_string(),
+        };
+        let json = serde_json::to_value(&provider).unwrap();
+        assert_eq!(json["id"], "google");
+        assert_eq!(json["name"], "Google");
+    }
+
+    #[test]
+    fn available_provider_list_serializes() {
+        let providers = vec![
+            AvailableProvider {
+                id: "google".to_string(),
+                name: "Google".to_string(),
+            },
+            AvailableProvider {
+                id: "microsoft".to_string(),
+                name: "Microsoft".to_string(),
+            },
+        ];
+        let json = serde_json::to_value(&providers).unwrap();
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(json[0]["id"], "google");
+        assert_eq!(json[1]["id"], "microsoft");
+    }
+
+    // -------------------------------------------------------------------------
+    // UpdateProviderRequest deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn update_provider_request_deserializes_full() {
+        let json = r#"{"enabled": true, "client_id": "abc123", "client_secret": "secret456"}"#;
+        let req: UpdateProviderRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.enabled, Some(true));
+        assert_eq!(req.client_id.as_deref(), Some("abc123"));
+        assert_eq!(req.client_secret.as_deref(), Some("secret456"));
+    }
+
+    #[test]
+    fn update_provider_request_deserializes_partial() {
+        let json = r#"{"enabled": false}"#;
+        let req: UpdateProviderRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.enabled, Some(false));
+        assert!(req.client_id.is_none());
+        assert!(req.client_secret.is_none());
+    }
+
+    #[test]
+    fn update_provider_request_deserializes_empty() {
+        let json = r#"{}"#;
+        let req: UpdateProviderRequest = serde_json::from_str(json).unwrap();
+        assert!(req.enabled.is_none());
+        assert!(req.client_id.is_none());
+        assert!(req.client_secret.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // OAuthCallbackQuery deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn oauth_callback_query_deserializes_success() {
+        let json = r#"{"code": "auth-code-123", "state": "login:abcdef"}"#;
+        let q: OAuthCallbackQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.code.as_deref(), Some("auth-code-123"));
+        assert_eq!(q.state.as_deref(), Some("login:abcdef"));
+        assert!(q.error.is_none());
+        assert!(q.error_description.is_none());
+    }
+
+    #[test]
+    fn oauth_callback_query_deserializes_error() {
+        let json = r#"{"error": "access_denied", "error_description": "User denied access"}"#;
+        let q: OAuthCallbackQuery = serde_json::from_str(json).unwrap();
+        assert!(q.code.is_none());
+        assert!(q.state.is_none());
+        assert_eq!(q.error.as_deref(), Some("access_denied"));
+        assert_eq!(q.error_description.as_deref(), Some("User denied access"));
+    }
+
+    #[test]
+    fn oauth_callback_query_deserializes_all_none() {
+        let json = r#"{}"#;
+        let q: OAuthCallbackQuery = serde_json::from_str(json).unwrap();
+        assert!(q.code.is_none());
+        assert!(q.state.is_none());
+        assert!(q.error.is_none());
+        assert!(q.error_description.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // LinkedAccountResponse serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn linked_account_response_serializes_with_optional_fields() {
+        let resp = LinkedAccountResponse {
+            provider: "google".to_string(),
+            email: Some("user@example.com".to_string()),
+            display_name: Some("Jane Doe".to_string()),
+            linked_at: "2026-02-22T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["provider"], "google");
+        assert_eq!(json["email"], "user@example.com");
+        assert_eq!(json["display_name"], "Jane Doe");
+        assert_eq!(json["linked_at"], "2026-02-22T00:00:00Z");
+    }
+
+    #[test]
+    fn linked_account_response_serializes_without_optional_fields() {
+        let resp = LinkedAccountResponse {
+            provider: "microsoft".to_string(),
+            email: None,
+            display_name: None,
+            linked_at: "2026-02-22T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["provider"], "microsoft");
+        assert!(json["email"].is_null());
+        assert!(json["display_name"].is_null());
+    }
+
+    // -------------------------------------------------------------------------
+    // OAuthLoginQuery deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn oauth_login_query_deserializes_with_link() {
+        let json = r#"{"link": "42"}"#;
+        let q: OAuthLoginQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.link.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn oauth_login_query_deserializes_without_link() {
+        let json = r#"{}"#;
+        let q: OAuthLoginQuery = serde_json::from_str(json).unwrap();
+        assert!(q.link.is_none());
+    }
+}

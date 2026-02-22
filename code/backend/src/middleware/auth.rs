@@ -349,4 +349,45 @@ mod tests {
         assert_eq!(ACTIVE_SESSION_COOKIE, "kubarr_active");
         assert!(MAX_SESSIONS > 0);
     }
+
+    fn request_with_cookie(cookie: &str) -> Request {
+        Request::builder()
+            .header(header::COOKIE, cookie)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn extract_token_no_cookie() {
+        let req = Request::builder().body(axum::body::Body::empty()).unwrap();
+        assert_eq!(extract_token(&req), None);
+    }
+
+    #[test]
+    fn extract_token_legacy_cookie() {
+        let req = request_with_cookie("kubarr_session=legacytok");
+        assert_eq!(extract_token(&req), Some("legacytok".to_string()));
+    }
+
+    #[test]
+    fn extract_token_indexed_slot_zero_no_active() {
+        // kubarr_session_0 present, no active cookie → falls back to slot 0
+        let req = request_with_cookie("kubarr_session_0=tok0");
+        assert_eq!(extract_token(&req), Some("tok0".to_string()));
+    }
+
+    #[test]
+    fn extract_token_indexed_slot_with_active() {
+        // slots 0 and 1 present, active = 1 → returns slot 1
+        let req =
+            request_with_cookie("kubarr_session_0=tok0; kubarr_session_1=tok1; kubarr_active=1");
+        assert_eq!(extract_token(&req), Some("tok1".to_string()));
+    }
+
+    #[test]
+    fn extract_token_active_slot_not_present_falls_back_to_first() {
+        // active=2 but only slot 0 is present → falls back to first available
+        let req = request_with_cookie("kubarr_session_0=tok0; kubarr_active=2");
+        assert_eq!(extract_token(&req), Some("tok0".to_string()));
+    }
 }
