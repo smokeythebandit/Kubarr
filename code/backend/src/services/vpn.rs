@@ -1556,3 +1556,36 @@ mod tests_supported_providers {
         assert!(s.contains("192.168.0.0/16"));
     }
 }
+
+#[cfg(test)]
+mod tests_deployment_structs {
+    use super::*;
+
+    #[test]
+    fn vpn_deployment_config_ser() {
+        let c = VpnDeploymentConfig {
+            enabled: true,
+            secret_name: "my-secret".to_string(),
+            kill_switch: true,
+            firewall_outbound_subnets: "10.0.0.0/8".to_string(),
+            port_forwarding: false,
+        };
+        let json = serde_json::to_string(&c).expect("ser");
+        assert!(json.contains("\"enabled\":true"));
+        assert!(json.contains("\"secret_name\":\"my-secret\""));
+    }
+
+    #[test]
+    fn vpn_deployment_config_clone() {
+        let c = VpnDeploymentConfig {
+            enabled: false,
+            secret_name: "s".to_string(),
+            kill_switch: false,
+            firewall_outbound_subnets: "0.0.0.0/0".to_string(),
+            port_forwarding: true,
+        };
+        let c2 = c.clone();
+        assert_eq!(c.enabled, c2.enabled);
+        assert_eq!(c.secret_name, c2.secret_name);
+    }
+}
