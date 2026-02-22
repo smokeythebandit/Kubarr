@@ -1630,3 +1630,317 @@ async fn test_viewer_cannot_approve_user() {
         status
     );
 }
+
+// ============================================================================
+// PATCH /api/users/me — empty username/email, email taken (lines 323,347,359)
+// ============================================================================
+
+#[tokio::test]
+async fn test_update_own_profile_empty_username_returns_400() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "emptyusername1",
+        "emptyusername1@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "emptyusername1",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Whitespace-only username trims to empty string
+    let patch_body = serde_json::json!({ "username": "   " }).to_string();
+    let (status, _body) =
+        authenticated_patch(create_router(state), "/api/users/me", &cookie, &patch_body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Whitespace-only username must return 400"
+    );
+}
+
+#[tokio::test]
+async fn test_update_own_profile_empty_email_returns_400() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "emptyemail1",
+        "emptyemail1@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(create_router(state.clone()), "emptyemail1", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Whitespace-only email trims to empty string
+    let patch_body = serde_json::json!({ "email": "   " }).to_string();
+    let (status, _body) =
+        authenticated_patch(create_router(state), "/api/users/me", &cookie, &patch_body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Whitespace-only email must return 400"
+    );
+}
+
+#[tokio::test]
+async fn test_update_own_profile_email_already_taken_returns_400() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "emailtaken_a",
+        "emailtaken_a@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    create_test_user_with_role(
+        &db,
+        "emailtaken_b",
+        "emailtaken_b@example.com",
+        "password123",
+        "viewer",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    // Log in as user A and try to steal user B's email
+    let (_, cookie) = do_login(create_router(state.clone()), "emailtaken_a", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    let patch_body = serde_json::json!({ "email": "emailtaken_b@example.com" }).to_string();
+    let (status, _body) =
+        authenticated_patch(create_router(state), "/api/users/me", &cookie, &patch_body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Attempting to take another user's email must return 400"
+    );
+}
+
+// ============================================================================
+// PATCH /api/users/me/preferences — update twice (lines 504-508)
+// ============================================================================
+
+#[tokio::test]
+async fn test_update_preferences_twice_exercises_update_path() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "prefsupdatetwice",
+        "prefsupdatetwice@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "prefsupdatetwice",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // First PATCH: inserts new preferences row (theme = dark)
+    let patch1 = serde_json::json!({ "theme": "dark" }).to_string();
+    let (status1, _) = authenticated_patch(
+        create_router(state.clone()),
+        "/api/users/me/preferences",
+        &cookie,
+        &patch1,
+    )
+    .await;
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "First preference update must succeed"
+    );
+
+    // Second PATCH: updates the existing row (theme = light)
+    let patch2 = serde_json::json!({ "theme": "light" }).to_string();
+    let (status2, body2) = authenticated_patch(
+        create_router(state.clone()),
+        "/api/users/me/preferences",
+        &cookie,
+        &patch2,
+    )
+    .await;
+    assert_eq!(
+        status2,
+        StatusCode::OK,
+        "Second preference update must succeed. Body: {}",
+        body2
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body2).unwrap();
+    assert_eq!(
+        json["theme"], "light",
+        "Theme should be 'light' after second update"
+    );
+}
+
+// ============================================================================
+// POST /api/users — create user with role_ids (lines 615-619)
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_user_with_role_ids_assigns_roles() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "createadmin1",
+        "createadmin1@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+
+    // Look up the viewer role ID so we can pass it in role_ids
+    let viewer_role_id = {
+        use kubarr::models::{prelude::Role, role};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let role = Role::find()
+            .filter(role::Column::Name.eq("viewer"))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("viewer role must exist");
+        role.id
+    };
+
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(create_router(state.clone()), "createadmin1", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    let create_body = serde_json::json!({
+        "username": "newuserwithrole",
+        "email": "newuserwithrole@example.com",
+        "password": "securepass123",
+        "role_ids": [viewer_role_id]
+    })
+    .to_string();
+
+    let (status, body) =
+        authenticated_post(create_router(state), "/api/users", &cookie, &create_body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "POST /api/users must return 200. Body: {}",
+        body
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["username"], "newuserwithrole");
+    // User should have the viewer role
+    let roles = json["roles"].as_array().expect("roles must be an array");
+    assert!(
+        !roles.is_empty(),
+        "Created user must have assigned roles. Body: {}",
+        body
+    );
+}
+
+// ============================================================================
+// GET /api/users/invites — list invites (lines 826-844)
+// ============================================================================
+
+#[tokio::test]
+async fn test_list_invites_with_created_invite() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "invitelistadmin",
+        "invitelistadmin@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "invitelistadmin",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Create an invite first
+    let create_body = serde_json::json!({ "expires_in_days": 7 }).to_string();
+    let (create_status, create_body_str) = authenticated_post(
+        create_router(state.clone()),
+        "/api/users/invites",
+        &cookie,
+        &create_body,
+    )
+    .await;
+    assert_eq!(
+        create_status,
+        StatusCode::OK,
+        "Creating invite must return 200. Body: {}",
+        create_body_str
+    );
+
+    // Now list invites
+    let (list_status, list_body) =
+        authenticated_get(create_router(state), "/api/users/invites", &cookie).await;
+
+    assert_eq!(
+        list_status,
+        StatusCode::OK,
+        "GET /api/users/invites must return 200. Body: {}",
+        list_body
+    );
+
+    let invites: serde_json::Value = serde_json::from_str(&list_body).unwrap();
+    let arr = invites.as_array().expect("Invites must be an array");
+    assert!(
+        !arr.is_empty(),
+        "Invite list must contain the created invite. Body: {}",
+        list_body
+    );
+
+    // Verify the invite structure has expected fields
+    let invite = &arr[0];
+    assert!(invite.get("id").is_some(), "Invite must have an id");
+    assert!(invite.get("code").is_some(), "Invite must have a code");
+    assert!(
+        invite.get("created_by_username").is_some(),
+        "Invite must have created_by_username"
+    );
+    assert!(
+        invite.get("is_used").is_some(),
+        "Invite must have is_used field"
+    );
+}

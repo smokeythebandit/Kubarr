@@ -315,6 +315,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_setting_value_returns_default_when_row_is_deleted() {
+        use crate::models::prelude::SystemSetting;
+        use sea_orm::EntityTrait;
+        let db = make_db().await;
+        // Delete the seeded row so the function falls through to DEFAULT_SETTINGS
+        SystemSetting::delete_by_id("registration_enabled")
+            .exec(&db)
+            .await
+            .expect("delete");
+        let val = get_setting_value(&db, "registration_enabled")
+            .await
+            .expect("should succeed");
+        // Should return the DEFAULT_SETTINGS value, not None
+        assert_eq!(val, Some("true".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_setting_value_returns_none_when_row_deleted_and_not_in_defaults() {
+        use crate::models::prelude::SystemSetting;
+        use sea_orm::EntityTrait;
+        let db = make_db().await;
+        // Delete all rows; then query a key not in DEFAULT_SETTINGS
+        SystemSetting::delete_many()
+            .exec(&db)
+            .await
+            .expect("delete");
+        let val = get_setting_value(&db, "unknown_key_xyz")
+            .await
+            .expect("should succeed");
+        assert_eq!(val, None);
+    }
+
+    #[tokio::test]
     async fn get_setting_value_returns_seeded_db_value() {
         // The seed migration inserts registration_enabled=true
         let db = make_db().await;

@@ -484,3 +484,180 @@ async fn test_viewer_cannot_update_settings() {
         body
     );
 }
+
+// ============================================================================
+// Default fallback paths: when DB rows are missing, use DEFAULT_SETTINGS
+// ============================================================================
+
+#[tokio::test]
+async fn test_get_settings_uses_default_when_all_rows_deleted() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+
+    // Delete all seeded settings rows to exercise the ELSE branch
+    {
+        use kubarr::models::prelude::SystemSetting;
+        use sea_orm::EntityTrait;
+        SystemSetting::delete_many().exec(&db).await.unwrap();
+    }
+
+    create_test_user_with_role(
+        &db,
+        "settingsdefault1",
+        "settingsdefault1@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+
+    let state = build_test_app_state_with_db(db).await;
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "settingsdefault1",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    let (status, body) = authenticated_get(create_router(state), "/api/settings", &cookie).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET /api/settings must return 200 with defaults. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let settings = &json["settings"];
+    assert!(
+        settings.get("registration_enabled").is_some(),
+        "Should include registration_enabled from defaults. Body: {}",
+        body
+    );
+    assert_eq!(
+        settings["registration_enabled"]["value"], "true",
+        "Default value should be 'true'. Body: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_get_single_setting_uses_default_when_row_deleted() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+
+    // Delete just registration_enabled to exercise the DEFAULT_SETTINGS fallback
+    {
+        use kubarr::models::prelude::SystemSetting;
+        use sea_orm::EntityTrait;
+        SystemSetting::delete_by_id("registration_enabled")
+            .exec(&db)
+            .await
+            .unwrap();
+    }
+
+    create_test_user_with_role(
+        &db,
+        "settingsdefault2",
+        "settingsdefault2@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+
+    let state = build_test_app_state_with_db(db).await;
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "settingsdefault2",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    let (status, body) = authenticated_get(
+        create_router(state),
+        "/api/settings/registration_enabled",
+        &cookie,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET /api/settings/registration_enabled must return 200 using default. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["key"], "registration_enabled", "Key must match");
+    assert_eq!(json["value"], "true", "Default value must be 'true'");
+}
+
+#[tokio::test]
+async fn test_update_setting_inserts_new_row_when_row_deleted() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+
+    // Delete the seeded row to exercise the INSERT branch
+    {
+        use kubarr::models::prelude::SystemSetting;
+        use sea_orm::EntityTrait;
+        SystemSetting::delete_by_id("registration_enabled")
+            .exec(&db)
+            .await
+            .unwrap();
+    }
+
+    create_test_user_with_role(
+        &db,
+        "settingsinsert1",
+        "settingsinsert1@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+
+    let state = build_test_app_state_with_db(db).await;
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "settingsinsert1",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    let update_body = serde_json::json!({ "value": "false" }).to_string();
+    let (status, body) = authenticated_put(
+        create_router(state.clone()),
+        "/api/settings/registration_enabled",
+        &cookie,
+        &update_body,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PUT /api/settings must return 200 for INSERT path. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["key"], "registration_enabled");
+    assert_eq!(json["value"], "false");
+
+    // Verify it persisted
+    let (get_status, get_body) = authenticated_get(
+        create_router(state),
+        "/api/settings/registration_enabled",
+        &cookie,
+    )
+    .await;
+    assert_eq!(get_status, StatusCode::OK);
+    let get_json: serde_json::Value = serde_json::from_str(&get_body).unwrap();
+    assert_eq!(
+        get_json["value"], "false",
+        "Inserted value must persist on subsequent GET"
+    );
+}

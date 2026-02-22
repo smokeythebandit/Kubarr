@@ -1413,3 +1413,69 @@ async fn test_setup_required_accessible_always_even_after_setup() {
     );
     assert_eq!(status, StatusCode::OK);
 }
+
+// ============================================================================
+// validate-path: file exists but is not a directory (line 416 in setup.rs)
+// ============================================================================
+
+#[tokio::test]
+async fn test_validate_path_file_not_directory_returns_invalid() {
+    let state = build_test_app_state().await;
+
+    // /etc/hostname exists on every Linux system as a regular file, not a dir
+    let uri = "/api/setup/validate-path?path=/etc/hostname";
+    let (status, body) = post_empty_setup(create_router(state), uri).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "validate-path must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["exists"], true,
+        "/etc/hostname must exist. Body: {}",
+        body
+    );
+    assert_eq!(
+        json["valid"], false,
+        "/etc/hostname is a file, not a directory — must be invalid. Body: {}",
+        body
+    );
+    assert_eq!(
+        json["writable"], false,
+        "File path must not be writable. Body: {}",
+        body
+    );
+    let message = json["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("not a directory"),
+        "Message must explain the path is not a directory. Got: {}",
+        message
+    );
+}
+
+// ============================================================================
+// validate-path: absolute path with no parent (line 432 in setup.rs)
+// ============================================================================
+
+#[tokio::test]
+async fn test_validate_path_root_slash_that_exists_is_valid_dir() {
+    let state = build_test_app_state().await;
+
+    // "/" itself exists and IS a directory — should report valid
+    let uri = "/api/setup/validate-path?path=/";
+    let (status, body) = post_empty_setup(create_router(state), uri).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "validate-path must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // "/" exists and is a directory, so valid = true
+    assert_eq!(json["exists"], true);
+    assert_eq!(json["valid"], true);
+}
