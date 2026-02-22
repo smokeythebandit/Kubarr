@@ -233,3 +233,42 @@ pub async fn get_setting_bool(db: &DbConn, key: &str) -> Result<bool> {
         .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
         .unwrap_or(false))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_settings_has_registration_enabled() {
+        assert!(DEFAULT_SETTINGS.contains_key("registration_enabled"));
+        let (val, _desc) = DEFAULT_SETTINGS["registration_enabled"];
+        assert_eq!(val, "true");
+    }
+
+    #[test]
+    fn default_settings_has_registration_require_approval() {
+        assert!(DEFAULT_SETTINGS.contains_key("registration_require_approval"));
+    }
+
+    #[test]
+    fn default_settings_count() {
+        assert_eq!(DEFAULT_SETTINGS.len(), 2);
+    }
+
+    #[test]
+    fn setting_response_ser() {
+        let r = SettingResponse {
+            key: "registration_enabled".to_string(),
+            value: "true".to_string(),
+            description: Some("Allow registration".to_string()),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"key\":\"registration_enabled\""));
+    }
+
+    #[test]
+    fn setting_update_deser() {
+        let u: SettingUpdate = serde_json::from_str(r#"{"value":"false"}"#).expect("deser");
+        assert_eq!(u.value, "false");
+    }
+}

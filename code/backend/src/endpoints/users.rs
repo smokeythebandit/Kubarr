@@ -1288,3 +1288,55 @@ async fn get_recovery_code_count(
 
     Ok(Json(TwoFactorRecoveryCodesResponse { remaining }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invite_response_ser() {
+        let r = InviteResponse {
+            id: 42,
+            code: "ABC123".to_string(),
+            created_by_username: "admin".to_string(),
+            used_by_username: None,
+            is_used: false,
+            expires_at: None,
+            created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            used_at: None,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"id\":42"));
+        assert!(json.contains("\"code\":\"ABC123\""));
+        assert!(json.contains("\"is_used\":false"));
+        assert!(json.contains("\"used_by_username\":null"));
+    }
+
+    #[test]
+    fn user_response_ser() {
+        let r = UserResponse {
+            id: 1,
+            username: "alice".to_string(),
+            email: "alice@example.com".to_string(),
+            is_active: true,
+            is_approved: true,
+            created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            updated_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            roles: vec![RoleInfo {
+                id: 1,
+                name: "admin".to_string(),
+                description: Some("Administrator".to_string()),
+            }],
+            preferences: PreferencesResponse {
+                theme: "dark".to_string(),
+            },
+            permissions: vec!["users.view".to_string()],
+            allowed_apps: vec![],
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"username\":\"alice\""));
+        assert!(json.contains("\"email\":\"alice@example.com\""));
+        assert!(json.contains("\"is_active\":true"));
+        assert!(json.contains("\"theme\":\"dark\""));
+    }
+}

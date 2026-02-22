@@ -315,3 +315,111 @@ pub async fn clear_old_logs(db: &DbConn, days: i64) -> Result<u64> {
 
     Ok(result.rows_affected)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_audit_model() -> crate::models::audit_log::Model {
+        crate::models::audit_log::Model {
+            id: 1,
+            timestamp: Utc::now(),
+            user_id: Some(1),
+            username: Some("admin".to_string()),
+            action: "user.created".to_string(),
+            resource_type: "user".to_string(),
+            resource_id: Some("42".to_string()),
+            details: None,
+            ip_address: Some("127.0.0.1".to_string()),
+            user_agent: None,
+            success: true,
+            error_message: None,
+        }
+    }
+
+    #[test]
+    fn audit_service_new_works() {
+        let _svc = AuditService::new();
+    }
+
+    #[test]
+    fn audit_log_query_deser_empty() {
+        let q: AuditLogQuery = serde_json::from_str("{}").expect("deser");
+        assert!(q.page.is_none());
+        assert!(q.per_page.is_none());
+        assert!(q.user_id.is_none());
+        assert!(q.action.is_none());
+        assert!(q.success.is_none());
+    }
+
+    #[test]
+    fn audit_log_query_deser_full() {
+        let json = r#"{"page":2,"per_page":25,"user_id":5,"action":"login","resource_type":"user","success":true,"search":"admin"}"#;
+        let q: AuditLogQuery = serde_json::from_str(json).expect("deser");
+        assert_eq!(q.page, Some(2));
+        assert_eq!(q.per_page, Some(25));
+        assert_eq!(q.user_id, Some(5));
+        assert_eq!(q.action.as_deref(), Some("login"));
+        assert_eq!(q.success, Some(true));
+        assert_eq!(q.search.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn action_count_ser() {
+        let ac = ActionCount {
+            action: "login".to_string(),
+            count: 42,
+        };
+        let json = serde_json::to_string(&ac).expect("ser");
+        assert!(json.contains("\"action\":\"login\""));
+        assert!(json.contains("\"count\":42"));
+    }
+
+    #[test]
+    fn audit_log_response_ser() {
+        let r = AuditLogResponse {
+            logs: vec![make_audit_model()],
+            total: 1,
+            page: 1,
+            per_page: 50,
+            total_pages: 1,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"total\":1"));
+        assert!(json.contains("\"per_page\":50"));
+    }
+
+    #[test]
+    fn audit_log_response_empty_ser() {
+        let r = AuditLogResponse {
+            logs: vec![],
+            total: 0,
+            page: 1,
+            per_page: 50,
+            total_pages: 0,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"logs\":[]"));
+    }
+
+    #[test]
+    fn audit_stats_ser() {
+        let r = AuditStats {
+            total_events: 100,
+            successful_events: 90,
+            failed_events: 10,
+            events_today: 5,
+            events_this_week: 30,
+            top_actions: vec![ActionCount {
+                action: "login".to_string(),
+                count: 50,
+            }],
+            recent_failures: vec![make_audit_model()],
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"total_events\":100"));
+        assert!(json.contains("\"failed_events\":10"));
+        assert!(json.contains("\"top_actions\""));
+    }
+}
