@@ -593,3 +593,97 @@ async fn set_role_permissions(
     let response = get_role_with_apps(&state, role_id).await?;
     Ok(Json(response))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_role_request_deser_minimal() {
+        let r: CreateRoleRequest = serde_json::from_str(r#"{"name":"viewer"}"#).expect("deser");
+        assert_eq!(r.name, "viewer");
+        assert_eq!(r.description, None);
+        assert_eq!(r.app_names, Vec::<String>::new());
+        assert!(!r.requires_2fa);
+    }
+
+    #[test]
+    fn create_role_request_deser_full() {
+        let r: CreateRoleRequest = serde_json::from_str(
+            r#"{"name":"power","description":"Power user","app_names":["sonarr"],"requires_2fa":true}"#,
+        )
+        .expect("deser");
+        assert_eq!(r.name, "power");
+        assert_eq!(r.description, Some("Power user".to_string()));
+        assert_eq!(r.app_names, vec!["sonarr"]);
+        assert!(r.requires_2fa);
+    }
+
+    #[test]
+    fn update_role_request_deser_empty() {
+        let r: UpdateRoleRequest = serde_json::from_str("{}").expect("deser");
+        assert_eq!(r.name, None);
+        assert_eq!(r.description, None);
+        assert_eq!(r.requires_2fa, None);
+    }
+
+    #[test]
+    fn update_role_request_deser_partial() {
+        let r: UpdateRoleRequest = serde_json::from_str(r#"{"name":"admin"}"#).expect("deser");
+        assert_eq!(r.name, Some("admin".to_string()));
+        assert_eq!(r.description, None);
+    }
+
+    #[test]
+    fn set_role_apps_deser() {
+        let r: SetRoleApps =
+            serde_json::from_str(r#"{"app_names":["radarr","sonarr"]}"#).expect("deser");
+        assert_eq!(r.app_names, vec!["radarr", "sonarr"]);
+    }
+
+    #[test]
+    fn set_role_apps_deser_empty() {
+        let r: SetRoleApps = serde_json::from_str(r#"{"app_names":[]}"#).expect("deser");
+        assert!(r.app_names.is_empty());
+    }
+
+    #[test]
+    fn role_with_apps_response_ser() {
+        let r = RoleWithAppsResponse {
+            id: 1,
+            name: "admin".to_string(),
+            description: Some("Admin role".to_string()),
+            is_system: true,
+            requires_2fa: false,
+            created_at: chrono::Utc::now(),
+            app_names: vec!["sonarr".to_string()],
+            permissions: vec!["apps.view".to_string()],
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"id\":1"));
+        assert!(json.contains("\"name\":\"admin\""));
+        assert!(json.contains("\"is_system\":true"));
+        assert!(json.contains("\"app_names\""));
+        assert!(json.contains("\"permissions\""));
+    }
+
+    #[test]
+    fn set_role_permissions_deser() {
+        let r: SetRolePermissions =
+            serde_json::from_str(r#"{"permissions":["apps.view","logs.view"]}"#).expect("deser");
+        assert_eq!(r.permissions, vec!["apps.view", "logs.view"]);
+    }
+
+    #[test]
+    fn permission_info_ser() {
+        let p = PermissionInfo {
+            key: "apps.view".to_string(),
+            category: "Apps".to_string(),
+            description: "View app catalog".to_string(),
+        };
+        let json = serde_json::to_string(&p).expect("ser");
+        assert!(json.contains("\"key\":\"apps.view\""));
+        assert!(json.contains("\"category\":\"Apps\""));
+        assert!(json.contains("\"description\""));
+    }
+}

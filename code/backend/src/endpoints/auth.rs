@@ -936,4 +936,81 @@ mod tests {
         // All slots used → falls back to slot 0
         assert_eq!(find_available_slot(&existing, 999), 0);
     }
+
+    // -------------------------------------------------------------------------
+    // Serde tests for request/response types
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn login_request_deser() {
+        let r: LoginRequest = serde_json::from_str(
+            r#"{"username":"admin","password":"secret","totp_code":"123456"}"#,
+        )
+        .expect("deser");
+        assert_eq!(r.username, "admin");
+        assert_eq!(r.password, "secret");
+        assert_eq!(r.totp_code, Some("123456".to_string()));
+    }
+
+    #[test]
+    fn login_request_deser_no_totp() {
+        let r: LoginRequest =
+            serde_json::from_str(r#"{"username":"admin","password":"secret"}"#).expect("deser");
+        assert_eq!(r.totp_code, None);
+    }
+
+    #[test]
+    fn login_response_ser() {
+        let r = LoginResponse {
+            user_id: 1,
+            username: "admin".to_string(),
+            email: "admin@example.com".to_string(),
+            session_slot: 0,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"user_id\":1"));
+        assert!(json.contains("\"username\":\"admin\""));
+        assert!(json.contains("\"session_slot\":0"));
+    }
+
+    #[test]
+    fn account_info_ser() {
+        let a = AccountInfo {
+            slot: 0,
+            user_id: 5,
+            username: "alice".to_string(),
+            email: "alice@example.com".to_string(),
+            is_active: true,
+        };
+        let json = serde_json::to_string(&a).expect("ser");
+        assert!(json.contains("\"slot\":0"));
+        assert!(json.contains("\"user_id\":5"));
+        assert!(json.contains("\"is_active\":true"));
+    }
+
+    #[test]
+    fn session_info_ser() {
+        let s = SessionInfo {
+            id: "sess-123".to_string(),
+            user_agent: Some("Mozilla/5.0".to_string()),
+            ip_address: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            last_accessed_at: "2026-01-02T00:00:00Z".to_string(),
+            is_current: true,
+        };
+        let json = serde_json::to_string(&s).expect("ser");
+        assert!(json.contains("\"id\":\"sess-123\""));
+        assert!(json.contains("\"is_current\":true"));
+        assert!(json.contains("\"ip_address\":null"));
+    }
+
+    #[test]
+    fn recovery_login_request_deser() {
+        let r: RecoveryLoginRequest = serde_json::from_str(
+            r#"{"username":"admin","password":"secret","recovery_code":"ABCDEF1234"}"#,
+        )
+        .expect("deser");
+        assert_eq!(r.username, "admin");
+        assert_eq!(r.recovery_code, "ABCDEF1234");
+    }
 }

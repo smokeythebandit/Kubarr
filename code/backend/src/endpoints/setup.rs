@@ -925,3 +925,181 @@ async fn configure_server(
         storage_path: config.storage_path,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::bootstrap::ComponentStatus;
+
+    #[test]
+    fn setup_required_response_ser() {
+        let r = SetupRequiredResponse {
+            setup_required: true,
+            database_pending: false,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"setup_required\":true"));
+        assert!(json.contains("\"database_pending\":false"));
+    }
+
+    #[test]
+    fn setup_status_response_ser() {
+        let r = SetupStatusResponse {
+            setup_required: true,
+            bootstrap_complete: false,
+            server_configured: false,
+            admin_user_exists: false,
+            storage_configured: false,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"setup_required\":true"));
+        assert!(json.contains("\"bootstrap_complete\":false"));
+        assert!(json.contains("\"admin_user_exists\":false"));
+    }
+
+    #[test]
+    fn setup_request_deser() {
+        let r: SetupRequest = serde_json::from_str(
+            r#"{"admin_username":"admin","admin_email":"admin@example.com","admin_password":"secret"}"#,
+        )
+        .expect("deser");
+        assert_eq!(r.admin_username, "admin");
+        assert_eq!(r.admin_email, "admin@example.com");
+        assert_eq!(r.admin_password, "secret");
+    }
+
+    #[test]
+    fn generated_credentials_response_ser() {
+        let r = GeneratedCredentialsResponse {
+            admin_username: "admin".to_string(),
+            admin_email: "admin@example.com".to_string(),
+            admin_password: "generated_pass".to_string(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"admin_username\":\"admin\""));
+        assert!(json.contains("\"admin_email\""));
+        assert!(json.contains("\"admin_password\""));
+    }
+
+    #[test]
+    fn validate_path_query_deser() {
+        let q: ValidatePathQuery =
+            serde_json::from_str(r#"{"path":"/mnt/storage"}"#).expect("deser");
+        assert_eq!(q.path, "/mnt/storage");
+    }
+
+    #[test]
+    fn validate_path_response_ser() {
+        let r = ValidatePathResponse {
+            valid: true,
+            exists: true,
+            writable: true,
+            message: "Path is valid and accessible".to_string(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"valid\":true"));
+        assert!(json.contains("\"exists\":true"));
+        assert!(json.contains("\"writable\":true"));
+    }
+
+    #[test]
+    fn browse_setup_query_default_path() {
+        let q: BrowseSetupQuery = serde_json::from_str("{}").expect("deser");
+        assert_eq!(q.path, "/");
+    }
+
+    #[test]
+    fn browse_setup_query_custom_path() {
+        let q: BrowseSetupQuery = serde_json::from_str(r#"{"path":"/mnt"}"#).expect("deser");
+        assert_eq!(q.path, "/mnt");
+    }
+
+    #[test]
+    fn setup_directory_entry_ser() {
+        let e = SetupDirectoryEntry {
+            name: "storage".to_string(),
+            path: "/mnt/storage".to_string(),
+        };
+        let json = serde_json::to_string(&e).expect("ser");
+        assert!(json.contains("\"name\":\"storage\""));
+        assert!(json.contains("\"path\":\"/mnt/storage\""));
+    }
+
+    #[test]
+    fn browse_setup_response_ser() {
+        let r = BrowseSetupResponse {
+            path: "/mnt".to_string(),
+            parent: Some("/".to_string()),
+            directories: vec![SetupDirectoryEntry {
+                name: "storage".to_string(),
+                path: "/mnt/storage".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"path\":\"/mnt\""));
+        assert!(json.contains("\"parent\":\"/\""));
+        assert!(json.contains("\"directories\""));
+    }
+
+    #[test]
+    fn browse_setup_response_null_parent() {
+        let r = BrowseSetupResponse {
+            path: "/".to_string(),
+            parent: None,
+            directories: vec![],
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"parent\":null"));
+    }
+
+    #[test]
+    fn bootstrap_start_response_ser() {
+        let r = BootstrapStartResponse {
+            message: "Bootstrap started".to_string(),
+            started: true,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"message\":\"Bootstrap started\""));
+        assert!(json.contains("\"started\":true"));
+    }
+
+    #[test]
+    fn bootstrap_status_response_ser() {
+        let component = ComponentStatus {
+            component: "postgresql".to_string(),
+            display_name: "PostgreSQL".to_string(),
+            status: "healthy".to_string(),
+            message: Some("Running".to_string()),
+            error: None,
+        };
+        let r = BootstrapStatusResponse {
+            components: vec![component],
+            complete: true,
+            started: true,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"complete\":true"));
+        assert!(json.contains("\"started\":true"));
+        assert!(json.contains("\"components\""));
+    }
+
+    #[test]
+    fn server_config_request_deser() {
+        let r: ServerConfigRequest =
+            serde_json::from_str(r#"{"name":"my-server","storage_path":"/mnt/storage"}"#)
+                .expect("deser");
+        assert_eq!(r.name, "my-server");
+        assert_eq!(r.storage_path, "/mnt/storage");
+    }
+
+    #[test]
+    fn server_config_response_ser() {
+        let r = ServerConfigResponse {
+            name: "my-server".to_string(),
+            storage_path: "/mnt/storage".to_string(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"name\":\"my-server\""));
+        assert!(json.contains("\"storage_path\":\"/mnt/storage\""));
+    }
+}

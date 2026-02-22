@@ -127,3 +127,77 @@ impl super::scheduler::PeriodicTask for ChartSyncTask {
         self.service.sync().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_content_deser_dir() {
+        let json = r#"{"name":"sonarr","type":"dir"}"#;
+        let entry: GitHubContent = serde_json::from_str(json).expect("deser");
+        assert_eq!(entry.name, "sonarr");
+        assert_eq!(entry.content_type, "dir");
+    }
+
+    #[test]
+    fn github_content_deser_file() {
+        let json = r#"{"name":"README.md","type":"file"}"#;
+        let entry: GitHubContent = serde_json::from_str(json).expect("deser");
+        assert_eq!(entry.name, "README.md");
+        assert_eq!(entry.content_type, "file");
+    }
+
+    #[test]
+    fn github_content_filter_dirs_only() {
+        let entries = vec![
+            GitHubContent {
+                name: "sonarr".to_string(),
+                content_type: "dir".to_string(),
+            },
+            GitHubContent {
+                name: "README.md".to_string(),
+                content_type: "file".to_string(),
+            },
+            GitHubContent {
+                name: ".github".to_string(),
+                content_type: "dir".to_string(),
+            },
+            GitHubContent {
+                name: "radarr".to_string(),
+                content_type: "dir".to_string(),
+            },
+        ];
+
+        // Simulate the filter logic from discover_charts
+        let names: Vec<String> = entries
+            .into_iter()
+            .filter(|e| e.content_type == "dir" && !e.name.starts_with('.'))
+            .map(|e| e.name)
+            .collect();
+
+        assert_eq!(names, vec!["sonarr", "radarr"]);
+    }
+
+    #[test]
+    fn github_content_filter_excludes_dot_dirs() {
+        let entries = vec![
+            GitHubContent {
+                name: ".hidden".to_string(),
+                content_type: "dir".to_string(),
+            },
+            GitHubContent {
+                name: "visible".to_string(),
+                content_type: "dir".to_string(),
+            },
+        ];
+
+        let names: Vec<String> = entries
+            .into_iter()
+            .filter(|e| e.content_type == "dir" && !e.name.starts_with('.'))
+            .map(|e| e.name)
+            .collect();
+
+        assert_eq!(names, vec!["visible"]);
+    }
+}

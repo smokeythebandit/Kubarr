@@ -95,3 +95,41 @@ async fn clear_audit_logs(
         ),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_logs_request_deser_with_days() {
+        let r: ClearLogsRequest = serde_json::from_str(r#"{"days": 30}"#).expect("deser");
+        assert_eq!(r.days, Some(30));
+    }
+
+    #[test]
+    fn clear_logs_request_deser_empty() {
+        let r: ClearLogsRequest = serde_json::from_str("{}").expect("deser");
+        assert_eq!(r.days, None);
+    }
+
+    #[test]
+    fn clear_logs_response_ser() {
+        let r = ClearLogsResponse {
+            deleted: 42,
+            message: "Deleted 42 audit log entries older than 90 days".to_string(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"deleted\":42"));
+        assert!(json.contains("\"message\""));
+    }
+
+    #[test]
+    fn clear_logs_response_zero_deleted() {
+        let r = ClearLogsResponse {
+            deleted: 0,
+            message: "No entries deleted".to_string(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"deleted\":0"));
+    }
+}

@@ -78,6 +78,22 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 /// Cleans up expired and revoked sessions
 struct SessionCleanupTask;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_cleanup_task_name() {
+        assert_eq!(SessionCleanupTask.name(), "session_cleanup");
+    }
+
+    #[test]
+    fn session_cleanup_task_interval_is_one_hour() {
+        let d = SessionCleanupTask.interval();
+        assert_eq!(d, Duration::from_secs(60 * 60));
+    }
+}
+
 #[async_trait]
 impl PeriodicTask for SessionCleanupTask {
     fn name(&self) -> &'static str {

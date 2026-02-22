@@ -695,4 +695,88 @@ mod tests {
         assert_eq!(info.file_type, "directory");
         assert_eq!(info.size, 0);
     }
+
+    // -------------------------------------------------------------------------
+    // Serde tests for request/response structs
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn browse_query_deser_default_path() {
+        let q: BrowseQuery = serde_json::from_str("{}").expect("deser");
+        assert_eq!(q.path, "");
+    }
+
+    #[test]
+    fn browse_query_deser_with_path() {
+        let q: BrowseQuery = serde_json::from_str(r#"{"path":"/media"}"#).expect("deser");
+        assert_eq!(q.path, "/media");
+    }
+
+    #[test]
+    fn path_query_deser() {
+        let q: PathQuery = serde_json::from_str(r#"{"path":"/data/file.txt"}"#).expect("deser");
+        assert_eq!(q.path, "/data/file.txt");
+    }
+
+    #[test]
+    fn file_info_ser() {
+        let f = FileInfo {
+            name: "test.txt".to_string(),
+            path: "test.txt".to_string(),
+            file_type: "file".to_string(),
+            size: 1024,
+            modified: "2026-01-01T00:00:00Z".to_string(),
+            permissions: "rw-r--r--".to_string(),
+        };
+        let json = serde_json::to_string(&f).expect("ser");
+        assert!(json.contains("\"name\":\"test.txt\""));
+        assert!(json.contains("\"type\":\"file\"")); // renamed field
+        assert!(json.contains("\"size\":1024"));
+    }
+
+    #[test]
+    fn directory_listing_ser() {
+        let listing = DirectoryListing {
+            path: "/media".to_string(),
+            parent: Some("/".to_string()),
+            items: vec![],
+            total_items: 0,
+        };
+        let json = serde_json::to_string(&listing).expect("ser");
+        assert!(json.contains("\"path\":\"/media\""));
+        assert!(json.contains("\"parent\":\"/\""));
+        assert!(json.contains("\"total_items\":0"));
+    }
+
+    #[test]
+    fn directory_listing_null_parent_ser() {
+        let listing = DirectoryListing {
+            path: "/".to_string(),
+            parent: None,
+            items: vec![],
+            total_items: 0,
+        };
+        let json = serde_json::to_string(&listing).expect("ser");
+        assert!(json.contains("\"parent\":null"));
+    }
+
+    #[test]
+    fn storage_stats_ser() {
+        let stats = StorageStats {
+            total_bytes: 1_000_000,
+            used_bytes: 500_000,
+            free_bytes: 500_000,
+            usage_percent: 50.0,
+        };
+        let json = serde_json::to_string(&stats).expect("ser");
+        assert!(json.contains("\"total_bytes\":1000000"));
+        assert!(json.contains("\"usage_percent\":50.0"));
+    }
+
+    #[test]
+    fn create_directory_request_deser() {
+        let r: CreateDirectoryRequest =
+            serde_json::from_str(r#"{"path":"/media/new_dir"}"#).expect("deser");
+        assert_eq!(r.path, "/media/new_dir");
+    }
 }

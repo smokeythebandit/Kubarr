@@ -497,3 +497,20 @@ async fn log_app_access(
         "message": "Access logged"
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn namespace_query_deser_with_value() {
+        let q: NamespaceQuery = serde_json::from_str(r#"{"namespace":"media"}"#).expect("deser");
+        assert_eq!(q.namespace, Some("media".to_string()));
+    }
+
+    #[test]
+    fn namespace_query_deser_empty() {
+        let q: NamespaceQuery = serde_json::from_str("{}").expect("deser");
+        assert_eq!(q.namespace, None);
+    }
+}
