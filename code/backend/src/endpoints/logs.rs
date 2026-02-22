@@ -602,3 +602,186 @@ pub fn convert_loki_to_logsql(query: &str) -> String {
     // Return as-is for other queries (might already be LogsQL)
     query.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // -----------------------------------------------------------------------
+    // convert_loki_to_logsql tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_query_returns_wildcard() {
+        assert_eq!(convert_loki_to_logsql(""), "*");
+    }
+
+    #[test]
+    fn whitespace_only_query_returns_wildcard() {
+        assert_eq!(convert_loki_to_logsql("   "), "*");
+    }
+
+    #[test]
+    fn wildcard_query_returns_wildcard() {
+        assert_eq!(convert_loki_to_logsql("*"), "*");
+    }
+
+    #[test]
+    fn single_equals_label_matcher() {
+        let result = convert_loki_to_logsql(r#"{namespace="media"}"#);
+        assert_eq!(result, "namespace:media");
+    }
+
+    #[test]
+    fn multiple_label_matchers_joined_with_and() {
+        let result = convert_loki_to_logsql(r#"{namespace="media",pod="sonarr"}"#);
+        assert!(result.contains("namespace:media"));
+        assert!(result.contains("pod:sonarr"));
+        assert!(result.contains(" AND "));
+    }
+
+    #[test]
+    fn not_equals_label_matcher() {
+        let result = convert_loki_to_logsql(r#"{namespace!="default"}"#);
+        assert_eq!(result, "NOT namespace:default");
+    }
+
+    #[test]
+    fn regex_label_matcher() {
+        let result = convert_loki_to_logsql(r#"{pod=~"sonarr.*"}"#);
+        assert_eq!(result, "pod:~sonarr.*");
+    }
+
+    #[test]
+    fn empty_braces_returns_wildcard() {
+        let result = convert_loki_to_logsql("{}");
+        assert_eq!(result, "*");
+    }
+
+    #[test]
+    fn non_loki_query_passes_through() {
+        let query = "some:logsql AND other:value";
+        let result = convert_loki_to_logsql(query);
+        assert_eq!(result, query);
+    }
+
+    #[test]
+    fn label_value_with_quotes_stripped() {
+        let result = convert_loki_to_logsql(r#"{app="myapp"}"#);
+        assert_eq!(result, "app:myapp");
+    }
+
+    // -----------------------------------------------------------------------
+    // Serde struct tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn log_entry_ser() {
+        let e = LogEntry {
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            line: "some log line".to_string(),
+            pod_name: "sonarr-abc123".to_string(),
+            container: Some("sonarr".to_string()),
+        };
+        let json = serde_json::to_string(&e).expect("ser");
+        assert!(json.contains("\"pod_name\":\"sonarr-abc123\""));
+        assert!(json.contains("\"line\":\"some log line\""));
+    }
+
+    #[test]
+    fn log_entry_ser_no_container() {
+        let e = LogEntry {
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            line: "line".to_string(),
+            pod_name: "pod".to_string(),
+            container: None,
+        };
+        let json = serde_json::to_string(&e).expect("ser");
+        assert!(json.contains("\"container\":null"));
+    }
+
+    #[test]
+    fn pod_logs_query_defaults() {
+        let q: PodLogsQuery = serde_json::from_str("{}").expect("deser");
+        assert_eq!(q.namespace, "media");
+        assert_eq!(q.tail, 100);
+        assert!(q.container.is_none());
+    }
+
+    #[test]
+    fn pod_logs_query_custom() {
+        let json = r#"{"namespace":"kubarr","container":"main","tail":50}"#;
+        let q: PodLogsQuery = serde_json::from_str(json).expect("deser");
+        assert_eq!(q.namespace, "kubarr");
+        assert_eq!(q.tail, 50);
+        assert_eq!(q.container.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn vlogs_query_params_defaults() {
+        let p: VLogsQueryParams = serde_json::from_str("{}").expect("deser");
+        assert_eq!(p.query, "*");
+        assert_eq!(p.limit, 1000);
+        assert!(p.start.is_none());
+    }
+
+    #[test]
+    fn vlogs_query_params_custom() {
+        let json = r#"{"query":"{ns=\"media\"}","limit":500,"start":"2024-01-01T00:00:00Z"}"#;
+        let p: VLogsQueryParams = serde_json::from_str(json).expect("deser");
+        assert_eq!(p.limit, 500);
+        assert!(p.start.is_some());
+    }
+
+    #[test]
+    fn vlogs_entry_ser_with_level() {
+        let e = VLogsEntry {
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            line: "error occurred".to_string(),
+            level: Some("error".to_string()),
+        };
+        let json = serde_json::to_string(&e).expect("ser");
+        assert!(json.contains("\"level\":\"error\""));
+    }
+
+    #[test]
+    fn vlogs_entry_ser_without_level_skipped() {
+        let e = VLogsEntry {
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            line: "info".to_string(),
+            level: None,
+        };
+        let json = serde_json::to_string(&e).expect("ser");
+        // level should be skipped due to skip_serializing_if
+        assert!(!json.contains("level"));
+    }
+
+    #[test]
+    fn vlogs_stream_ser() {
+        let mut labels = HashMap::new();
+        labels.insert("namespace".to_string(), "media".to_string());
+        let s = VLogsStream {
+            labels,
+            entries: vec![VLogsEntry {
+                timestamp: "2024-01-01T00:00:00Z".to_string(),
+                line: "test".to_string(),
+                level: None,
+            }],
+        };
+        let json = serde_json::to_string(&s).expect("ser");
+        assert!(json.contains("\"labels\""));
+        assert!(json.contains("media"));
+    }
+
+    #[test]
+    fn vlogs_query_response_ser() {
+        let r = VLogsQueryResponse {
+            streams: vec![],
+            total_entries: 0,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"streams\":[]"));
+        assert!(json.contains("\"total_entries\":0"));
+    }
+}
