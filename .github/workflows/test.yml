@@ -39,6 +39,26 @@ jobs:
       - name: Build
         run: docker run --rm "kubarr-frontend-test:${{ inputs.image-tag }}" npm run build
 
+  coverage:
+    name: backend / coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code/backend
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+      - run: cargo tarpaulin --no-fail-fast --out Xml --output-dir coverage
+        working-directory: code/backend
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: code/backend/coverage/cobertura.xml
+          retention-days: 30
+
   e2e:
     runs-on: self-hosted
     timeout-minutes: 45
