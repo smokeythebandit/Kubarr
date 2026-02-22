@@ -1089,4 +1089,63 @@ mod tests {
         let json = serde_json::to_string(&r).expect("ser");
         assert!(json.contains("\"total\":100"));
     }
+
+    #[test]
+    fn event_setting_dto_ser() {
+        let dto = EventSettingDto {
+            event_type: "login".to_string(),
+            enabled: true,
+            severity: "info".to_string(),
+        };
+        let json = serde_json::to_string(&dto).expect("ser");
+        assert!(json.contains("\"event_type\":\"login\""));
+        assert!(json.contains("\"enabled\":true"));
+    }
+
+    #[test]
+    fn update_event_request_deser() {
+        let r: UpdateEventRequest =
+            serde_json::from_str(r#"{"enabled":true,"severity":"warning"}"#).expect("deser");
+        assert_eq!(r.enabled, Some(true));
+        assert_eq!(r.severity.as_deref(), Some("warning"));
+    }
+
+    #[test]
+    fn user_pref_dto_ser() {
+        let dto = UserPrefDto {
+            channel_type: "email".to_string(),
+            enabled: true,
+            destination: Some("al***@example.com".to_string()),
+            verified: false,
+        };
+        let json = serde_json::to_string(&dto).expect("ser");
+        assert!(json.contains("\"channel_type\":\"email\""));
+        assert!(json.contains("\"verified\":false"));
+    }
+
+    #[test]
+    fn update_pref_request_deser() {
+        let r: UpdatePrefRequest =
+            serde_json::from_str(r#"{"enabled":false,"destination":"test@example.com"}"#)
+                .expect("deser");
+        assert_eq!(r.enabled, Some(false));
+        assert_eq!(r.destination.as_deref(), Some("test@example.com"));
+    }
+
+    #[test]
+    fn log_dto_ser() {
+        let dto = LogDto {
+            id: 42,
+            user_id: Some(1),
+            channel_type: "email".to_string(),
+            event_type: "login".to_string(),
+            recipient: Some("al***@example.com".to_string()),
+            status: "sent".to_string(),
+            error_message: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&dto).expect("ser");
+        assert!(json.contains("\"id\":42"));
+        assert!(json.contains("\"status\":\"sent\""));
+    }
 }
