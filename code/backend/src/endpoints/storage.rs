@@ -609,3 +609,90 @@ async fn download_file(
     )
         .into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    // -------------------------------------------------------------------------
+    // validate_path
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn validate_path_resolves_valid_subpath() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        fs::create_dir_all(base.join("subdir")).expect("create subdir");
+
+        let result = validate_path("subdir", base);
+        assert!(result.is_ok());
+        assert!(result.unwrap().starts_with(base));
+    }
+
+    #[test]
+    fn validate_path_root_slash_resolves_to_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        let result = validate_path("/", base);
+        // "/" strips to "" and joins to base itself
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_path_empty_resolves_to_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        let result = validate_path("", base);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_path_traversal_blocked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        // Attempt to traverse above base
+        let result = validate_path("../etc/passwd", base);
+        // Either NotFound (path doesn't exist) or Forbidden is acceptable
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_path_nonexistent_returns_err() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        let result = validate_path("does_not_exist", base);
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // get_file_info_internal
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn get_file_info_internal_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().to_path_buf();
+        let file_path = base.join("test.txt");
+        fs::write(&file_path, b"hello").expect("write");
+
+        let info = get_file_info_internal(&file_path, &base).expect("file info");
+        assert_eq!(info.name, "test.txt");
+        assert_eq!(info.file_type, "file");
+        assert_eq!(info.size, 5);
+        assert_eq!(info.path, "test.txt");
+    }
+
+    #[test]
+    fn get_file_info_internal_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().to_path_buf();
+        let sub_dir = base.join("mydir");
+        fs::create_dir(&sub_dir).expect("mkdir");
+
+        let info = get_file_info_internal(&sub_dir, &base).expect("dir info");
+        assert_eq!(info.name, "mydir");
+        assert_eq!(info.file_type, "directory");
+        assert_eq!(info.size, 0);
+    }
+}

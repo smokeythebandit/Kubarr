@@ -135,3 +135,99 @@ impl std::fmt::Display for ResourceType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // AuditAction Display
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn audit_action_display_authentication() {
+        assert_eq!(AuditAction::Login.to_string(), "login");
+        assert_eq!(AuditAction::LoginFailed.to_string(), "login_failed");
+        assert_eq!(AuditAction::Logout.to_string(), "logout");
+        assert_eq!(AuditAction::TokenRefresh.to_string(), "token_refresh");
+        assert_eq!(AuditAction::TwoFactorEnabled.to_string(), "2fa_enabled");
+        assert_eq!(AuditAction::TwoFactorDisabled.to_string(), "2fa_disabled");
+        assert_eq!(AuditAction::TwoFactorVerified.to_string(), "2fa_verified");
+        assert_eq!(AuditAction::TwoFactorFailed.to_string(), "2fa_failed");
+        assert_eq!(AuditAction::PasswordChanged.to_string(), "password_changed");
+    }
+
+    #[test]
+    fn audit_action_display_user_management() {
+        assert_eq!(AuditAction::UserCreated.to_string(), "user_created");
+        assert_eq!(AuditAction::UserUpdated.to_string(), "user_updated");
+        assert_eq!(AuditAction::UserDeleted.to_string(), "user_deleted");
+        assert_eq!(AuditAction::UserApproved.to_string(), "user_approved");
+        assert_eq!(AuditAction::UserDeactivated.to_string(), "user_deactivated");
+        assert_eq!(AuditAction::UserActivated.to_string(), "user_activated");
+    }
+
+    #[test]
+    fn audit_action_display_role_management() {
+        assert_eq!(AuditAction::RoleCreated.to_string(), "role_created");
+        assert_eq!(AuditAction::RoleUpdated.to_string(), "role_updated");
+        assert_eq!(AuditAction::RoleDeleted.to_string(), "role_deleted");
+        assert_eq!(AuditAction::RoleAssigned.to_string(), "role_assigned");
+        assert_eq!(AuditAction::RoleUnassigned.to_string(), "role_unassigned");
+    }
+
+    #[test]
+    fn audit_action_display_app_management() {
+        assert_eq!(AuditAction::AppInstalled.to_string(), "app_installed");
+        assert_eq!(AuditAction::AppUninstalled.to_string(), "app_uninstalled");
+        assert_eq!(AuditAction::AppStarted.to_string(), "app_started");
+        assert_eq!(AuditAction::AppStopped.to_string(), "app_stopped");
+        assert_eq!(AuditAction::AppRestarted.to_string(), "app_restarted");
+        assert_eq!(AuditAction::AppConfigured.to_string(), "app_configured");
+        assert_eq!(AuditAction::AppAccessed.to_string(), "app_accessed");
+    }
+
+    #[test]
+    fn audit_action_display_system() {
+        assert_eq!(
+            AuditAction::SystemSettingChanged.to_string(),
+            "system_setting_changed"
+        );
+        assert_eq!(AuditAction::InviteCreated.to_string(), "invite_created");
+        assert_eq!(AuditAction::InviteUsed.to_string(), "invite_used");
+        assert_eq!(AuditAction::InviteDeleted.to_string(), "invite_deleted");
+        assert_eq!(AuditAction::ApiAccess.to_string(), "api_access");
+    }
+
+    // -------------------------------------------------------------------------
+    // ResourceType Display
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn resource_type_display() {
+        assert_eq!(ResourceType::User.to_string(), "user");
+        assert_eq!(ResourceType::Role.to_string(), "role");
+        assert_eq!(ResourceType::App.to_string(), "app");
+        assert_eq!(ResourceType::System.to_string(), "system");
+        assert_eq!(ResourceType::Invite.to_string(), "invite");
+        assert_eq!(ResourceType::Session.to_string(), "session");
+    }
+
+    // -------------------------------------------------------------------------
+    // AuditAction serde
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn audit_action_serde_roundtrip() {
+        let actions = vec![
+            AuditAction::Login,
+            AuditAction::AppInstalled,
+            AuditAction::ApiAccess,
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).expect("serialize");
+            let back: AuditAction = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(action.to_string(), back.to_string());
+        }
+    }
+}

@@ -66,3 +66,30 @@ impl Related<super::app_vpn_config::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vpn_type_display() {
+        assert_eq!(VpnType::WireGuard.to_string(), "wireguard");
+        assert_eq!(VpnType::OpenVpn.to_string(), "openvpn");
+    }
+
+    #[test]
+    fn vpn_type_serde() {
+        let wg: VpnType = serde_json::from_str("\"wireguard\"").expect("deser");
+        let ov: VpnType = serde_json::from_str("\"openvpn\"").expect("deser");
+        assert_eq!(wg, VpnType::WireGuard);
+        assert_eq!(ov, VpnType::OpenVpn);
+        assert_eq!(
+            serde_json::to_string(&VpnType::WireGuard).unwrap(),
+            "\"wireguard\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VpnType::OpenVpn).unwrap(),
+            "\"openvpn\""
+        );
+    }
+}
