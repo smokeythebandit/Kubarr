@@ -916,3 +916,115 @@ mod tests {
         assert!(!is_pod_ready(&pod));
     }
 }
+
+#[cfg(test)]
+mod tests_serde {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn validate_token_request_deser() {
+        let r: ValidateTokenRequest =
+            serde_json::from_str(r#"{"api_token":"cf_abc123"}"#).expect("deser");
+        assert_eq!(r.api_token, "cf_abc123");
+    }
+
+    #[test]
+    fn zone_info_ser() {
+        let z = ZoneInfo {
+            id: "zone1".to_string(),
+            name: "example.com".to_string(),
+        };
+        let json = serde_json::to_string(&z).expect("ser");
+        assert!(json.contains("\"name\":\"example.com\""));
+    }
+
+    #[test]
+    fn validate_token_response_ser() {
+        let r = ValidateTokenResponse {
+            account_id: "acc123".to_string(),
+            zones: vec![ZoneInfo {
+                id: "z1".to_string(),
+                name: "example.com".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"account_id\":\"acc123\""));
+        assert!(json.contains("example.com"));
+    }
+
+    #[test]
+    fn provision_request_deser() {
+        let json = r#"{"name":"my-tunnel","api_token":"tok","account_id":"acc","zone_id":"zid","zone_name":"example.com","subdomain":"kubarr"}"#;
+        let r: ProvisionRequest = serde_json::from_str(json).expect("deser");
+        assert_eq!(r.name, "my-tunnel");
+        assert_eq!(r.subdomain, "kubarr");
+    }
+
+    #[test]
+    fn cloudflare_tunnel_response_ser_minimal() {
+        let r = CloudflareTunnelResponse {
+            id: 1,
+            name: "my-tunnel".to_string(),
+            tunnel_token: "****".to_string(),
+            status: "running".to_string(),
+            error: None,
+            tunnel_id: None,
+            zone_id: None,
+            zone_name: None,
+            subdomain: None,
+            hostname: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"status\":\"running\""));
+        assert!(json.contains("\"tunnel_token\":\"****\""));
+    }
+
+    #[test]
+    fn cloudflare_tunnel_response_ser_full() {
+        let r = CloudflareTunnelResponse {
+            id: 2,
+            name: "full-tunnel".to_string(),
+            tunnel_token: "****".to_string(),
+            status: "running".to_string(),
+            error: None,
+            tunnel_id: Some("tid-123".to_string()),
+            zone_id: Some("zid-456".to_string()),
+            zone_name: Some("example.com".to_string()),
+            subdomain: Some("kubarr".to_string()),
+            hostname: Some("kubarr.example.com".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"hostname\":\"kubarr.example.com\""));
+        assert!(json.contains("\"zone_name\":\"example.com\""));
+    }
+
+    #[test]
+    fn cloudflare_tunnel_status_ser() {
+        let s = CloudflareTunnelStatus {
+            status: "deploying".to_string(),
+            ready_pods: 0,
+            total_pods: 1,
+            message: Some("Waiting for pod to start".to_string()),
+        };
+        let json = serde_json::to_string(&s).expect("ser");
+        assert!(json.contains("\"status\":\"deploying\""));
+        assert!(json.contains("\"total_pods\":1"));
+    }
+
+    #[test]
+    fn cloudflare_tunnel_status_no_message_ser() {
+        let s = CloudflareTunnelStatus {
+            status: "not_deployed".to_string(),
+            ready_pods: 0,
+            total_pods: 0,
+            message: None,
+        };
+        let json = serde_json::to_string(&s).expect("ser");
+        assert!(json.contains("\"status\":\"not_deployed\""));
+    }
+}

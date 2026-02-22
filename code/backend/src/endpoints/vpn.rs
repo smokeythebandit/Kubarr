@@ -434,3 +434,33 @@ async fn list_supported_providers(
     let providers = vpn::get_supported_providers();
     Ok(Json(SupportedProvidersResponse { providers }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::vpn::{AppVpnConfigResponse, SupportedProvider, VpnProviderResponse};
+    use chrono::Utc;
+
+    #[test]
+    fn providers_response_ser_empty() {
+        let r = ProvidersResponse { providers: vec![] };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"providers\":[]"));
+    }
+
+    #[test]
+    fn app_configs_response_ser_empty() {
+        let r = AppConfigsResponse { configs: vec![] };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"configs\":[]"));
+    }
+
+    #[test]
+    fn supported_providers_response_ser() {
+        let providers = crate::services::vpn::get_supported_providers();
+        let r = SupportedProvidersResponse { providers };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"providers\""));
+        assert!(json.contains("custom"));
+    }
+}

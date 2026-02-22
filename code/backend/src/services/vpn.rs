@@ -1589,3 +1589,221 @@ mod tests_deployment_structs {
         assert_eq!(c.secret_name, c2.secret_name);
     }
 }
+
+#[cfg(test)]
+mod tests_request_response_serde {
+    use super::*;
+    use chrono::Utc;
+
+    // --- WireGuardCredentials ---
+
+    #[test]
+    fn wireguard_credentials_deser_minimal() {
+        let r: WireGuardCredentials =
+            serde_json::from_str(r#"{"private_key":"wgprivkey=="}"#).expect("deser");
+        assert_eq!(r.private_key, "wgprivkey==");
+        assert!(r.addresses.is_empty());
+        assert!(r.public_key.is_none());
+    }
+
+    #[test]
+    fn wireguard_credentials_deser_full() {
+        let json = r#"{
+            "private_key":"priv==",
+            "addresses":["10.0.0.1/24"],
+            "public_key":"pub==",
+            "endpoint_ip":"1.2.3.4",
+            "endpoint_port":51820,
+            "preshared_key":"psk=="
+        }"#;
+        let r: WireGuardCredentials = serde_json::from_str(json).expect("deser");
+        assert_eq!(r.private_key, "priv==");
+        assert_eq!(r.addresses, vec!["10.0.0.1/24"]);
+        assert_eq!(r.public_key.as_deref(), Some("pub=="));
+        assert_eq!(r.endpoint_port, Some(51820));
+    }
+
+    #[test]
+    fn wireguard_credentials_ser_skips_none_fields() {
+        let r = WireGuardCredentials {
+            private_key: "priv==".to_string(),
+            addresses: vec![],
+            public_key: None,
+            endpoint_ip: None,
+            endpoint_port: None,
+            preshared_key: None,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"private_key\":\"priv==\""));
+        assert!(!json.contains("public_key"));
+        assert!(!json.contains("preshared_key"));
+    }
+
+    // --- OpenVpnCredentials ---
+
+    #[test]
+    fn openvpn_credentials_deser_minimal() {
+        let r: OpenVpnCredentials =
+            serde_json::from_str(r#"{"username":"user","password":"pass"}"#).expect("deser");
+        assert_eq!(r.username, "user");
+        assert_eq!(r.password, "pass");
+        assert!(r.server_countries.is_none());
+    }
+
+    #[test]
+    fn openvpn_credentials_deser_full() {
+        let json = r#"{"username":"u","password":"p","server_countries":"US","server_cities":"NYC","server_hostnames":"vpn.example.com"}"#;
+        let r: OpenVpnCredentials = serde_json::from_str(json).expect("deser");
+        assert_eq!(r.server_countries.as_deref(), Some("US"));
+        assert_eq!(r.server_cities.as_deref(), Some("NYC"));
+    }
+
+    // --- VpnCredentials (untagged enum) ---
+
+    #[test]
+    fn vpn_credentials_wireguard_variant() {
+        let json = r#"{"private_key":"wgkey=="}"#;
+        let r: VpnCredentials = serde_json::from_str(json).expect("deser");
+        match r {
+            VpnCredentials::WireGuard(wg) => assert_eq!(wg.private_key, "wgkey=="),
+            VpnCredentials::OpenVpn(_) => panic!("Expected WireGuard variant"),
+        }
+    }
+
+    #[test]
+    fn vpn_credentials_openvpn_variant() {
+        let json = r#"{"username":"user","password":"pass"}"#;
+        let r: VpnCredentials = serde_json::from_str(json).expect("deser");
+        match r {
+            VpnCredentials::OpenVpn(ov) => assert_eq!(ov.username, "user"),
+            VpnCredentials::WireGuard(_) => panic!("Expected OpenVpn variant"),
+        }
+    }
+
+    // --- CreateVpnProviderRequest ---
+
+    #[test]
+    fn create_vpn_provider_request_defaults() {
+        let json =
+            r#"{"name":"myvpn","vpn_type":"wireguard","credentials":{"private_key":"pk=="}}"#;
+        let r: CreateVpnProviderRequest = serde_json::from_str(json).expect("deser");
+        assert_eq!(r.name, "myvpn");
+        assert!(r.enabled);
+        assert!(r.kill_switch);
+        assert!(!r.firewall_outbound_subnets.is_empty());
+    }
+
+    #[test]
+    fn create_vpn_provider_request_custom() {
+        let json = r#"{"name":"myvpn","vpn_type":"openvpn","credentials":{},"enabled":false,"kill_switch":false,"firewall_outbound_subnets":"10.0.0.0/8"}"#;
+        let r: CreateVpnProviderRequest = serde_json::from_str(json).expect("deser");
+        assert!(!r.enabled);
+        assert!(!r.kill_switch);
+        assert_eq!(r.firewall_outbound_subnets, "10.0.0.0/8");
+    }
+
+    // --- UpdateVpnProviderRequest ---
+
+    #[test]
+    fn update_vpn_provider_request_empty() {
+        let r: UpdateVpnProviderRequest = serde_json::from_str("{}").expect("deser");
+        assert!(r.name.is_none());
+        assert!(r.credentials.is_none());
+        assert!(r.enabled.is_none());
+    }
+
+    #[test]
+    fn update_vpn_provider_request_partial() {
+        let r: UpdateVpnProviderRequest =
+            serde_json::from_str(r#"{"name":"newname","enabled":true}"#).expect("deser");
+        assert_eq!(r.name.as_deref(), Some("newname"));
+        assert_eq!(r.enabled, Some(true));
+        assert!(r.kill_switch.is_none());
+    }
+
+    // --- AssignVpnRequest ---
+
+    #[test]
+    fn assign_vpn_request_minimal() {
+        let r: AssignVpnRequest = serde_json::from_str(r#"{"vpn_provider_id":5}"#).expect("deser");
+        assert_eq!(r.vpn_provider_id, 5);
+        assert!(r.kill_switch_override.is_none());
+        assert!(r.port_forwarding.is_none());
+    }
+
+    #[test]
+    fn assign_vpn_request_full() {
+        let r: AssignVpnRequest = serde_json::from_str(
+            r#"{"vpn_provider_id":3,"kill_switch_override":true,"port_forwarding":true}"#,
+        )
+        .expect("deser");
+        assert_eq!(r.kill_switch_override, Some(true));
+        assert_eq!(r.port_forwarding, Some(true));
+    }
+
+    // --- VpnProviderResponse ---
+
+    #[test]
+    fn vpn_provider_response_ser() {
+        use crate::models::vpn_provider::VpnType;
+        let r = VpnProviderResponse {
+            id: 1,
+            name: "MyVPN".to_string(),
+            vpn_type: VpnType::WireGuard,
+            service_provider: Some("mullvad".to_string()),
+            enabled: true,
+            kill_switch: false,
+            firewall_outbound_subnets: "10.0.0.0/8".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            app_count: 2,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"name\":\"MyVPN\""));
+        assert!(json.contains("\"app_count\":2"));
+    }
+
+    // --- AppVpnConfigResponse ---
+
+    #[test]
+    fn app_vpn_config_response_ser() {
+        let r = AppVpnConfigResponse {
+            app_name: "sonarr".to_string(),
+            vpn_provider_id: 1,
+            vpn_provider_name: "MyVPN".to_string(),
+            kill_switch_override: None,
+            effective_kill_switch: true,
+            port_forwarding: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"app_name\":\"sonarr\""));
+        assert!(json.contains("\"effective_kill_switch\":true"));
+    }
+
+    // --- VpnTestResult ---
+
+    #[test]
+    fn vpn_test_result_success_ser() {
+        let r = VpnTestResult {
+            success: true,
+            message: "Connected".to_string(),
+            public_ip: Some("1.2.3.4".to_string()),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("\"public_ip\":\"1.2.3.4\""));
+    }
+
+    #[test]
+    fn vpn_test_result_failure_ser() {
+        let r = VpnTestResult {
+            success: false,
+            message: "Timeout".to_string(),
+            public_ip: None,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"success\":false"));
+    }
+}
