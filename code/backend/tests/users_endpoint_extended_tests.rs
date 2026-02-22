@@ -2206,3 +2206,53 @@ async fn test_admin_update_user_is_approved() {
         "User is_approved must be updated to false"
     );
 }
+
+// ============================================================================
+// POST /api/users/invites — create invite with expires_in_days=0 (users.rs line 874)
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_invite_no_expiry() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "noexpireadmin",
+        "noexpireadmin@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(create_router(state.clone()), "noexpireadmin", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // expires_in_days = 0 exercises the None branch (line 874 in users.rs)
+    let invite_body = serde_json::json!({ "expires_in_days": 0 }).to_string();
+    let (status, body) = authenticated_post(
+        create_router(state),
+        "/api/users/invites",
+        &cookie,
+        &invite_body,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Creating invite with expires_in_days=0 must return 200. Body: {}",
+        body
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("code").is_some(),
+        "Invite response must include a code"
+    );
+    assert!(
+        json["expires_at"].is_null(),
+        "Invite with expires_in_days=0 must have null expires_at"
+    );
+}
