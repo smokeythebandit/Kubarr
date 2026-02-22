@@ -1628,4 +1628,839 @@ mod tests {
         assert_eq!(format!("{}", NotificationSeverity::Warning), "warning");
         assert_eq!(format!("{}", NotificationSeverity::Critical), "critical");
     }
+
+    // -------------------------------------------------------------------------
+    // NotificationService struct — new, default, clone, set_db
+    // -------------------------------------------------------------------------
+
+    async fn make_db() -> sea_orm::DatabaseConnection {
+        crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("in-memory db")
+    }
+
+    /// Insert a minimal user and return its ID.
+    async fn insert_test_user(db: &sea_orm::DatabaseConnection, user_id: i64) {
+        use crate::models::user;
+        use sea_orm::Set;
+        user::ActiveModel {
+            id: Set(user_id),
+            username: Set(format!("testuser{}", user_id)),
+            email: Set(format!("test{}@example.com", user_id)),
+            hashed_password: Set("hashed".to_string()),
+            is_active: Set(true),
+            is_approved: Set(true),
+            totp_secret: Set(None),
+            totp_enabled: Set(false),
+            totp_verified_at: Set(None),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+        }
+        .insert(db)
+        .await
+        .expect("insert user");
+    }
+
+    #[test]
+    fn notification_service_new_creates_instance() {
+        let _svc = NotificationService::new();
+    }
+
+    #[test]
+    fn notification_service_default_creates_instance() {
+        let _svc = NotificationService::default();
+    }
+
+    #[test]
+    fn notification_service_clone() {
+        let svc = NotificationService::new();
+        let _cloned = svc.clone();
+    }
+
+    #[tokio::test]
+    async fn notification_service_set_db() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+        svc.set_db(db).await;
+        // After set_db, get_unread_count should work (not fail with "db not initialized")
+        let count = svc.get_unread_count(999).await.expect("get_unread_count");
+        assert_eq!(count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // init_providers — with empty DB (no channels), should return Ok
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn init_providers_empty_db_returns_ok() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+        svc.set_db(db).await;
+        let result = svc.init_providers().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn init_providers_without_db_returns_err() {
+        let svc = NotificationService::new();
+        let result = svc.init_providers().await;
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // test_channel — when provider is NOT configured
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_channel_email_not_configured_returns_error() {
+        let svc = NotificationService::new();
+        let result = svc.test_channel("email", "test@example.com").await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_telegram_not_configured_returns_error() {
+        let svc = NotificationService::new();
+        let result = svc.test_channel("telegram", "123456789").await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_messagebird_not_configured_returns_error() {
+        let svc = NotificationService::new();
+        let result = svc.test_channel("messagebird", "+15550001234").await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_unknown_returns_error() {
+        let svc = NotificationService::new();
+        let result = svc.test_channel("signal", "some-dest").await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("not configured"));
+    }
+
+    // -------------------------------------------------------------------------
+    // get_unread_count — no DB returns err; with DB returns count
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_unread_count_without_db_returns_err() {
+        let svc = NotificationService::new();
+        let result = svc.get_unread_count(1).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_unread_count_with_empty_db_returns_zero() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+        svc.set_db(db).await;
+        let count = svc.get_unread_count(42).await.expect("count");
+        assert_eq!(count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // get_user_notifications — no DB returns err; with DB returns vec
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_user_notifications_without_db_returns_err() {
+        let svc = NotificationService::new();
+        let result = svc.get_user_notifications(1, 10, 0).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_user_notifications_with_empty_db_returns_empty_vec() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+        svc.set_db(db).await;
+        let notifications = svc.get_user_notifications(42, 10, 0).await.expect("get");
+        assert!(notifications.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // mark_as_read — no DB returns err; not found returns err
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mark_as_read_without_db_returns_err() {
+        let svc = NotificationService::new();
+        let result = svc.mark_as_read(1, 1).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn mark_as_read_not_found_returns_err() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+        svc.set_db(db).await;
+        let result = svc.mark_as_read(999, 1).await;
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // mark_all_as_read — no DB returns err; with DB returns ok
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mark_all_as_read_without_db_returns_err() {
+        let svc = NotificationService::new();
+        let result = svc.mark_all_as_read(1).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn mark_all_as_read_with_db_returns_ok() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+        svc.set_db(db).await;
+        // No notifications for user 999, but should succeed
+        let result = svc.mark_all_as_read(999).await;
+        assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // delete_notification — no DB returns err; not found returns err
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_notification_without_db_returns_err() {
+        let svc = NotificationService::new();
+        let result = svc.delete_notification(1, 1).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_notification_not_found_returns_err() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+        svc.set_db(db).await;
+        let result = svc.delete_notification(999, 1).await;
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // notify_event — no DB returns ok (silently skips)
+    // notify_event — event not in DB returns ok (skips)
+    // notify_event — event disabled returns ok
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn notify_event_without_db_returns_ok() {
+        // When db is None, silently returns Ok
+        let svc = NotificationService::new();
+        let result = svc
+            .notify_event(&AuditAction::Login, None, None, None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn notify_event_with_db_event_not_configured_returns_ok() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+        svc.set_db(db).await;
+        // No notification_events record for Login, should silently return Ok
+        let result = svc
+            .notify_event(&AuditAction::Login, None, Some("alice"), None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn notify_event_with_disabled_event_returns_ok() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        // Insert a disabled notification event
+        use crate::models::notification_event;
+        use sea_orm::Set;
+        notification_event::ActiveModel {
+            event_type: Set("login".to_string()),
+            enabled: Set(false),
+            severity: Set("info".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert event");
+
+        svc.set_db(db).await;
+        let result = svc
+            .notify_event(&AuditAction::Login, None, Some("alice"), None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn notify_event_system_wide_no_user_id() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        // Insert an enabled notification event
+        use crate::models::notification_event;
+        use sea_orm::Set;
+        notification_event::ActiveModel {
+            event_type: Set("login".to_string()),
+            enabled: Set(true),
+            severity: Set("info".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert event");
+
+        svc.set_db(db).await;
+        // user_id=None → system-wide notification path
+        let result = svc
+            .notify_event(&AuditAction::Login, None, Some("system"), None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn notify_event_with_user_id_creates_notification() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        // Create user with id=1 (required by FK constraint)
+        insert_test_user(&db, 1).await;
+
+        // Insert an enabled notification event
+        use crate::models::notification_event;
+        use sea_orm::Set;
+        notification_event::ActiveModel {
+            event_type: Set("login".to_string()),
+            enabled: Set(true),
+            severity: Set("info".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert event");
+
+        svc.set_db(db.clone()).await;
+        // user_id=Some(1) → creates in-app notification
+        let result = svc
+            .notify_event(&AuditAction::Login, Some(1), Some("alice"), Some("via web"))
+            .await;
+        assert!(result.is_ok());
+
+        // Verify the notification was created
+        let count = svc.get_unread_count(1).await.expect("count");
+        assert_eq!(count, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Full create/read/mark cycle for user notifications
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn notifications_full_lifecycle() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        // Create user with id=10 (required by FK constraint)
+        insert_test_user(&db, 10).await;
+
+        svc.set_db(db.clone()).await;
+
+        // Create a notification via notify_event
+        use crate::models::notification_event;
+        use sea_orm::Set;
+        notification_event::ActiveModel {
+            event_type: Set("login".to_string()),
+            enabled: Set(true),
+            severity: Set("info".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert event");
+
+        svc.notify_event(&AuditAction::Login, Some(10), Some("user10"), None)
+            .await
+            .expect("notify_event");
+
+        // get_unread_count
+        let unread = svc.get_unread_count(10).await.expect("unread");
+        assert_eq!(unread, 1);
+
+        // get_user_notifications
+        let notifications = svc.get_user_notifications(10, 10, 0).await.expect("get");
+        assert_eq!(notifications.len(), 1);
+        let notif_id = notifications[0].id;
+        assert_eq!(notifications[0].read, false);
+
+        // mark_as_read
+        svc.mark_as_read(notif_id, 10).await.expect("mark_as_read");
+        let unread_after = svc.get_unread_count(10).await.expect("unread after");
+        assert_eq!(unread_after, 0);
+
+        // delete_notification
+        svc.delete_notification(notif_id, 10).await.expect("delete");
+        let notifications_after = svc.get_user_notifications(10, 10, 0).await.expect("get");
+        assert!(notifications_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mark_all_as_read_marks_multiple_notifications() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        // Create user with id=5 (required by FK constraint)
+        insert_test_user(&db, 5).await;
+
+        svc.set_db(db.clone()).await;
+
+        use crate::models::notification_event;
+        use sea_orm::Set;
+        notification_event::ActiveModel {
+            event_type: Set("login".to_string()),
+            enabled: Set(true),
+            severity: Set("info".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert event");
+
+        // Create 3 notifications for user 5
+        for _ in 0..3 {
+            svc.notify_event(&AuditAction::Login, Some(5), Some("user5"), None)
+                .await
+                .expect("notify");
+        }
+
+        let unread = svc.get_unread_count(5).await.expect("unread");
+        assert_eq!(unread, 3);
+
+        svc.mark_all_as_read(5).await.expect("mark_all");
+        let unread_after = svc.get_unread_count(5).await.expect("unread after");
+        assert_eq!(unread_after, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // init_providers — with actual channel records in DB
+    // -------------------------------------------------------------------------
+
+    async fn insert_channel(
+        db: &sea_orm::DatabaseConnection,
+        channel_type: &str,
+        config: &str,
+        enabled: bool,
+    ) {
+        use crate::models::notification_channel;
+        use sea_orm::Set;
+        notification_channel::ActiveModel {
+            channel_type: Set(channel_type.to_string()),
+            enabled: Set(enabled),
+            config: Set(config.to_string()),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert channel");
+    }
+
+    #[tokio::test]
+    async fn init_providers_with_email_channel_loads_email_provider() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        // Insert an enabled email channel with valid config
+        let email_config = serde_json::json!({
+            "smtp_host": "127.0.0.1",
+            "smtp_port": 19999,
+            "username": "user",
+            "password": "pass",
+            "from_address": "from@example.com",
+            "from_name": "Test",
+            "use_tls": false
+        })
+        .to_string();
+        insert_channel(&db, "email", &email_config, true).await;
+
+        svc.set_db(db).await;
+        let result = svc.init_providers().await;
+        assert!(result.is_ok());
+
+        // Email provider should now be configured — test_channel will fail at SMTP
+        // but won't say "not configured"
+        let test_result = svc.test_channel("email", "to@example.com").await;
+        // It may fail at SMTP transport, but it should not say "not configured"
+        assert!(
+            test_result.error.as_deref().unwrap_or("").is_empty()
+                || !test_result
+                    .error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("not configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn init_providers_with_telegram_channel_loads_telegram_provider() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        let telegram_config = serde_json::json!({
+            "bot_token": "1234567890:FAKE_TOKEN",
+            "chat_id": "987654321"
+        })
+        .to_string();
+        insert_channel(&db, "telegram", &telegram_config, true).await;
+
+        svc.set_db(db).await;
+        let result = svc.init_providers().await;
+        assert!(result.is_ok());
+
+        // Telegram provider should be configured — test will fail at API call
+        let test_result = svc.test_channel("telegram", "987654321").await;
+        // Should fail at network, not at "not configured"
+        assert!(
+            test_result.error.as_deref().unwrap_or("").is_empty()
+                || !test_result
+                    .error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("not configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn init_providers_with_messagebird_channel_loads_messagebird_provider() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        let mb_config = serde_json::json!({
+            "api_key": "fake-api-key",
+            "originator": "KubarrTest"
+        })
+        .to_string();
+        insert_channel(&db, "messagebird", &mb_config, true).await;
+
+        svc.set_db(db).await;
+        let result = svc.init_providers().await;
+        assert!(result.is_ok());
+
+        let test_result = svc.test_channel("messagebird", "+15550001234").await;
+        // Should fail at network, not at "not configured"
+        assert!(
+            test_result.error.as_deref().unwrap_or("").is_empty()
+                || !test_result
+                    .error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("not configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn init_providers_disabled_channel_not_loaded() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        let email_config = serde_json::json!({
+            "smtp_host": "127.0.0.1",
+            "smtp_port": 19999,
+            "username": "user",
+            "password": "pass",
+            "from_address": "from@example.com",
+            "use_tls": false
+        })
+        .to_string();
+        // Disabled channel — should not be loaded
+        insert_channel(&db, "email", &email_config, false).await;
+
+        svc.set_db(db).await;
+        let result = svc.init_providers().await;
+        assert!(result.is_ok());
+
+        // Email should still be "not configured" since channel is disabled
+        let test_result = svc.test_channel("email", "to@example.com").await;
+        assert!(!test_result.success);
+        assert!(test_result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn init_providers_unknown_channel_type_skips_gracefully() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        // Insert a channel with unknown type — should be silently skipped
+        insert_channel(&db, "signal", r#"{"token":"fake"}"#, true).await;
+
+        svc.set_db(db).await;
+        let result = svc.init_providers().await;
+        assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // send_external_notifications + send_to_channel + log_notification coverage
+    // -------------------------------------------------------------------------
+
+    async fn insert_user_pref(
+        db: &sea_orm::DatabaseConnection,
+        user_id: i64,
+        channel_type: &str,
+        destination: Option<&str>,
+        enabled: bool,
+        verified: bool,
+    ) {
+        use crate::models::user_notification_pref;
+        use sea_orm::Set;
+        user_notification_pref::ActiveModel {
+            user_id: Set(user_id),
+            channel_type: Set(channel_type.to_string()),
+            enabled: Set(enabled),
+            destination: Set(destination.map(|s| s.to_string())),
+            verified: Set(verified),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert user pref");
+    }
+
+    #[tokio::test]
+    async fn notify_event_with_user_pref_triggers_send_to_channel_and_log() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        // Create user
+        insert_test_user(&db, 20).await;
+
+        // Create enabled notification event
+        {
+            use crate::models::notification_event;
+            use sea_orm::Set;
+            notification_event::ActiveModel {
+                event_type: Set("login".to_string()),
+                enabled: Set(true),
+                severity: Set("info".to_string()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert event");
+        }
+
+        // Add a user pref for email (enabled + verified + with destination)
+        insert_user_pref(&db, 20, "email", Some("to@example.com"), true, true).await;
+
+        // Add email channel so init_providers can load it
+        let email_config = serde_json::json!({
+            "smtp_host": "127.0.0.1",
+            "smtp_port": 19999,
+            "username": "u",
+            "password": "p",
+            "from_address": "from@example.com",
+            "use_tls": false
+        })
+        .to_string();
+        insert_channel(&db, "email", &email_config, true).await;
+
+        svc.set_db(db.clone()).await;
+        svc.init_providers().await.expect("init_providers");
+
+        // notify_event will call send_external_notifications → send_to_channel → log_notification
+        let result = svc
+            .notify_event(&AuditAction::Login, Some(20), Some("user20"), None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn notify_event_with_user_pref_no_destination_skips_send() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        insert_test_user(&db, 21).await;
+
+        {
+            use crate::models::notification_event;
+            use sea_orm::Set;
+            notification_event::ActiveModel {
+                event_type: Set("login".to_string()),
+                enabled: Set(true),
+                severity: Set("info".to_string()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert event");
+        }
+
+        // Pref with no destination — send should not be called
+        insert_user_pref(&db, 21, "email", None, true, true).await;
+
+        svc.set_db(db.clone()).await;
+        let result = svc
+            .notify_event(&AuditAction::Login, Some(21), Some("user21"), None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn send_to_channel_with_unconfigured_provider_returns_error() {
+        // Call via test_channel to cover send_to_channel with no provider configured
+        let svc = NotificationService::new();
+        let result = svc.test_channel("email", "dest@example.com").await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn send_to_channel_fallback_when_telegram_pref_but_no_provider() {
+        // Calls send_to_channel("telegram", ...) without telegram provider → falls through to
+        // the fallback SendResult (line 354)
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        insert_test_user(&db, 40).await;
+
+        {
+            use crate::models::notification_event;
+            use sea_orm::Set;
+            notification_event::ActiveModel {
+                event_type: Set("login".to_string()),
+                enabled: Set(true),
+                severity: Set("info".to_string()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert event");
+        }
+
+        // User pref for telegram with destination, but no provider loaded
+        insert_user_pref(&db, 40, "telegram", Some("123456789"), true, true).await;
+
+        svc.set_db(db.clone()).await;
+        // Do NOT call init_providers, so telegram provider stays None
+
+        // notify_event → send_to_channel("telegram", ...) → telegram branch, None provider → fallback
+        let result = svc
+            .notify_event(&AuditAction::Login, Some(40), Some("user40"), None)
+            .await;
+        assert!(result.is_ok()); // log_notification still logs the failure
+    }
+
+    #[tokio::test]
+    async fn notify_event_with_telegram_pref_calls_send_to_channel_telegram() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        insert_test_user(&db, 30).await;
+
+        {
+            use crate::models::notification_event;
+            use sea_orm::Set;
+            notification_event::ActiveModel {
+                event_type: Set("login".to_string()),
+                enabled: Set(true),
+                severity: Set("info".to_string()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert event");
+        }
+
+        // Add user pref for telegram with a destination (chat ID)
+        insert_user_pref(&db, 30, "telegram", Some("987654321"), true, true).await;
+
+        // Add telegram channel so init_providers loads the TelegramProvider
+        let telegram_config = serde_json::json!({
+            "bot_token": "1234567890:FAKE_TOKEN_FOR_TEST"
+        })
+        .to_string();
+        insert_channel(&db, "telegram", &telegram_config, true).await;
+
+        svc.set_db(db.clone()).await;
+        svc.init_providers().await.expect("init_providers");
+
+        // notify_event → send_external_notifications → send_to_channel("telegram", ...) → provider.send()
+        // The actual send will fail (fake token/network), but the code path is covered
+        let result = svc
+            .notify_event(&AuditAction::Login, Some(30), Some("user30"), None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn notify_event_with_messagebird_pref_calls_send_to_channel_messagebird() {
+        let svc = NotificationService::new();
+        let db = make_db().await;
+
+        insert_test_user(&db, 31).await;
+
+        {
+            use crate::models::notification_event;
+            use sea_orm::Set;
+            notification_event::ActiveModel {
+                event_type: Set("login".to_string()),
+                enabled: Set(true),
+                severity: Set("info".to_string()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert event");
+        }
+
+        // Add user pref for messagebird with a phone number destination
+        insert_user_pref(&db, 31, "messagebird", Some("+15550001234"), true, true).await;
+
+        // Add messagebird channel so init_providers loads the MessageBirdProvider
+        let mb_config = serde_json::json!({
+            "api_key": "fake-api-key-for-test",
+            "originator": "KubarrTest"
+        })
+        .to_string();
+        insert_channel(&db, "messagebird", &mb_config, true).await;
+
+        svc.set_db(db.clone()).await;
+        svc.init_providers().await.expect("init_providers");
+
+        // notify_event → send_external_notifications → send_to_channel("messagebird", ...) → provider.send()
+        let result = svc
+            .notify_event(&AuditAction::Login, Some(31), Some("user31"), None)
+            .await;
+        assert!(result.is_ok());
+    }
 }

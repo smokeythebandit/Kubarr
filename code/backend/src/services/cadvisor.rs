@@ -353,4 +353,110 @@ container_network_receive_bytes_total{interface="lo",namespace="kubarr",pod="bac
         assert_eq!(ns2.transmit_bytes_total, 400);
         assert_eq!(ns2.pod_count, 1);
     }
+
+    // -------------------------------------------------------------------------
+    // Additional metric type coverage
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_errors_and_dropped_metric_types() {
+        let input = concat!(
+            r#"container_network_receive_errors_total{interface="eth0",namespace="test",pod="pod1"} 5"#,
+            "\n",
+            r#"container_network_transmit_errors_total{interface="eth0",namespace="test",pod="pod1"} 3"#,
+            "\n",
+            r#"container_network_receive_packets_dropped_total{interface="eth0",namespace="test",pod="pod1"} 10"#,
+            "\n",
+            r#"container_network_transmit_packets_dropped_total{interface="eth0",namespace="test",pod="pod1"} 7"#,
+        );
+
+        let metrics = parse_prometheus_metrics(input);
+        assert_eq!(metrics.len(), 1);
+        let m = &metrics[0];
+        assert_eq!(m.receive_errors_total, 5);
+        assert_eq!(m.transmit_errors_total, 3);
+        assert_eq!(m.receive_packets_dropped_total, 10);
+        assert_eq!(m.transmit_packets_dropped_total, 7);
+    }
+
+    #[test]
+    fn test_parse_unknown_metric_type_is_ignored() {
+        // A container_network_ metric that doesn't match any known type
+        let input = r#"container_network_unknown_counter_total{interface="eth0",namespace="test",pod="pod1"} 99"#;
+        let metrics = parse_prometheus_metrics(input);
+        // The line has valid labels but unknown type; it's returned with zero bytes
+        // (the entry is created but no field is set)
+        assert!(metrics.len() <= 1);
+    }
+
+    #[test]
+    fn test_parse_missing_namespace_label_skipped() {
+        // Pod and interface present but no namespace
+        let input = r#"container_network_receive_bytes_total{interface="eth0",pod="pod1"} 100"#;
+        let metrics = parse_prometheus_metrics(input);
+        assert!(metrics.is_empty());
+    }
+
+    #[test]
+    fn test_parse_missing_pod_label_skipped() {
+        let input =
+            r#"container_network_receive_bytes_total{interface="eth0",namespace="test"} 100"#;
+        let metrics = parse_prometheus_metrics(input);
+        assert!(metrics.is_empty());
+    }
+
+    #[test]
+    fn test_parse_missing_interface_label_skipped() {
+        let input = r#"container_network_receive_bytes_total{namespace="test",pod="pod1"} 100"#;
+        let metrics = parse_prometheus_metrics(input);
+        assert!(metrics.is_empty());
+    }
+
+    #[test]
+    fn test_parse_non_container_network_line_skipped() {
+        let input = r#"container_cpu_usage_total{namespace="test",pod="pod1"} 100"#;
+        let metrics = parse_prometheus_metrics(input);
+        assert!(metrics.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_aggregate_with_errors_and_dropped() {
+        let metrics = vec![ContainerNetworkMetrics {
+            namespace: "prod".to_string(),
+            pod: "svc-1".to_string(),
+            interface: "eth0".to_string(),
+            receive_errors_total: 4,
+            transmit_errors_total: 2,
+            receive_packets_dropped_total: 8,
+            transmit_packets_dropped_total: 6,
+            ..Default::default()
+        }];
+
+        let aggregated = aggregate_by_namespace(&metrics);
+        let prod = aggregated.get("prod").unwrap();
+        assert_eq!(prod.receive_errors_total, 4);
+        assert_eq!(prod.transmit_errors_total, 2);
+        assert_eq!(prod.receive_packets_dropped_total, 8);
+        assert_eq!(prod.transmit_packets_dropped_total, 6);
+    }
+
+    #[test]
+    fn test_parse_empty_input() {
+        let metrics = parse_prometheus_metrics("");
+        assert!(metrics.is_empty());
+    }
+
+    #[test]
+    fn test_parse_only_comments_and_blanks() {
+        let input = "# HELP foo bar\n# TYPE foo counter\n\n";
+        let metrics = parse_prometheus_metrics(input);
+        assert!(metrics.is_empty());
+    }
+
+    #[test]
+    fn test_aggregate_empty_input() {
+        let aggregated = aggregate_by_namespace(&[]);
+        assert!(aggregated.is_empty());
+    }
 }

@@ -37,6 +37,41 @@ pub async fn connect_with_url(database_url: &str) -> Result<DbConn> {
     Ok(db)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_with_url_succeeds_on_sqlite_memory() {
+        let db = connect_with_url("sqlite::memory:").await.expect("connect");
+        // Migrations must have run; just verify the connection works
+        drop(db);
+    }
+
+    #[tokio::test]
+    async fn connect_with_url_fails_on_bad_url() {
+        let result = connect_with_url("invalid://notadb").await;
+        assert!(result.is_err(), "bad URL must fail");
+    }
+
+    #[tokio::test]
+    async fn try_connect_returns_none_when_localhost_and_no_env_var() {
+        // When database URL contains "localhost" and KUBARR_DATABASE_URL is not set,
+        // try_connect should return None immediately (no timeout wait)
+        if std::env::var("KUBARR_DATABASE_URL").is_ok() {
+            // Skip if env var is set (would change behavior)
+            return;
+        }
+
+        // Default config URL has "localhost" → should return None
+        let result = try_connect().await;
+        assert!(
+            result.is_none(),
+            "should return None for localhost without KUBARR_DATABASE_URL"
+        );
+    }
+}
+
 /// Try to connect to database, returns None if connection fails
 /// Uses a short timeout for the initial probe
 pub async fn try_connect() -> Option<DbConn> {

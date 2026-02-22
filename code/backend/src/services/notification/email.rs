@@ -333,4 +333,161 @@ mod tests {
         let result = EmailProvider::from_config(&config);
         assert!(result.is_ok());
     }
+
+    // -------------------------------------------------------------------------
+    // channel_type, send, test — trait impl coverage
+    // -------------------------------------------------------------------------
+
+    fn make_provider() -> EmailProvider {
+        EmailProvider::from_config(&serde_json::json!({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "username": "user",
+            "password": "pass",
+            "from_address": "bot@example.com",
+            "from_name": "Kubarr"
+        }))
+        .expect("build provider")
+    }
+
+    #[test]
+    fn channel_type_returns_email() {
+        let provider = make_provider();
+        assert_eq!(provider.channel_type(), ChannelType::Email);
+    }
+
+    #[tokio::test]
+    async fn send_email_with_invalid_to_returns_error() {
+        let provider = make_provider();
+        let result = provider.send_email("not-an-email", "Subject", "Body").await;
+        assert!(!result.success, "invalid email should fail");
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("invalid")
+                || result
+                    .error
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains("address"),
+            "error message should mention invalid address: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn send_calls_send_email_with_message_fields() {
+        let provider = make_provider();
+        let msg = NotificationMessage {
+            recipient: "not-an-email".to_string(),
+            title: "Test Title".to_string(),
+            body: "Test body text".to_string(),
+            severity: crate::services::notification::NotificationSeverity::Info,
+        };
+        // Will fail at SMTP transport since recipient is invalid — covers send() lines
+        let result = provider.send(&msg).await;
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_method_calls_send_email_with_test_subject() {
+        let provider = make_provider();
+        // invalid destination covers test() lines
+        let result = provider.test("not-an-email").await;
+        assert!(!result.success);
+    }
+
+    // -------------------------------------------------------------------------
+    // Cover lines 71-110: valid recipient → SMTP transport fails (connection refused)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn send_email_valid_to_smtp_connection_fails() {
+        // Use a provider pointing to a server that will refuse connections,
+        // but with valid email addresses so we reach the SMTP transport call.
+        let provider = EmailProvider::from_config(&serde_json::json!({
+            "smtp_host": "127.0.0.1",
+            "smtp_port": 19999, // unlikely to be open
+            "username": "u",
+            "password": "p",
+            "from_address": "from@example.com",
+            "from_name": "Test",
+            "use_tls": false
+        }))
+        .expect("provider");
+
+        let result = provider
+            .send_email("to@example.com", "Subject", "Body text")
+            .await;
+        // Should fail because SMTP port is not open, but covers the code path
+        // through valid-address parsing and email building
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn send_with_valid_recipient_reaches_smtp() {
+        // Same provider with valid recipient to cover send() → send_email() path
+        let provider = EmailProvider::from_config(&serde_json::json!({
+            "smtp_host": "127.0.0.1",
+            "smtp_port": 19999,
+            "username": "u",
+            "password": "p",
+            "from_address": "from@example.com",
+            "from_name": "Test",
+            "use_tls": false
+        }))
+        .expect("provider");
+
+        let msg = NotificationMessage {
+            recipient: "to@example.com".to_string(),
+            title: "Test".to_string(),
+            body: "Body".to_string(),
+            severity: crate::services::notification::NotificationSeverity::Warning,
+        };
+        let result = provider.send(&msg).await;
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_with_valid_destination_reaches_smtp() {
+        let provider = EmailProvider::from_config(&serde_json::json!({
+            "smtp_host": "127.0.0.1",
+            "smtp_port": 19999,
+            "username": "u",
+            "password": "p",
+            "from_address": "from@example.com",
+            "use_tls": false
+        }))
+        .expect("provider");
+
+        let result = provider.test("to@example.com").await;
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn send_email_invalid_from_address_returns_error() {
+        // Create a provider with an invalid from_address to cover the
+        // inner fallback path (lines 73-80) where from_address.parse() also fails
+        let provider = EmailProvider::from_config(&serde_json::json!({
+            "smtp_host": "127.0.0.1",
+            "smtp_port": 19999,
+            "username": "u",
+            "password": "p",
+            "from_address": "not-valid-email!!",
+            "from_name": "Test",
+            "use_tls": false
+        }))
+        .expect("provider");
+
+        let result = provider
+            .send_email("to@example.com", "Subject", "Body")
+            .await;
+        // Should fail due to invalid from address
+        assert!(!result.success);
+    }
 }

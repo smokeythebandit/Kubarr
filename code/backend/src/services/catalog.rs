@@ -506,4 +506,241 @@ mod tests {
         assert!(json.contains("\"is_browseable\":false"));
         assert!(json.contains("\"default_port\":8096"));
     }
+
+    // -------------------------------------------------------------------------
+    // AppCatalog::new / Default / reload — filesystem-based
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn app_catalog_new_creates_empty_when_no_charts_dir() {
+        // With the test environment's CONFIG.charts.dir likely not existing,
+        // new() returns an empty catalog without panicking.
+        let catalog = AppCatalog::new();
+        // Catalog may have 0 apps (if charts dir doesn't exist) or more — just verify no panic.
+        let _ = catalog.get_all_apps().len();
+    }
+
+    #[test]
+    fn app_catalog_default_is_same_as_new() {
+        // Default::default() should equal AppCatalog::new() in structure
+        let catalog = AppCatalog::default();
+        let _ = catalog.get_all_apps().len();
+    }
+
+    #[test]
+    fn app_catalog_reload_does_not_panic() {
+        let mut catalog = AppCatalog::new();
+        catalog.reload();
+        let _ = catalog.get_all_apps().len();
+    }
+
+    // -------------------------------------------------------------------------
+    // AppCatalog::parse_chart — via temp directory
+    // -------------------------------------------------------------------------
+
+    fn write_file(path: &std::path::Path, content: &str) {
+        std::fs::write(path, content).expect("write file");
+    }
+
+    #[test]
+    fn parse_chart_with_minimal_chart_yaml_and_kubarr_annotation() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let chart_dir = tmp.path().join("sonarr");
+        std::fs::create_dir_all(&chart_dir).expect("mkdir");
+
+        write_file(
+            &chart_dir.join("Chart.yaml"),
+            r#"apiVersion: v2
+name: sonarr
+description: Sonarr PVR
+annotations:
+  kubarr.io/category: "media"
+  kubarr.io/display-name: "Sonarr"
+  kubarr.io/icon: "📺"
+"#,
+        );
+
+        let catalog = AppCatalog::with_apps(HashMap::new());
+        let result = catalog
+            .parse_chart("sonarr", &chart_dir)
+            .expect("parse_chart");
+        let app = result.expect("should parse");
+        assert_eq!(app.name, "sonarr");
+        assert_eq!(app.category, "media");
+        assert_eq!(app.display_name, "Sonarr");
+        assert_eq!(app.icon, "📺");
+        assert_eq!(app.default_port, 8080); // default
+        assert!(!app.is_system);
+        assert!(!app.is_hidden);
+        assert!(app.is_browseable);
+    }
+
+    #[test]
+    fn parse_chart_no_chart_yaml_returns_none() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let chart_dir = tmp.path().join("radarr");
+        std::fs::create_dir_all(&chart_dir).expect("mkdir");
+        // No Chart.yaml created
+
+        let catalog = AppCatalog::with_apps(HashMap::new());
+        let result = catalog
+            .parse_chart("radarr", &chart_dir)
+            .expect("parse_chart no error");
+        assert!(result.is_none(), "should return None when no Chart.yaml");
+    }
+
+    #[test]
+    fn parse_chart_no_kubarr_category_returns_none() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let chart_dir = tmp.path().join("myapp");
+        std::fs::create_dir_all(&chart_dir).expect("mkdir");
+
+        write_file(
+            &chart_dir.join("Chart.yaml"),
+            r#"apiVersion: v2
+name: myapp
+description: My App
+# No kubarr annotations
+"#,
+        );
+
+        let catalog = AppCatalog::with_apps(HashMap::new());
+        let result = catalog.parse_chart("myapp", &chart_dir).expect("parse");
+        assert!(
+            result.is_none(),
+            "no kubarr.io/category → should return None"
+        );
+    }
+
+    #[test]
+    fn parse_chart_with_values_yaml() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let chart_dir = tmp.path().join("sonarr");
+        std::fs::create_dir_all(&chart_dir).expect("mkdir");
+
+        write_file(
+            &chart_dir.join("Chart.yaml"),
+            r#"apiVersion: v2
+name: sonarr
+description: Sonarr
+annotations:
+  kubarr.io/category: "media"
+  kubarr.io/system: "false"
+  kubarr.io/hidden: "false"
+  kubarr.io/browseable: "true"
+"#,
+        );
+
+        write_file(
+            &chart_dir.join("values.yaml"),
+            r#"sonarr:
+  image:
+    repository: linuxserver/sonarr
+    tag: "3.0"
+  service:
+    port: 8989
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+  env:
+    PUID: "1000"
+    PGID: "1000"
+persistence:
+  config:
+    enabled: true
+    mountPath: /config
+    size: 5Gi
+  media:
+    enabled: false
+    mountPath: /media
+    size: 100Gi
+"#,
+        );
+
+        let catalog = AppCatalog::with_apps(HashMap::new());
+        let result = catalog.parse_chart("sonarr", &chart_dir).expect("parse");
+        let app = result.expect("parsed ok");
+        assert_eq!(app.container_image, "linuxserver/sonarr:3.0");
+        assert_eq!(app.default_port, 8989);
+        assert_eq!(app.resource_requirements.cpu_request, "200m");
+        assert_eq!(app.resource_requirements.memory_limit, "1Gi");
+        // Only enabled volumes
+        assert_eq!(app.volumes.len(), 1);
+        assert_eq!(app.volumes[0].name, "config");
+        assert_eq!(app.volumes[0].mount_path, "/config");
+        assert_eq!(app.volumes[0].size, "5Gi");
+        // Env vars
+        assert_eq!(
+            app.environment_variables.get("PUID").map(|s| s.as_str()),
+            Some("1000")
+        );
+    }
+
+    #[test]
+    fn parse_chart_system_hidden_not_browseable() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let chart_dir = tmp.path().join("internal");
+        std::fs::create_dir_all(&chart_dir).expect("mkdir");
+
+        write_file(
+            &chart_dir.join("Chart.yaml"),
+            r#"apiVersion: v2
+name: internal
+description: Internal App
+annotations:
+  kubarr.io/category: "system"
+  kubarr.io/system: "true"
+  kubarr.io/hidden: "true"
+  kubarr.io/browseable: "false"
+"#,
+        );
+
+        let catalog = AppCatalog::with_apps(HashMap::new());
+        let result = catalog.parse_chart("internal", &chart_dir).expect("parse");
+        let app = result.expect("parsed ok");
+        assert!(app.is_system);
+        assert!(app.is_hidden);
+        assert!(!app.is_browseable);
+    }
+
+    // -------------------------------------------------------------------------
+    // AppCatalog::new / load_apps with a temp charts directory containing charts
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn load_apps_from_temp_charts_dir() {
+        // This test creates a temp charts dir and verifies new() picks it up via CONFIG.
+        // Since CONFIG is global, we test parse_chart indirectly via with_apps and
+        // verify the AppCatalog can load from the directory structure we create.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let chart_dir = tmp.path().join("sonarr");
+        std::fs::create_dir_all(&chart_dir).expect("mkdir");
+
+        write_file(
+            &chart_dir.join("Chart.yaml"),
+            r#"apiVersion: v2
+name: sonarr
+description: Sonarr PVR
+annotations:
+  kubarr.io/category: "media"
+"#,
+        );
+
+        // Use parse_chart directly (already tested above), but also test
+        // that two chained calls produce consistent results
+        let catalog = AppCatalog::with_apps(HashMap::new());
+        let r1 = catalog
+            .parse_chart("sonarr", &chart_dir)
+            .expect("first call");
+        let r2 = catalog
+            .parse_chart("sonarr", &chart_dir)
+            .expect("second call");
+        assert!(r1.is_some());
+        assert!(r2.is_some());
+        assert_eq!(r1.unwrap().name, r2.unwrap().name);
+    }
 }

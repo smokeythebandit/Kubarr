@@ -902,6 +902,312 @@ mod tests {
         let result = rewrite_js_paths(js, "/sonarr");
         assert!(result.contains(".p='/sonarr/static/'"));
     }
+
+    // -------------------------------------------------------------------------
+    // redirect_to_app_error tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_redirect_to_app_error_returns_302() {
+        let resp = redirect_to_app_error("sonarr", "not_found", "App not deployed");
+        assert_eq!(resp.status(), StatusCode::FOUND);
+    }
+
+    #[test]
+    fn test_redirect_to_app_error_location_contains_app_and_reason() {
+        let resp = redirect_to_app_error("radarr", "unreachable", "Connection refused");
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .expect("Location header must be set")
+            .to_str()
+            .unwrap();
+        assert!(location.contains("radarr"), "location: {}", location);
+        assert!(location.contains("unreachable"), "location: {}", location);
+    }
+
+    #[test]
+    fn test_redirect_to_app_error_encodes_details() {
+        let resp = redirect_to_app_error("jackett", "error", "has spaces & special");
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        // URL-encoded spaces and & should appear in the location
+        assert!(
+            !location.contains("has spaces"),
+            "details should be URL-encoded: {}",
+            location
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // rewrite_response_body tests (async)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_rewrite_response_body_non_html_passes_through_unchanged() {
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"key":"/value"}"#))
+            .unwrap();
+        let result = rewrite_response_body(resp, "sonarr").await;
+        assert_eq!(result.status(), StatusCode::OK);
+        // Body should be unchanged because content-type is not HTML/JS/CSS
+        let bytes = axum::body::to_bytes(result.into_body(), 1024)
+            .await
+            .unwrap();
+        let s = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(s.contains(r#"{"key":"/value"}"#));
+    }
+
+    #[tokio::test]
+    async fn test_rewrite_response_body_html_rewrites_paths() {
+        let html = r#"<link href="/css/app.css"><img src="/images/logo.png">"#;
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(html))
+            .unwrap();
+        let result = rewrite_response_body(resp, "sonarr").await;
+        let bytes = axum::body::to_bytes(result.into_body(), 4096)
+            .await
+            .unwrap();
+        let s = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            s.contains("/sonarr/css/app.css"),
+            "HTML href not rewritten: {}",
+            s
+        );
+        assert!(
+            s.contains("/sonarr/images/logo.png"),
+            "HTML src not rewritten: {}",
+            s
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rewrite_response_body_js_rewrites_webpack_path() {
+        let js = r#"e.p="/_next/static/""#;
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/javascript")
+            .body(Body::from(js))
+            .unwrap();
+        let result = rewrite_response_body(resp, "nextapp").await;
+        let bytes = axum::body::to_bytes(result.into_body(), 4096)
+            .await
+            .unwrap();
+        let s = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            s.contains("/nextapp/_next/static/"),
+            "JS webpack path not rewritten: {}",
+            s
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rewrite_response_body_css_rewrites_url() {
+        let css = r#"background: url("/images/bg.png");"#;
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/css")
+            .body(Body::from(css))
+            .unwrap();
+        let result = rewrite_response_body(resp, "myapp").await;
+        let bytes = axum::body::to_bytes(result.into_body(), 4096)
+            .await
+            .unwrap();
+        let s = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            s.contains(r#"url("/myapp/images/bg.png")"#),
+            "CSS url not rewritten: {}",
+            s
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rewrite_response_body_updates_content_length() {
+        // If the response has a Content-Length header, it should be updated
+        let html = r#"<link href="/css/x.css">"#;
+        let original_len = html.len().to_string();
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html")
+            .header(header::CONTENT_LENGTH, &original_len)
+            .body(Body::from(html))
+            .unwrap();
+        let result = rewrite_response_body(resp, "myapp").await;
+        // The Content-Length should be updated to reflect the new body size
+        if let Some(len_header) = result.headers().get(header::CONTENT_LENGTH) {
+            let new_len: usize = len_header.to_str().unwrap().parse().unwrap();
+            // Rewritten body is longer than original, so Content-Length should differ
+            assert!(new_len != original_len.parse::<usize>().unwrap());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // rewrite_app_response — additional edge cases
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_rewrite_app_response_redirect_without_location_passes_through() {
+        // A redirect response without a Location header should not be modified
+        let resp = Response::builder()
+            .status(StatusCode::FOUND)
+            .body(Body::empty())
+            .unwrap();
+        let result = rewrite_app_response(
+            resp,
+            "sonarr",
+            "http://sonarr.sonarr.svc.cluster.local:8989",
+            false,
+        );
+        assert_eq!(result.status(), StatusCode::FOUND);
+        assert!(result.headers().get(header::LOCATION).is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // get_app_target_url — cache-hit paths (no K8s needed)
+    // -------------------------------------------------------------------------
+
+    async fn make_state() -> AppState {
+        use crate::services::audit::AuditService;
+        use crate::services::catalog::AppCatalog;
+        use crate::services::chart_sync::ChartSyncService;
+        use crate::services::notification::NotificationService;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let catalog = Arc::new(RwLock::new(AppCatalog::new()));
+        let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
+        let k8s_client = Arc::new(RwLock::new(None));
+        AppState::new(
+            None,
+            k8s_client,
+            catalog,
+            chart_sync,
+            AuditService::new(),
+            NotificationService::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_get_app_target_url_cache_hit_no_base_path() {
+        let state = make_state().await;
+        let base = "http://sonarr.sonarr.svc.cluster.local:8989";
+        state
+            .endpoint_cache
+            .set("sonarr", base.to_string(), None)
+            .await;
+
+        let (ret_base, has_base_path, target_url) =
+            get_app_target_url(&state, "sonarr", "/sonarr/movies", "")
+                .await
+                .expect("should succeed from cache");
+
+        assert_eq!(ret_base, base);
+        assert!(!has_base_path);
+        // Strips the app name prefix → "movies"
+        assert_eq!(target_url, format!("{}/movies", base));
+    }
+
+    #[tokio::test]
+    async fn test_get_app_target_url_cache_hit_with_base_path() {
+        let state = make_state().await;
+        let base = "http://sonarr.sonarr.svc.cluster.local:8989";
+        state
+            .endpoint_cache
+            .set("sonarr", base.to_string(), Some("/sonarr".to_string()))
+            .await;
+
+        let (ret_base, has_base_path, target_url) =
+            get_app_target_url(&state, "sonarr", "/sonarr/movies", "")
+                .await
+                .expect("should succeed from cache");
+
+        assert_eq!(ret_base, base);
+        assert!(has_base_path);
+        // With base_path, keeps full path starting from after /
+        assert_eq!(target_url, format!("{}/sonarr/movies", base));
+    }
+
+    #[tokio::test]
+    async fn test_get_app_target_url_cache_hit_no_base_path_empty_path() {
+        let state = make_state().await;
+        let base = "http://sonarr.sonarr.svc.cluster.local:8989";
+        state
+            .endpoint_cache
+            .set("sonarr", base.to_string(), None)
+            .await;
+
+        let (_, _, target_url) = get_app_target_url(&state, "sonarr", "/sonarr", "")
+            .await
+            .expect("should succeed");
+
+        // Empty after stripping app name → add trailing slash
+        assert_eq!(target_url, format!("{}/", base));
+    }
+
+    #[tokio::test]
+    async fn test_get_app_target_url_cache_hit_no_base_path_empty_path_with_query() {
+        let state = make_state().await;
+        let base = "http://sonarr.sonarr.svc.cluster.local:8989";
+        state
+            .endpoint_cache
+            .set("sonarr", base.to_string(), None)
+            .await;
+
+        let (_, _, target_url) = get_app_target_url(&state, "sonarr", "/sonarr", "?search=foo")
+            .await
+            .expect("should succeed");
+
+        // Empty path with query
+        assert_eq!(target_url, format!("{}/?search=foo", base));
+    }
+
+    #[tokio::test]
+    async fn test_get_app_target_url_cache_hit_with_base_path_empty_path() {
+        let state = make_state().await;
+        let base = "http://sonarr.sonarr.svc.cluster.local:8989";
+        state
+            .endpoint_cache
+            .set("sonarr", base.to_string(), Some("/sonarr".to_string()))
+            .await;
+
+        let (_, _, target_url) = get_app_target_url(&state, "sonarr", "/", "")
+            .await
+            .expect("should succeed");
+
+        assert_eq!(target_url, format!("{}/", base));
+    }
+
+    #[tokio::test]
+    async fn test_get_app_target_url_cache_hit_with_base_path_empty_path_with_query() {
+        let state = make_state().await;
+        let base = "http://sonarr.sonarr.svc.cluster.local:8989";
+        state
+            .endpoint_cache
+            .set("sonarr", base.to_string(), Some("/sonarr".to_string()))
+            .await;
+
+        let (_, _, target_url) = get_app_target_url(&state, "sonarr", "/", "?q=1")
+            .await
+            .expect("should succeed");
+
+        assert_eq!(target_url, format!("{}/?q=1", base));
+    }
+
+    #[tokio::test]
+    async fn test_get_app_target_url_no_k8s_returns_err() {
+        let state = make_state().await;
+        // No cache entry, k8s_client is None → should return Err
+        let result = get_app_target_url(&state, "sonarr", "/sonarr", "").await;
+        assert!(result.is_err());
+    }
 }
 
 /// Get the target URL for an app, returning (base_url, has_base_path, full_target_url)

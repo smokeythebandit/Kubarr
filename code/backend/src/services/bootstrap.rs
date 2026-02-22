@@ -963,4 +963,476 @@ mod tests {
         assert!(s.statuses.is_empty());
         assert!(!s.started);
     }
+
+    // -------------------------------------------------------------------------
+    // initialize_db_status — private method, tested via inline tests
+    // -------------------------------------------------------------------------
+
+    async fn make_svc_with_db(db: &DatabaseConnection) -> BootstrapService {
+        let shared_db = Arc::new(RwLock::new(Some(db.clone())));
+        let k8s: Arc<RwLock<Option<K8sClient>>> = Arc::new(RwLock::new(None));
+        let catalog = Arc::new(RwLock::new(AppCatalog::default()));
+        let (tx, _rx) = broadcast::channel(100);
+        BootstrapService::new(shared_db, k8s, catalog, tx)
+    }
+
+    #[tokio::test]
+    async fn initialize_db_status_creates_pending_records() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+        let svc = make_svc_with_db(&db).await;
+
+        svc.initialize_db_status(&db)
+            .await
+            .expect("initialize_db_status");
+
+        let records = BootstrapStatus::find().all(&db).await.expect("find all");
+        assert_eq!(records.len(), 4, "all 4 components should be initialized");
+        for r in &records {
+            assert_eq!(r.status, "pending");
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_db_status_skips_existing_records() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        // Pre-insert one record
+        bootstrap_status::ActiveModel {
+            component: Set("postgresql".to_string()),
+            display_name: Set("PostgreSQL".to_string()),
+            status: Set("healthy".to_string()),
+            message: Set(Some("Already installed".to_string())),
+            error: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert existing");
+
+        let svc = make_svc_with_db(&db).await;
+        svc.initialize_db_status(&db)
+            .await
+            .expect("initialize_db_status");
+
+        let records = BootstrapStatus::find().all(&db).await.expect("find all");
+        assert_eq!(records.len(), 4);
+
+        let pg = records
+            .iter()
+            .find(|r| r.component == "postgresql")
+            .unwrap();
+        assert_eq!(
+            pg.status, "healthy",
+            "existing record must not be overwritten"
+        );
+
+        for r in &records {
+            if r.component != "postgresql" {
+                assert_eq!(r.status, "pending");
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // save_server_config / get_server_config
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn save_server_config_creates_new_record() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+        let model = save_server_config(&db, "My Kubarr", "/data/kubarr")
+            .await
+            .expect("save_server_config");
+        assert_eq!(model.name, "My Kubarr");
+        assert_eq!(model.storage_path, "/data/kubarr");
+    }
+
+    #[tokio::test]
+    async fn save_server_config_updates_existing_record() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+        save_server_config(&db, "Original", "/original/path")
+            .await
+            .expect("first save");
+        let updated = save_server_config(&db, "Updated", "/new/path")
+            .await
+            .expect("second save");
+        assert_eq!(updated.name, "Updated");
+        assert_eq!(updated.storage_path, "/new/path");
+    }
+
+    #[tokio::test]
+    async fn get_server_config_returns_none_on_empty_db() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+        let cfg = get_server_config(&db).await.expect("get");
+        assert!(cfg.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_server_config_returns_saved_value() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+        save_server_config(&db, "Test Server", "/test")
+            .await
+            .expect("save");
+        let cfg = get_server_config(&db).await.expect("get").expect("Some");
+        assert_eq!(cfg.name, "Test Server");
+        assert_eq!(cfg.storage_path, "/test");
+    }
+
+    // -------------------------------------------------------------------------
+    // update_db_status — timestamps
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn update_db_status_sets_started_at_when_installing() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        // Insert record with no started_at
+        bootstrap_status::ActiveModel {
+            component: Set("victoriametrics".to_string()),
+            display_name: Set("VictoriaMetrics".to_string()),
+            status: Set("pending".to_string()),
+            message: Set(None),
+            error: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert");
+
+        let svc = make_svc_with_db(&db).await;
+        svc.update_db_status(
+            &db,
+            "victoriametrics",
+            "installing",
+            Some("Installing..."),
+            None,
+        )
+        .await
+        .expect("update_db_status");
+
+        use crate::models::bootstrap_status::Column;
+        use sea_orm::ColumnTrait;
+        let record = BootstrapStatus::find()
+            .filter(Column::Component.eq("victoriametrics"))
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(record.status, "installing");
+    }
+
+    #[tokio::test]
+    async fn update_db_status_sets_completed_at_on_healthy() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        bootstrap_status::ActiveModel {
+            component: Set("fluent-bit".to_string()),
+            display_name: Set("Fluent Bit".to_string()),
+            status: Set("installing".to_string()),
+            message: Set(None),
+            error: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert");
+
+        let svc = make_svc_with_db(&db).await;
+        svc.update_db_status(&db, "fluent-bit", "healthy", Some("Done"), None)
+            .await
+            .expect("update_db_status");
+
+        use crate::models::bootstrap_status::Column;
+        use sea_orm::ColumnTrait;
+        let record = BootstrapStatus::find()
+            .filter(Column::Component.eq("fluent-bit"))
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(record.status, "healthy");
+        assert!(record.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn update_db_status_sets_completed_at_on_failed() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        bootstrap_status::ActiveModel {
+            component: Set("postgresql".to_string()),
+            display_name: Set("PostgreSQL".to_string()),
+            status: Set("installing".to_string()),
+            message: Set(None),
+            error: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert");
+
+        let svc = make_svc_with_db(&db).await;
+        svc.update_db_status(
+            &db,
+            "postgresql",
+            "failed",
+            Some("Error"),
+            Some("helm failed"),
+        )
+        .await
+        .expect("update_db_status");
+
+        use crate::models::bootstrap_status::Column;
+        use sea_orm::ColumnTrait;
+        let record = BootstrapStatus::find()
+            .filter(Column::Component.eq("postgresql"))
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(record.status, "failed");
+        assert!(record.completed_at.is_some());
+        assert_eq!(record.error.as_deref(), Some("helm failed"));
+    }
+
+    #[tokio::test]
+    async fn get_status_returns_in_memory_when_db_empty() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+        let svc = make_svc_with_db(&db).await;
+
+        // DB has no bootstrap_status records → should return in-memory status
+        let statuses = svc.get_status().await.expect("get_status");
+        assert_eq!(statuses.len(), 4); // All 4 components from BOOTSTRAP_COMPONENTS
+        for s in &statuses {
+            assert_eq!(s.status, "pending");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_status_returns_db_records_when_present() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        // Insert a record
+        bootstrap_status::ActiveModel {
+            component: Set("postgresql".to_string()),
+            display_name: Set("PostgreSQL".to_string()),
+            status: Set("healthy".to_string()),
+            message: Set(Some("Installed".to_string())),
+            error: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert");
+
+        let svc = make_svc_with_db(&db).await;
+        let statuses = svc.get_status().await.expect("get_status");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].component, "postgresql");
+        assert_eq!(statuses[0].status, "healthy");
+    }
+
+    #[tokio::test]
+    async fn is_complete_returns_false_when_any_component_not_healthy() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        // Insert 4 records, one not healthy
+        for (comp, disp) in BOOTSTRAP_COMPONENTS {
+            let status = if *comp == "postgresql" {
+                "healthy"
+            } else {
+                "pending"
+            };
+            bootstrap_status::ActiveModel {
+                component: Set(comp.to_string()),
+                display_name: Set(disp.to_string()),
+                status: Set(status.to_string()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert");
+        }
+
+        let svc = make_svc_with_db(&db).await;
+        assert!(!svc.is_complete().await);
+    }
+
+    #[tokio::test]
+    async fn is_complete_returns_true_when_all_healthy() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        for (comp, disp) in BOOTSTRAP_COMPONENTS {
+            bootstrap_status::ActiveModel {
+                component: Set(comp.to_string()),
+                display_name: Set(disp.to_string()),
+                status: Set("healthy".to_string()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert");
+        }
+
+        let svc = make_svc_with_db(&db).await;
+        assert!(svc.is_complete().await);
+    }
+
+    #[tokio::test]
+    async fn is_complete_returns_false_when_no_components_in_db() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        let svc = make_svc_with_db(&db).await;
+        // In-memory status has pending components → not complete
+        assert!(!svc.is_complete().await);
+    }
+
+    #[tokio::test]
+    async fn has_started_returns_false_when_all_pending() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        // Insert all components with "pending" status
+        for (comp, disp) in BOOTSTRAP_COMPONENTS {
+            bootstrap_status::ActiveModel {
+                component: Set(comp.to_string()),
+                display_name: Set(disp.to_string()),
+                status: Set("pending".to_string()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert");
+        }
+
+        let svc = make_svc_with_db(&db).await;
+        assert!(!svc.has_started().await);
+    }
+
+    #[tokio::test]
+    async fn has_started_returns_true_when_any_non_pending() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        bootstrap_status::ActiveModel {
+            component: Set("postgresql".to_string()),
+            display_name: Set("PostgreSQL".to_string()),
+            status: Set("installing".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert");
+
+        let svc = make_svc_with_db(&db).await;
+        assert!(svc.has_started().await);
+    }
+
+    #[tokio::test]
+    async fn has_started_returns_false_when_db_empty() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        let svc = make_svc_with_db(&db).await;
+        // DB empty + in-memory started=false
+        assert!(!svc.has_started().await);
+    }
+
+    #[tokio::test]
+    async fn update_in_memory_status_updates_component() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        let svc = make_svc_with_db(&db).await;
+
+        svc.update_in_memory_status("postgresql", "installing", Some("In progress"), None)
+            .await;
+
+        let status = svc.in_memory_status.read().await;
+        let pg = status
+            .statuses
+            .iter()
+            .find(|c| c.component == "postgresql")
+            .expect("found");
+        assert_eq!(pg.status, "installing");
+        assert_eq!(pg.message.as_deref(), Some("In progress"));
+    }
+
+    #[tokio::test]
+    async fn update_in_memory_status_with_error() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        let svc = make_svc_with_db(&db).await;
+
+        svc.update_in_memory_status(
+            "victoriametrics",
+            "failed",
+            Some("Error"),
+            Some("helm error"),
+        )
+        .await;
+
+        let status = svc.in_memory_status.read().await;
+        let vm = status
+            .statuses
+            .iter()
+            .find(|c| c.component == "victoriametrics")
+            .expect("found");
+        assert_eq!(vm.status, "failed");
+        assert_eq!(vm.error.as_deref(), Some("helm error"));
+    }
+
+    #[tokio::test]
+    async fn broadcast_sends_event_to_channel() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("create db");
+
+        let shared_db = Arc::new(RwLock::new(Some(db.clone())));
+        let k8s: Arc<RwLock<Option<K8sClient>>> = Arc::new(RwLock::new(None));
+        let catalog = Arc::new(RwLock::new(AppCatalog::default()));
+        let (tx, mut rx) = broadcast::channel(100);
+        let svc = BootstrapService::new(shared_db, k8s, catalog, tx);
+
+        svc.broadcast(BootstrapEvent::BootstrapComplete {
+            message: "All done".to_string(),
+        });
+
+        let msg = rx.try_recv().expect("should have received a message");
+        assert!(msg.contains("bootstrap_complete"));
+        assert!(msg.contains("All done"));
+    }
 }

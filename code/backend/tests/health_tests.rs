@@ -224,3 +224,100 @@ async fn test_version_endpoint_returns_json_with_version_field() {
     );
     assert_eq!(json["backend"], "rust");
 }
+
+// ============================================================================
+// GET /api/openapi.json
+// ============================================================================
+
+#[tokio::test]
+async fn test_openapi_json_returns_200() {
+    let state = build_test_app_state().await;
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/openapi.json")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_openapi_json_contains_openapi_field() {
+    let state = build_test_app_state().await;
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/openapi.json")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json.get("openapi").is_some(),
+        "OpenAPI JSON must have an 'openapi' field"
+    );
+}
+
+// ============================================================================
+// GET /api/docs
+// ============================================================================
+
+#[tokio::test]
+async fn test_swagger_ui_returns_200() {
+    let state = build_test_app_state().await;
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/docs")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_swagger_ui_returns_html() {
+    let state = build_test_app_state().await;
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/docs")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.contains("text/html"),
+        "Expected HTML content type"
+    );
+}

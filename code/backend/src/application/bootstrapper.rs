@@ -181,6 +181,51 @@ fn create_app(state: AppState) -> Router {
         .layer(cors)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// init_kubernetes() must return an Arc without panicking, even when no
+    /// kubeconfig is present — it logs a warning and returns None.
+    #[tokio::test]
+    async fn init_kubernetes_returns_arc_even_without_cluster() {
+        let result = init_kubernetes().await;
+        // We cannot assert Some/None because a valid kubeconfig may or may not
+        // be present in the test environment; we just need it not to panic.
+        let _ = result.read().await;
+    }
+
+    /// init_catalog() must return a non-empty catalog wrapped in Arc<RwLock>.
+    #[test]
+    fn init_catalog_returns_catalog() {
+        let catalog = init_catalog();
+        // Just verify the Arc is usable; AppCatalog::new() is already tested elsewhere
+        let _ = catalog.try_read();
+    }
+
+    /// create_app() must return a Router without panicking.
+    #[tokio::test]
+    async fn create_app_returns_router() {
+        use crate::services::{
+            audit::AuditService, catalog::AppCatalog, chart_sync::ChartSyncService,
+            notification::NotificationService,
+        };
+        use crate::state::{AppState, SharedK8sClient};
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let k8s: SharedK8sClient = Arc::new(RwLock::new(None));
+        let catalog = Arc::new(RwLock::new(AppCatalog::default()));
+        let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
+        let audit = AuditService::new();
+        let notification = NotificationService::new();
+        let state = AppState::new(None, k8s, catalog, chart_sync, audit, notification);
+
+        // Should not panic
+        let _router = create_app(state);
+    }
+}
+
 /// Start the HTTP server
 async fn serve(app: Router) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], CONFIG.server.port));

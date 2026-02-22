@@ -277,6 +277,20 @@ mod tests {
         assert!(body.contains("JWT error"));
     }
 
+    #[tokio::test]
+    async fn test_kubernetes_api_error_returns_500() {
+        let kube_status = kube::core::response::Status {
+            code: 404,
+            message: "pods not found".to_string(),
+            reason: "NotFound".to_string(),
+            ..Default::default()
+        };
+        let kube_err = kube::Error::Api(Box::new(kube_status));
+        let (status, body) = into_parts(AppError::Kubernetes(kube_err)).await;
+        assert_eq!(status, 500);
+        assert!(body.contains("Kubernetes error"));
+    }
+
     // -------------------------------------------------------------------------
     // Response body shape – must be JSON with a "detail" key
     // -------------------------------------------------------------------------
@@ -346,5 +360,35 @@ mod tests {
     fn test_bad_gateway_display() {
         let err = AppError::BadGateway("proxy error".into());
         assert_eq!(format!("{}", err), "Bad gateway: proxy error");
+    }
+
+    #[tokio::test]
+    async fn test_kube_config_error_returns_500() {
+        let kube_cfg_err = kube::config::KubeconfigError::CurrentContextNotSet;
+        let (status, body) = into_parts(AppError::KubeConfig(kube_cfg_err)).await;
+        assert_eq!(status, 500);
+        assert!(body.contains("Kubernetes config error"));
+    }
+
+    #[tokio::test]
+    async fn test_kube_in_cluster_error_returns_500() {
+        let env_err = std::env::VarError::NotPresent;
+        let in_cluster_err = kube::config::InClusterError::ReadEnvironmentVariable(env_err);
+        let (status, body) = into_parts(AppError::KubeInCluster(in_cluster_err)).await;
+        assert_eq!(status, 500);
+        assert!(body.contains("Kubernetes in-cluster config error"));
+    }
+
+    #[tokio::test]
+    async fn test_http_client_error_returns_502() {
+        // Build a real reqwest::Error by making a request to an invalid URL
+        let reqwest_err = reqwest::Client::new()
+            .get("http://0.0.0.0:0/invalid")
+            .send()
+            .await
+            .unwrap_err();
+        let (status, body) = into_parts(AppError::HttpClient(reqwest_err)).await;
+        assert_eq!(status, 502);
+        assert!(body.contains("Upstream service error"));
     }
 }

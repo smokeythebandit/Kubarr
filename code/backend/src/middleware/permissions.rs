@@ -287,4 +287,92 @@ mod tests {
         let _p2 = _p1;
         let _p3 = _p2;
     }
+
+    fn make_auth_user(
+        user: crate::models::user::Model,
+        permissions: Vec<&str>,
+    ) -> crate::middleware::AuthenticatedUser {
+        crate::middleware::AuthenticatedUser {
+            user,
+            permissions: permissions.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn authorized_extractor_ok_when_permission_present() {
+        use axum::extract::FromRequestParts;
+        use axum::http::Request;
+
+        let user = fake_user(1, "alice");
+        let auth_user = make_auth_user(user, vec!["users.view"]);
+
+        let mut req = Request::builder().body(()).unwrap();
+        req.extensions_mut().insert(auth_user);
+
+        let (mut parts, _) = req.into_parts();
+        let result = Authorized::<UsersView>::from_request_parts(&mut parts, &()).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().user_id(), 1);
+    }
+
+    #[tokio::test]
+    async fn authorized_extractor_forbidden_when_permission_missing() {
+        use axum::extract::FromRequestParts;
+        use axum::http::Request;
+
+        let user = fake_user(2, "bob");
+        let auth_user = make_auth_user(user, vec!["roles.view"]);
+
+        let mut req = Request::builder().body(()).unwrap();
+        req.extensions_mut().insert(auth_user);
+
+        let (mut parts, _) = req.into_parts();
+        let result = Authorized::<UsersManage>::from_request_parts(&mut parts, &()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, crate::error::AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn authorized_extractor_unauthorized_when_no_extension() {
+        use axum::extract::FromRequestParts;
+        use axum::http::Request;
+
+        let req = Request::builder().body(()).unwrap();
+        let (mut parts, _) = req.into_parts();
+        let result = Authorized::<UsersView>::from_request_parts(&mut parts, &()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, crate::error::AppError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn authenticated_extractor_ok_when_user_present() {
+        use axum::extract::FromRequestParts;
+        use axum::http::Request;
+
+        let user = fake_user(3, "carol");
+        let auth_user = make_auth_user(user, vec![]);
+
+        let mut req = Request::builder().body(()).unwrap();
+        req.extensions_mut().insert(auth_user);
+
+        let (mut parts, _) = req.into_parts();
+        let result = Authenticated::from_request_parts(&mut parts, &()).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().user_id(), 3);
+    }
+
+    #[tokio::test]
+    async fn authenticated_extractor_unauthorized_when_no_extension() {
+        use axum::extract::FromRequestParts;
+        use axum::http::Request;
+
+        let req = Request::builder().body(()).unwrap();
+        let (mut parts, _) = req.into_parts();
+        let result = Authenticated::from_request_parts(&mut parts, &()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, crate::error::AppError::Unauthorized(_)));
+    }
 }

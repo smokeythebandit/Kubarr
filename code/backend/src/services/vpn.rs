@@ -1807,3 +1807,605 @@ mod tests_request_response_serde {
         assert!(json.contains("\"success\":false"));
     }
 }
+
+// ============================================================================
+// DB-based tests (in-memory SQLite)
+// ============================================================================
+
+#[cfg(test)]
+mod tests_db {
+    use super::*;
+    use crate::models::vpn_provider::VpnType;
+
+    async fn make_db() -> DbConn {
+        crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite")
+    }
+
+    async fn insert_wg_provider(db: &DbConn, name: &str) -> VpnProviderResponse {
+        let req = CreateVpnProviderRequest {
+            name: name.to_string(),
+            vpn_type: VpnType::WireGuard,
+            service_provider: Some("custom".to_string()),
+            credentials: serde_json::json!({"private_key": "wgprivkey=="}),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: default_firewall_subnets(),
+        };
+        create_vpn_provider(db, req).await.expect("create provider")
+    }
+
+    // -------------------------------------------------------------------------
+    // list_vpn_providers
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_vpn_providers_empty_db() {
+        let db = make_db().await;
+        let result = list_vpn_providers(&db).await.expect("list");
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_vpn_providers_with_data() {
+        let db = make_db().await;
+        insert_wg_provider(&db, "myvpn").await;
+        let result = list_vpn_providers(&db).await.expect("list");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "myvpn");
+        assert_eq!(result[0].vpn_type, VpnType::WireGuard);
+        assert_eq!(result[0].app_count, 0);
+    }
+
+    #[tokio::test]
+    async fn list_vpn_providers_multiple() {
+        let db = make_db().await;
+        insert_wg_provider(&db, "vpn1").await;
+        insert_wg_provider(&db, "vpn2").await;
+        let result = list_vpn_providers(&db).await.expect("list");
+        assert_eq!(result.len(), 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // get_vpn_provider
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_vpn_provider_not_found() {
+        let db = make_db().await;
+        let result = get_vpn_provider(&db, 999).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not found") || err.to_string().contains("999"));
+    }
+
+    #[tokio::test]
+    async fn get_vpn_provider_found() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+        let result = get_vpn_provider(&db, provider.id).await.expect("get");
+        assert_eq!(result.id, provider.id);
+        assert_eq!(result.name, "testvpn");
+        assert_eq!(result.app_count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // create_vpn_provider
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn create_vpn_provider_success_wireguard() {
+        let db = make_db().await;
+        let req = CreateVpnProviderRequest {
+            name: "wg-provider".to_string(),
+            vpn_type: VpnType::WireGuard,
+            service_provider: None,
+            credentials: serde_json::json!({"private_key": "privkey=="}),
+            enabled: true,
+            kill_switch: false,
+            firewall_outbound_subnets: "10.0.0.0/8".to_string(),
+        };
+        let result = create_vpn_provider(&db, req).await.expect("create");
+        assert!(result.id > 0);
+        assert_eq!(result.name, "wg-provider");
+        assert_eq!(result.app_count, 0);
+        assert!(!result.kill_switch);
+    }
+
+    #[tokio::test]
+    async fn create_vpn_provider_success_openvpn() {
+        let db = make_db().await;
+        let req = CreateVpnProviderRequest {
+            name: "ovpn-provider".to_string(),
+            vpn_type: VpnType::OpenVpn,
+            service_provider: Some("nordvpn".to_string()),
+            credentials: serde_json::json!({"username": "user", "password": "pass"}),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: default_firewall_subnets(),
+        };
+        let result = create_vpn_provider(&db, req).await.expect("create");
+        assert!(result.id > 0);
+        assert_eq!(result.vpn_type, VpnType::OpenVpn);
+        assert_eq!(result.service_provider.as_deref(), Some("nordvpn"));
+    }
+
+    #[tokio::test]
+    async fn create_vpn_provider_invalid_credentials_returns_err() {
+        let db = make_db().await;
+        let req = CreateVpnProviderRequest {
+            name: "bad-creds".to_string(),
+            vpn_type: VpnType::WireGuard,
+            service_provider: None,
+            // WireGuard requires private_key
+            credentials: serde_json::json!({"username": "user"}),
+            enabled: true,
+            kill_switch: false,
+            firewall_outbound_subnets: "".to_string(),
+        };
+        let result = create_vpn_provider(&db, req).await;
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // update_vpn_provider
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn update_vpn_provider_name() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "original").await;
+        let req = UpdateVpnProviderRequest {
+            name: Some("updated".to_string()),
+            service_provider: None,
+            credentials: None,
+            enabled: None,
+            kill_switch: None,
+            firewall_outbound_subnets: None,
+        };
+        let result = update_vpn_provider(&db, provider.id, req)
+            .await
+            .expect("update");
+        assert_eq!(result.name, "updated");
+    }
+
+    #[tokio::test]
+    async fn update_vpn_provider_not_found() {
+        let db = make_db().await;
+        let req = UpdateVpnProviderRequest {
+            name: Some("whatever".to_string()),
+            service_provider: None,
+            credentials: None,
+            enabled: None,
+            kill_switch: None,
+            firewall_outbound_subnets: None,
+        };
+        let result = update_vpn_provider(&db, 999, req).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_vpn_provider_multiple_fields() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "myvpn").await;
+        let req = UpdateVpnProviderRequest {
+            name: None,
+            service_provider: Some("protonvpn".to_string()),
+            credentials: None,
+            enabled: Some(false),
+            kill_switch: Some(false),
+            firewall_outbound_subnets: Some("192.168.0.0/16".to_string()),
+        };
+        let result = update_vpn_provider(&db, provider.id, req)
+            .await
+            .expect("update");
+        assert!(!result.enabled);
+        assert!(!result.kill_switch);
+        assert_eq!(result.firewall_outbound_subnets, "192.168.0.0/16");
+    }
+
+    // -------------------------------------------------------------------------
+    // list_app_vpn_configs
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_app_vpn_configs_empty_db() {
+        let db = make_db().await;
+        let result = list_app_vpn_configs(&db).await.expect("list");
+        assert!(result.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // get_app_vpn_config
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_app_vpn_config_not_found_returns_none() {
+        let db = make_db().await;
+        let result = get_app_vpn_config(&db, "nonexistent").await.expect("get");
+        assert!(result.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // assign_vpn_to_app
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn assign_vpn_to_app_success() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        let req = AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: None,
+        };
+        let result = assign_vpn_to_app(&db, "sonarr", req).await.expect("assign");
+        assert_eq!(result.app_name, "sonarr");
+        assert_eq!(result.vpn_provider_id, provider.id);
+        assert!(result.effective_kill_switch); // provider kill_switch=true
+    }
+
+    #[tokio::test]
+    async fn assign_vpn_to_app_provider_not_found() {
+        let db = make_db().await;
+        let req = AssignVpnRequest {
+            vpn_provider_id: 999,
+            kill_switch_override: None,
+            port_forwarding: None,
+        };
+        let result = assign_vpn_to_app(&db, "sonarr", req).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn assign_vpn_to_app_disabled_provider_returns_err() {
+        let db = make_db().await;
+        let req_create = CreateVpnProviderRequest {
+            name: "disabled-vpn".to_string(),
+            vpn_type: VpnType::WireGuard,
+            service_provider: None,
+            credentials: serde_json::json!({"private_key": "pk=="}),
+            enabled: false, // disabled
+            kill_switch: false,
+            firewall_outbound_subnets: default_firewall_subnets(),
+        };
+        let provider = create_vpn_provider(&db, req_create).await.expect("create");
+
+        let req = AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: None,
+        };
+        let result = assign_vpn_to_app(&db, "sonarr", req).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn assign_vpn_to_app_update_existing() {
+        let db = make_db().await;
+        let provider1 = insert_wg_provider(&db, "vpn1").await;
+        let provider2 = insert_wg_provider(&db, "vpn2").await;
+
+        // Assign provider1
+        let req1 = AssignVpnRequest {
+            vpn_provider_id: provider1.id,
+            kill_switch_override: None,
+            port_forwarding: None,
+        };
+        assign_vpn_to_app(&db, "radarr", req1)
+            .await
+            .expect("assign1");
+
+        // Update to provider2
+        let req2 = AssignVpnRequest {
+            vpn_provider_id: provider2.id,
+            kill_switch_override: Some(false),
+            port_forwarding: Some(true),
+        };
+        let result = assign_vpn_to_app(&db, "radarr", req2)
+            .await
+            .expect("assign2");
+        assert_eq!(result.vpn_provider_id, provider2.id);
+        assert_eq!(result.kill_switch_override, Some(false));
+        assert!(result.port_forwarding);
+
+        // Verify in DB
+        let config = get_app_vpn_config(&db, "radarr").await.expect("get");
+        assert!(config.is_some());
+        assert_eq!(config.unwrap().vpn_provider_id, provider2.id);
+    }
+
+    #[tokio::test]
+    async fn get_app_vpn_config_after_assign() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        let req = AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: Some(false),
+            port_forwarding: Some(false),
+        };
+        assign_vpn_to_app(&db, "lidarr", req).await.expect("assign");
+
+        let result = get_app_vpn_config(&db, "lidarr").await.expect("get");
+        assert!(result.is_some());
+        let config = result.unwrap();
+        assert_eq!(config.app_name, "lidarr");
+        assert_eq!(config.kill_switch_override, Some(false));
+        assert!(!config.effective_kill_switch);
+    }
+
+    #[tokio::test]
+    async fn list_app_vpn_configs_with_data() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        // Assign to two apps
+        for app_name in &["sonarr", "radarr"] {
+            let req = AssignVpnRequest {
+                vpn_provider_id: provider.id,
+                kill_switch_override: None,
+                port_forwarding: None,
+            };
+            assign_vpn_to_app(&db, app_name, req).await.expect("assign");
+        }
+
+        let result = list_app_vpn_configs(&db).await.expect("list");
+        assert_eq!(result.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_vpn_providers_shows_app_count() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        // Assign to two apps
+        for app_name in &["sonarr", "radarr"] {
+            let req = AssignVpnRequest {
+                vpn_provider_id: provider.id,
+                kill_switch_override: None,
+                port_forwarding: None,
+            };
+            assign_vpn_to_app(&db, app_name, req).await.expect("assign");
+        }
+
+        let result = list_vpn_providers(&db).await.expect("list");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].app_count, 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // update_vpn_provider — credentials path
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn update_vpn_provider_credentials_path() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        let req = UpdateVpnProviderRequest {
+            name: None,
+            service_provider: None,
+            credentials: Some(serde_json::json!({"private_key": "new_private_key=="})),
+            enabled: None,
+            kill_switch: None,
+            firewall_outbound_subnets: None,
+        };
+
+        let result = update_vpn_provider(&db, provider.id, req)
+            .await
+            .expect("update");
+        assert_eq!(result.id, provider.id);
+        assert_eq!(result.name, "testvpn");
+    }
+
+    #[tokio::test]
+    async fn update_vpn_provider_invalid_credentials_in_update_returns_err() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        // WireGuard requires private_key — updating with missing key should fail
+        let req = UpdateVpnProviderRequest {
+            name: None,
+            service_provider: None,
+            credentials: Some(serde_json::json!({"public_key": "some_pub_key"})),
+            enabled: None,
+            kill_switch: None,
+            firewall_outbound_subnets: None,
+        };
+
+        let result = update_vpn_provider(&db, provider.id, req).await;
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // get_vpn_deployment_config
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_vpn_deployment_config_no_config_returns_none() {
+        let db = make_db().await;
+        let result = get_vpn_deployment_config(&db, "sonarr").await.expect("get");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_vpn_deployment_config_with_enabled_provider_returns_config() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        let assign_req = AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: None,
+        };
+        assign_vpn_to_app(&db, "sonarr", assign_req)
+            .await
+            .expect("assign");
+
+        let result = get_vpn_deployment_config(&db, "sonarr").await.expect("get");
+        assert!(result.is_some());
+        let config = result.unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.secret_name, "vpn-sonarr");
+        assert!(config.kill_switch); // provider has kill_switch=true
+        assert!(!config.port_forwarding);
+    }
+
+    #[tokio::test]
+    async fn get_vpn_deployment_config_kill_switch_override() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        // Assign with kill_switch_override=false (overrides provider's true)
+        let assign_req = AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: Some(false),
+            port_forwarding: None,
+        };
+        assign_vpn_to_app(&db, "sonarr", assign_req)
+            .await
+            .expect("assign");
+
+        let result = get_vpn_deployment_config(&db, "sonarr").await.expect("get");
+        assert!(result.is_some());
+        let config = result.unwrap();
+        assert!(!config.kill_switch); // overridden to false
+    }
+
+    #[tokio::test]
+    async fn get_vpn_deployment_config_disabled_provider_returns_none() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        let assign_req = AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: None,
+        };
+        assign_vpn_to_app(&db, "sonarr", assign_req)
+            .await
+            .expect("assign");
+
+        // Disable the provider
+        let update = UpdateVpnProviderRequest {
+            name: None,
+            service_provider: None,
+            credentials: None,
+            enabled: Some(false),
+            kill_switch: None,
+            firewall_outbound_subnets: None,
+        };
+        update_vpn_provider(&db, provider.id, update)
+            .await
+            .expect("disable");
+
+        let result = get_vpn_deployment_config(&db, "sonarr").await.expect("get");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_vpn_deployment_config_port_forwarding_enabled() {
+        let db = make_db().await;
+        let provider = insert_wg_provider(&db, "testvpn").await;
+
+        let assign_req = AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: Some(true),
+        };
+        assign_vpn_to_app(&db, "sonarr", assign_req)
+            .await
+            .expect("assign");
+
+        let result = get_vpn_deployment_config(&db, "sonarr").await.expect("get");
+        let config = result.expect("should have config");
+        assert!(config.port_forwarding);
+    }
+
+    #[tokio::test]
+    async fn get_app_vpn_config_orphaned_config_returns_error() {
+        use crate::models::{app_vpn_config, vpn_provider};
+        use chrono::Utc;
+        use sea_orm::{
+            ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, Set, Statement,
+        };
+        use sea_orm_migration::MigratorTrait;
+
+        // Use a single-connection pool to ensure FK PRAGMA works consistently
+        let mut opts = ConnectOptions::new("sqlite::memory:");
+        opts.max_connections(1)
+            .min_connections(1)
+            .sqlx_logging(false);
+        let db = Database::connect(opts).await.expect("connect");
+        crate::migrations::Migrator::up(&db, None)
+            .await
+            .expect("migrate");
+
+        let now = Utc::now();
+
+        // Create a provider first to satisfy FK constraint
+        let provider = vpn_provider::ActiveModel {
+            name: Set("temp_provider".to_string()),
+            vpn_type: Set(crate::models::vpn_provider::VpnType::WireGuard),
+            service_provider: Set(None),
+            credentials_json: Set(r#"{"private_key":"wgk=="}"#.to_string()),
+            enabled: Set(true),
+            kill_switch: Set(false),
+            firewall_outbound_subnets: Set("10.0.0.0/8".to_string()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert provider");
+
+        // Insert app config referencing this provider
+        app_vpn_config::ActiveModel {
+            app_name: Set("orphan_app".to_string()),
+            vpn_provider_id: Set(provider.id),
+            kill_switch_override: Set(None),
+            port_forwarding: Set(false),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(&db)
+        .await
+        .expect("insert app config");
+
+        // Disable FK checks temporarily to delete provider and create orphan
+        db.execute(Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "PRAGMA foreign_keys = OFF".to_string(),
+        ))
+        .await
+        .expect("disable FK");
+
+        db.execute(Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            format!("DELETE FROM vpn_providers WHERE id = {}", provider.id),
+        ))
+        .await
+        .expect("delete provider");
+
+        db.execute(Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "PRAGMA foreign_keys = ON".to_string(),
+        ))
+        .await
+        .expect("re-enable FK");
+
+        let result = get_app_vpn_config(&db, "orphan_app").await;
+        assert!(result.is_err(), "expected error for orphaned config");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("not found")
+                || err.to_string().contains(&provider.id.to_string()),
+            "unexpected error: {}",
+            err
+        );
+    }
+}

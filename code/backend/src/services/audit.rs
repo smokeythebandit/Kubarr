@@ -422,4 +422,427 @@ mod tests {
         assert!(json.contains("\"failed_events\":10"));
         assert!(json.contains("\"top_actions\""));
     }
+
+    async fn make_db() -> DbConn {
+        crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("in-memory db")
+    }
+
+    // -------------------------------------------------------------------------
+    // AuditService.log / log_success / log_failure — require DB
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn log_without_db_is_noop() {
+        // No db set → should return Ok silently
+        let svc = AuditService::new();
+        let result = svc
+            .log(
+                AuditAction::Login,
+                ResourceType::User,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+                None,
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn log_with_db_inserts_record() {
+        let db = make_db().await;
+        let svc = AuditService::new();
+        svc.set_db(db.clone()).await;
+
+        svc.log(
+            AuditAction::Login,
+            ResourceType::User,
+            Some("user42".to_string()),
+            Some(1),
+            Some("alice".to_string()),
+            Some(serde_json::json!({"ip": "127.0.0.1"})),
+            Some("127.0.0.1".to_string()),
+            Some("Mozilla/5.0".to_string()),
+            true,
+            None,
+        )
+        .await
+        .expect("log");
+
+        use crate::models::audit_log::Entity;
+        use sea_orm::EntityTrait;
+        let logs = Entity::find().all(&db).await.expect("find");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].action, "login");
+        assert_eq!(logs[0].success, true);
+        assert_eq!(logs[0].username.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn log_success_inserts_with_success_true() {
+        let db = make_db().await;
+        let svc = AuditService::new();
+        svc.set_db(db.clone()).await;
+
+        svc.log_success(
+            AuditAction::UserCreated,
+            ResourceType::User,
+            Some("99".to_string()),
+            Some(2),
+            Some("admin".to_string()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("log_success");
+
+        use crate::models::audit_log::Entity;
+        use sea_orm::EntityTrait;
+        let logs = Entity::find().all(&db).await.expect("find");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].success, true);
+        assert!(logs[0].error_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn log_failure_inserts_with_success_false() {
+        let db = make_db().await;
+        let svc = AuditService::new();
+        svc.set_db(db.clone()).await;
+
+        svc.log_failure(
+            AuditAction::LoginFailed,
+            ResourceType::User,
+            None,
+            None,
+            Some("bob".to_string()),
+            None,
+            Some("10.0.0.1".to_string()),
+            None,
+            "invalid password",
+        )
+        .await
+        .expect("log_failure");
+
+        use crate::models::audit_log::Entity;
+        use sea_orm::EntityTrait;
+        let logs = Entity::find().all(&db).await.expect("find");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].success, false);
+        assert_eq!(logs[0].error_message.as_deref(), Some("invalid password"));
+    }
+
+    // -------------------------------------------------------------------------
+    // get_audit_logs — various filter combinations
+    // -------------------------------------------------------------------------
+
+    async fn insert_log(
+        db: &DbConn,
+        action: &str,
+        resource_type: &str,
+        user_id: Option<i64>,
+        username: Option<&str>,
+        success: bool,
+    ) {
+        use crate::models::audit_log;
+        use sea_orm::Set;
+
+        audit_log::ActiveModel {
+            timestamp: Set(chrono::Utc::now()),
+            user_id: Set(user_id),
+            username: Set(username.map(|s| s.to_string())),
+            action: Set(action.to_string()),
+            resource_type: Set(resource_type.to_string()),
+            resource_id: Set(None),
+            details: Set(None),
+            ip_address: Set(None),
+            user_agent: Set(None),
+            success: Set(success),
+            error_message: Set(None),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert");
+    }
+
+    #[tokio::test]
+    async fn get_audit_logs_no_filters_returns_all() {
+        let db = make_db().await;
+        insert_log(&db, "login", "user", Some(1), Some("alice"), true).await;
+        insert_log(&db, "login", "user", Some(2), Some("bob"), true).await;
+        insert_log(&db, "logout", "user", Some(1), Some("alice"), true).await;
+
+        let query = AuditLogQuery {
+            page: None,
+            per_page: None,
+            user_id: None,
+            action: None,
+            resource_type: None,
+            success: None,
+            from: None,
+            to: None,
+            search: None,
+        };
+        let result = get_audit_logs(&db, query).await.expect("get_audit_logs");
+        assert_eq!(result.total, 3);
+        assert_eq!(result.logs.len(), 3);
+        assert_eq!(result.page, 1);
+        assert_eq!(result.per_page, 50);
+    }
+
+    #[tokio::test]
+    async fn get_audit_logs_filter_by_user_id() {
+        let db = make_db().await;
+        insert_log(&db, "login", "user", Some(1), Some("alice"), true).await;
+        insert_log(&db, "login", "user", Some(2), Some("bob"), true).await;
+
+        let query = AuditLogQuery {
+            page: None,
+            per_page: None,
+            user_id: Some(1),
+            action: None,
+            resource_type: None,
+            success: None,
+            from: None,
+            to: None,
+            search: None,
+        };
+        let result = get_audit_logs(&db, query).await.expect("get_audit_logs");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.logs[0].username.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn get_audit_logs_filter_by_action() {
+        let db = make_db().await;
+        insert_log(&db, "login", "user", Some(1), Some("alice"), true).await;
+        insert_log(&db, "logout", "user", Some(1), Some("alice"), true).await;
+
+        let query = AuditLogQuery {
+            page: None,
+            per_page: None,
+            user_id: None,
+            action: Some("login".to_string()),
+            resource_type: None,
+            success: None,
+            from: None,
+            to: None,
+            search: None,
+        };
+        let result = get_audit_logs(&db, query).await.expect("get_audit_logs");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.logs[0].action, "login");
+    }
+
+    #[tokio::test]
+    async fn get_audit_logs_filter_by_resource_type() {
+        let db = make_db().await;
+        insert_log(&db, "login", "user", Some(1), Some("alice"), true).await;
+        insert_log(
+            &db,
+            "app.installed",
+            "application",
+            Some(1),
+            Some("alice"),
+            true,
+        )
+        .await;
+
+        let query = AuditLogQuery {
+            page: None,
+            per_page: None,
+            user_id: None,
+            action: None,
+            resource_type: Some("application".to_string()),
+            success: None,
+            from: None,
+            to: None,
+            search: None,
+        };
+        let result = get_audit_logs(&db, query).await.expect("get_audit_logs");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.logs[0].resource_type, "application");
+    }
+
+    #[tokio::test]
+    async fn get_audit_logs_filter_by_success() {
+        let db = make_db().await;
+        insert_log(&db, "login", "user", Some(1), Some("alice"), true).await;
+        insert_log(&db, "login", "user", Some(1), Some("alice"), false).await;
+
+        let query = AuditLogQuery {
+            page: None,
+            per_page: None,
+            user_id: None,
+            action: None,
+            resource_type: None,
+            success: Some(false),
+            from: None,
+            to: None,
+            search: None,
+        };
+        let result = get_audit_logs(&db, query).await.expect("get_audit_logs");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.logs[0].success, false);
+    }
+
+    #[tokio::test]
+    async fn get_audit_logs_filter_by_time_range() {
+        let db = make_db().await;
+        insert_log(&db, "login", "user", Some(1), Some("alice"), true).await;
+
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        let past = chrono::Utc::now() - chrono::Duration::hours(1);
+
+        // from filter: events after 'past' → should include the record
+        let query = AuditLogQuery {
+            page: None,
+            per_page: None,
+            user_id: None,
+            action: None,
+            resource_type: None,
+            success: None,
+            from: Some(past),
+            to: Some(future),
+            search: None,
+        };
+        let result = get_audit_logs(&db, query).await.expect("get_audit_logs");
+        assert_eq!(result.total, 1);
+    }
+
+    #[tokio::test]
+    async fn get_audit_logs_search_filter() {
+        let db = make_db().await;
+        insert_log(&db, "login", "user", Some(1), Some("alice"), true).await;
+        insert_log(&db, "login", "user", Some(2), Some("bob"), true).await;
+
+        let query = AuditLogQuery {
+            page: None,
+            per_page: None,
+            user_id: None,
+            action: None,
+            resource_type: None,
+            success: None,
+            from: None,
+            to: None,
+            search: Some("alice".to_string()),
+        };
+        let result = get_audit_logs(&db, query).await.expect("get_audit_logs");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.logs[0].username.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn get_audit_logs_pagination() {
+        let db = make_db().await;
+        for i in 0..5 {
+            insert_log(&db, "login", "user", Some(i), Some("user"), true).await;
+        }
+
+        let query = AuditLogQuery {
+            page: Some(1),
+            per_page: Some(2),
+            user_id: None,
+            action: None,
+            resource_type: None,
+            success: None,
+            from: None,
+            to: None,
+            search: None,
+        };
+        let result = get_audit_logs(&db, query).await.expect("get_audit_logs");
+        assert_eq!(result.total, 5);
+        assert_eq!(result.logs.len(), 2);
+        assert_eq!(result.per_page, 2);
+        assert_eq!(result.total_pages, 3);
+    }
+
+    // -------------------------------------------------------------------------
+    // get_audit_stats
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_audit_stats_empty_db() {
+        let db = make_db().await;
+        let stats = get_audit_stats(&db).await.expect("get_audit_stats");
+        assert_eq!(stats.total_events, 0);
+        assert_eq!(stats.successful_events, 0);
+        assert_eq!(stats.failed_events, 0);
+        assert_eq!(stats.top_actions.len(), 0);
+        assert_eq!(stats.recent_failures.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn get_audit_stats_with_data() {
+        let db = make_db().await;
+        insert_log(&db, "login", "user", Some(1), Some("alice"), true).await;
+        insert_log(&db, "login", "user", Some(2), Some("bob"), true).await;
+        insert_log(&db, "logout", "user", Some(1), Some("alice"), false).await;
+
+        let stats = get_audit_stats(&db).await.expect("get_audit_stats");
+        assert_eq!(stats.total_events, 3);
+        assert_eq!(stats.successful_events, 2);
+        assert_eq!(stats.failed_events, 1);
+        assert_eq!(stats.events_today, 3, "all inserted today");
+        assert_eq!(stats.events_this_week, 3);
+        assert!(!stats.top_actions.is_empty());
+        assert_eq!(stats.recent_failures.len(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // clear_old_logs
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn clear_old_logs_removes_old_records() {
+        let db = make_db().await;
+
+        // Insert an "old" log by setting its timestamp manually
+        use crate::models::audit_log;
+        use sea_orm::Set;
+        let old_time = chrono::Utc::now() - chrono::Duration::days(40);
+        audit_log::ActiveModel {
+            timestamp: Set(old_time),
+            user_id: Set(None),
+            username: Set(None),
+            action: Set("login".to_string()),
+            resource_type: Set("user".to_string()),
+            resource_id: Set(None),
+            details: Set(None),
+            ip_address: Set(None),
+            user_agent: Set(None),
+            success: Set(true),
+            error_message: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert old");
+
+        // Insert a recent log (should not be deleted)
+        insert_log(&db, "logout", "user", None, None, true).await;
+
+        let deleted = clear_old_logs(&db, 30).await.expect("clear_old_logs");
+        assert_eq!(deleted, 1, "one old log should be deleted");
+
+        use crate::models::audit_log::Entity;
+        use sea_orm::EntityTrait;
+        let remaining = Entity::find().all(&db).await.expect("find");
+        assert_eq!(remaining.len(), 1, "one recent log remains");
+    }
+
+    #[tokio::test]
+    async fn clear_old_logs_empty_db_returns_zero() {
+        let db = make_db().await;
+        let deleted = clear_old_logs(&db, 30).await.expect("clear");
+        assert_eq!(deleted, 0);
+    }
 }

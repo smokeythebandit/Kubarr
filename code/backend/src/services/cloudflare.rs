@@ -796,6 +796,77 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    // ------------------------------------------------------------------
+    // CfResponse::into_result — pure method, no HTTP needed
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cf_response_into_result_success_with_value() {
+        let resp: CfResponse<String> = CfResponse {
+            success: true,
+            errors: vec![],
+            result: Some("hello".to_string()),
+        };
+        let result = resp.into_result("test context");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    #[test]
+    fn cf_response_into_result_failure_with_error_message() {
+        let resp: CfResponse<String> = CfResponse {
+            success: false,
+            errors: vec![CfApiError {
+                code: 1003,
+                message: "Invalid token".to_string(),
+            }],
+            result: None,
+        };
+        let result = resp.into_result("verify token");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Invalid token"),
+            "expected error message in: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn cf_response_into_result_failure_no_errors_uses_unknown() {
+        let resp: CfResponse<String> = CfResponse {
+            success: false,
+            errors: vec![],
+            result: None,
+        };
+        let result = resp.into_result("list accounts");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("unknown error"),
+            "expected 'unknown error' in: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn cf_response_into_result_success_but_no_result_returns_err() {
+        let resp: CfResponse<String> = CfResponse {
+            success: true,
+            errors: vec![],
+            result: None,
+        };
+        let result = resp.into_result("create tunnel");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("no result"),
+            "expected 'no result' in: {}",
+            msg
+        );
+    }
+
     fn make_model(status: &str, error: Option<&str>) -> cloudflare_tunnel::Model {
         cloudflare_tunnel::Model {
             id: 1,
@@ -1026,5 +1097,112 @@ mod tests_serde {
         };
         let json = serde_json::to_string(&s).expect("ser");
         assert!(json.contains("\"status\":\"not_deployed\""));
+    }
+
+    // ------------------------------------------------------------------
+    // CfResponse::into_result
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cf_response_into_result_success_returns_value() {
+        let cf: CfResponse<String> =
+            serde_json::from_str(r#"{"success":true,"errors":[],"result":"hello"}"#).unwrap();
+        assert_eq!(cf.into_result("test_ctx").unwrap(), "hello");
+    }
+
+    #[test]
+    fn cf_response_into_result_error_with_message() {
+        let cf: CfResponse<String> = serde_json::from_str(
+            r#"{"success":false,"errors":[{"code":1003,"message":"bad token"}],"result":null}"#,
+        )
+        .unwrap();
+        let err = cf.into_result("verify token").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bad token"), "unexpected: {}", msg);
+        assert!(msg.contains("verify token"), "unexpected: {}", msg);
+    }
+
+    #[test]
+    fn cf_response_into_result_error_empty_errors_uses_unknown() {
+        let cf: CfResponse<String> =
+            serde_json::from_str(r#"{"success":false,"errors":[],"result":null}"#).unwrap();
+        let err = cf.into_result("ctx").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown error"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn cf_response_into_result_success_but_null_result() {
+        let cf: CfResponse<String> =
+            serde_json::from_str(r#"{"success":true,"errors":[],"result":null}"#).unwrap();
+        let err = cf.into_result("list zones").unwrap_err();
+        assert!(
+            err.to_string().contains("no result") || err.to_string().contains("list zones"),
+            "unexpected: {}",
+            err
+        );
+    }
+}
+
+// ============================================================================
+// DB-based tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests_db {
+    use super::*;
+
+    async fn make_db() -> DbConn {
+        crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite")
+    }
+
+    async fn insert_tunnel(db: &DbConn, name: &str, status: &str) -> cloudflare_tunnel::Model {
+        use sea_orm::Set;
+        cloudflare_tunnel::ActiveModel {
+            name: Set(name.to_string()),
+            tunnel_token: Set("secret-token".to_string()),
+            status: Set(status.to_string()),
+            error: Set(None),
+            api_token: Set(None),
+            account_id: Set(None),
+            tunnel_id: Set(None),
+            zone_id: Set(None),
+            zone_name: Set(None),
+            subdomain: Set(None),
+            dns_record_id: Set(None),
+            hostname: Set(None),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert tunnel")
+    }
+
+    #[tokio::test]
+    async fn get_config_empty_db_returns_none() {
+        let db = make_db().await;
+        let result = get_config(&db).await.expect("get_config");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_config_with_record_returns_masked_response() {
+        let db = make_db().await;
+        insert_tunnel(&db, "my-tunnel", "running").await;
+
+        let result = get_config(&db).await.expect("get_config");
+        assert!(result.is_some());
+        let resp = result.unwrap();
+        assert_eq!(resp.name, "my-tunnel");
+        assert_eq!(resp.status, "running");
+        // Token should be masked
+        assert_eq!(resp.tunnel_token, "****");
     }
 }

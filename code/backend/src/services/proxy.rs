@@ -317,4 +317,38 @@ mod tests {
         let svc = ProxyService::new();
         let _cloned = svc.clone(); // must be cloneable
     }
+
+    #[test]
+    fn test_proxy_service_default() {
+        let svc = ProxyService::default();
+        let _ = svc;
+    }
+
+    #[test]
+    fn test_axum_to_tungstenite_ping() {
+        let msg = Message::Ping(axum::body::Bytes::from(vec![1_u8, 2]));
+        let result = axum_to_tungstenite(msg);
+        assert!(matches!(result, Some(tungstenite::Message::Ping(_))));
+    }
+
+    #[test]
+    fn test_axum_to_tungstenite_pong() {
+        let msg = Message::Pong(axum::body::Bytes::from(vec![3_u8, 4]));
+        let result = axum_to_tungstenite(msg);
+        assert!(matches!(result, Some(tungstenite::Message::Pong(_))));
+    }
+
+    #[test]
+    fn test_tungstenite_to_axum_ping() {
+        let msg = tungstenite::Message::Ping(axum::body::Bytes::from(vec![1_u8]));
+        let result = tungstenite_to_axum(msg);
+        assert!(matches!(result, Some(Message::Ping(_))));
+    }
+
+    #[test]
+    fn test_tungstenite_to_axum_pong() {
+        let msg = tungstenite::Message::Pong(axum::body::Bytes::from(vec![2_u8]));
+        let result = tungstenite_to_axum(msg);
+        assert!(matches!(result, Some(Message::Pong(_))));
+    }
 }

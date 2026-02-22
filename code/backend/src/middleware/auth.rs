@@ -390,4 +390,329 @@ mod tests {
         let req = request_with_cookie("kubarr_session_0=tok0; kubarr_active=2");
         assert_eq!(extract_token(&req), Some("tok0".to_string()));
     }
+
+    // -----------------------------------------------------------------------
+    // fetch_user_permissions (via AppState)
+    // -----------------------------------------------------------------------
+
+    async fn make_state_with_db() -> AppState {
+        use crate::services::audit::AuditService;
+        use crate::services::catalog::AppCatalog;
+        use crate::services::chart_sync::ChartSyncService;
+        use crate::services::notification::NotificationService;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite");
+
+        let catalog = Arc::new(RwLock::new(AppCatalog::new()));
+        let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
+        let k8s_client = Arc::new(RwLock::new(None));
+        AppState::new(
+            Some(db),
+            k8s_client,
+            catalog,
+            chart_sync,
+            AuditService::new(),
+            NotificationService::new(),
+        )
+    }
+
+    async fn insert_user_in_state(state: &AppState) -> user::Model {
+        use sea_orm::{ActiveModelTrait, Set};
+        let db = state.get_db().await.unwrap();
+        let now = chrono::Utc::now();
+        user::ActiveModel {
+            username: Set(format!("u{}", now.timestamp_nanos_opt().unwrap_or(0))),
+            email: Set(format!(
+                "e{}@test.com",
+                now.timestamp_nanos_opt().unwrap_or(0)
+            )),
+            hashed_password: Set("hash".to_string()),
+            is_active: Set(true),
+            is_approved: Set(true),
+            totp_secret: Set(None),
+            totp_enabled: Set(false),
+            totp_verified_at: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert user")
+    }
+
+    async fn insert_role_in_db(
+        db: &crate::state::DbConn,
+        name: &str,
+    ) -> crate::models::role::Model {
+        use crate::models::role;
+        use sea_orm::{ActiveModelTrait, Set};
+        role::ActiveModel {
+            name: Set(name.to_string()),
+            description: Set(None),
+            is_system: Set(false),
+            requires_2fa: Set(false),
+            created_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert role")
+    }
+
+    #[tokio::test]
+    async fn fetch_user_permissions_no_db_returns_empty() {
+        use crate::services::audit::AuditService;
+        use crate::services::catalog::AppCatalog;
+        use crate::services::chart_sync::ChartSyncService;
+        use crate::services::notification::NotificationService;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        // State with no DB
+        let catalog = Arc::new(RwLock::new(AppCatalog::new()));
+        let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
+        let k8s_client = Arc::new(RwLock::new(None));
+        let state = AppState::new(
+            None,
+            k8s_client,
+            catalog,
+            chart_sync,
+            AuditService::new(),
+            NotificationService::new(),
+        );
+        let perms = fetch_user_permissions(&state, 999).await;
+        assert!(perms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_user_permissions_no_roles_returns_empty() {
+        let state = make_state_with_db().await;
+        let user = insert_user_in_state(&state).await;
+        let perms = fetch_user_permissions(&state, user.id).await;
+        assert!(perms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_user_permissions_with_role_and_permissions() {
+        use crate::models::{role_permission, user_role};
+        use sea_orm::{ActiveModelTrait, Set};
+
+        let state = make_state_with_db().await;
+        let db = state.get_db().await.unwrap();
+        let user = insert_user_in_state(&state).await;
+        let role = insert_role_in_db(&db, "fp_test_role").await;
+
+        // Assign role to user
+        user_role::ActiveModel {
+            user_id: Set(user.id),
+            role_id: Set(role.id),
+        }
+        .insert(&db)
+        .await
+        .expect("assign role");
+
+        // Add permission to role
+        role_permission::ActiveModel {
+            role_id: Set(role.id),
+            permission: Set("users.view".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("add permission");
+
+        let perms = fetch_user_permissions(&state, user.id).await;
+        assert!(perms.contains(&"users.view".to_string()));
+    }
+
+    #[tokio::test]
+    async fn fetch_user_permissions_with_app_permissions() {
+        use crate::models::{role_app_permission, user_role};
+        use sea_orm::{ActiveModelTrait, Set};
+
+        let state = make_state_with_db().await;
+        let db = state.get_db().await.unwrap();
+        let user = insert_user_in_state(&state).await;
+        let role = insert_role_in_db(&db, "fp_app_role").await;
+
+        user_role::ActiveModel {
+            user_id: Set(user.id),
+            role_id: Set(role.id),
+        }
+        .insert(&db)
+        .await
+        .expect("assign role");
+
+        role_app_permission::ActiveModel {
+            role_id: Set(role.id),
+            app_name: Set("sonarr".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("add app permission");
+
+        let perms = fetch_user_permissions(&state, user.id).await;
+        assert!(perms.contains(&"app.sonarr".to_string()));
+    }
+
+    // ============================================================================
+    // authenticate_session tests
+    // ============================================================================
+
+    async fn insert_session_for_user(db: &crate::state::DbConn, user_id: i64) -> String {
+        use crate::models::session;
+        use chrono::Utc;
+        use sea_orm::{ActiveModelTrait, Set};
+
+        let session_id = format!("test-session-{}", user_id);
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::hours(24);
+        session::ActiveModel {
+            id: Set(session_id.clone()),
+            user_id: Set(user_id),
+            user_agent: Set(None),
+            ip_address: Set(None),
+            created_at: Set(now),
+            expires_at: Set(expires_at),
+            last_accessed_at: Set(now),
+            is_revoked: Set(false),
+        }
+        .insert(db)
+        .await
+        .expect("insert session");
+        session_id
+    }
+
+    #[tokio::test]
+    async fn authenticate_session_success() {
+        let state = make_state_with_db().await;
+        let db = state.get_db().await.unwrap();
+
+        // Init JWT keys
+        crate::services::init_jwt_keys(&db)
+            .await
+            .expect("init keys");
+
+        // Insert user and session
+        let user = insert_user_in_state(&state).await;
+        let session_id = insert_session_for_user(&db, user.id).await;
+
+        // Create token
+        let token =
+            crate::services::security::create_session_token(&session_id).expect("create token");
+
+        // Authenticate
+        let result = authenticate_session(&state, &token).await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
+        let auth_user = result.unwrap();
+        assert_eq!(auth_user.user.id, user.id);
+    }
+
+    #[tokio::test]
+    async fn authenticate_session_invalid_token_fails() {
+        let state = make_state_with_db().await;
+        let result = authenticate_session(&state, "not.a.valid.token").await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("Invalid") || msg.contains("invalid") || msg.contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn authenticate_session_revoked_session_fails() {
+        use crate::models::session;
+        use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, Set};
+
+        let state = make_state_with_db().await;
+        let db = state.get_db().await.unwrap();
+        crate::services::init_jwt_keys(&db)
+            .await
+            .expect("init keys");
+
+        let user = insert_user_in_state(&state).await;
+        let session_id = insert_session_for_user(&db, user.id).await;
+        let token =
+            crate::services::security::create_session_token(&session_id).expect("create token");
+
+        // Revoke the session
+        use crate::models::prelude::Session;
+        let existing = Session::find_by_id(&session_id)
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("session exists");
+        let mut active: session::ActiveModel = existing.into_active_model();
+        active.is_revoked = Set(true);
+        active.update(&db).await.expect("update");
+
+        let result = authenticate_session(&state, &token).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("revoked"), "expected 'revoked' in: {}", msg);
+    }
+
+    #[tokio::test]
+    async fn authenticate_session_expired_session_fails() {
+        use crate::models::session;
+        use chrono::Utc;
+        use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, Set};
+
+        let state = make_state_with_db().await;
+        let db = state.get_db().await.unwrap();
+        crate::services::init_jwt_keys(&db)
+            .await
+            .expect("init keys");
+
+        let user = insert_user_in_state(&state).await;
+        let session_id = insert_session_for_user(&db, user.id).await;
+        let token =
+            crate::services::security::create_session_token(&session_id).expect("create token");
+
+        // Expire the session (set expires_at in the past)
+        use crate::models::prelude::Session;
+        let existing = Session::find_by_id(&session_id)
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("session exists");
+        let mut active: session::ActiveModel = existing.into_active_model();
+        active.expires_at = Set(Utc::now() - chrono::Duration::hours(1));
+        active.update(&db).await.expect("update");
+
+        let result = authenticate_session(&state, &token).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("expired") || msg.contains("Expired"),
+            "expected 'expired' in: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_session_missing_session_fails() {
+        let state = make_state_with_db().await;
+        let db = state.get_db().await.unwrap();
+        crate::services::init_jwt_keys(&db)
+            .await
+            .expect("init keys");
+
+        // Create token for non-existent session
+        let token = crate::services::security::create_session_token("nonexistent-session-id")
+            .expect("create token");
+
+        let result = authenticate_session(&state, &token).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("not found") || msg.contains("Session"),
+            "expected 'not found' in: {}",
+            msg
+        );
+    }
 }

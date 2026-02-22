@@ -26,6 +26,14 @@ jobs:
             dockerfile: docker/Dockerfile.frontend
 
     steps:
+      - name: Free disk space
+        run: |
+          docker image prune -f
+          docker container prune -f
+          docker volume prune -f
+          docker buildx prune -f
+          df -h
+
       - uses: actions/checkout@v6
 
       - name: Extract version metadata

@@ -180,6 +180,39 @@ mod tests {
     }
 
     #[test]
+    fn chart_sync_service_new() {
+        use crate::services::catalog::AppCatalog;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let catalog = Arc::new(RwLock::new(AppCatalog::new()));
+        let _svc = ChartSyncService::new(catalog);
+    }
+
+    #[test]
+    fn chart_sync_task_name() {
+        use crate::services::catalog::AppCatalog;
+        use crate::services::scheduler::PeriodicTask;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let catalog = Arc::new(RwLock::new(AppCatalog::new()));
+        let service = Arc::new(ChartSyncService::new(catalog));
+        let task = ChartSyncTask { service };
+        assert_eq!(task.name(), "chart_sync");
+    }
+
+    #[test]
+    fn chart_sync_task_interval_is_positive() {
+        use crate::services::catalog::AppCatalog;
+        use crate::services::scheduler::PeriodicTask;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let catalog = Arc::new(RwLock::new(AppCatalog::new()));
+        let service = Arc::new(ChartSyncService::new(catalog));
+        let task = ChartSyncTask { service };
+        assert!(task.interval().as_secs() > 0);
+    }
+
+    #[test]
     fn github_content_filter_excludes_dot_dirs() {
         let entries = vec![
             GitHubContent {

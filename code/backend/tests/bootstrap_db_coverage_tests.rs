@@ -235,3 +235,91 @@ async fn test_get_status_with_partial_db_uses_db_if_nonempty() {
     assert_eq!(statuses[0].component, "postgresql");
     assert_eq!(statuses[0].status, "healthy");
 }
+
+// ============================================================================
+// retry_component — exercises update_in_memory_status, update_db_status,
+// install_component and the helm-error path
+// ============================================================================
+
+#[tokio::test]
+async fn test_retry_component_unknown_returns_not_found() {
+    // No DB records needed — the component lookup fails before touching the DB
+    let svc = make_service_with_db_records(&[]).await;
+
+    let result = svc.retry_component("totally-unknown-component").await;
+    assert!(result.is_err(), "unknown component must return error");
+    let err_str = result.unwrap_err().to_string();
+    assert!(
+        err_str.to_lowercase().contains("unknown") || err_str.to_lowercase().contains("not found"),
+        "unexpected error: {}",
+        err_str
+    );
+}
+
+#[tokio::test]
+async fn test_retry_component_victoriametrics_fails_at_helm() {
+    // Create a DB with a victoriametrics record so update_db_status actually updates it.
+    let svc = make_service_with_db_records(&[(
+        "victoriametrics",
+        "VictoriaMetrics",
+        "failed",
+        Some("previous error"),
+    )])
+    .await;
+
+    // retry_component triggers:
+    //   update_in_memory_status → update_db_status → install_component
+    // install_component runs helm, which fails (chart not present in test env).
+    let result = svc.retry_component("victoriametrics").await;
+
+    // Expect an error because helm is not available or the chart doesn't exist.
+    assert!(
+        result.is_err(),
+        "retry_component must fail without real helm/chart"
+    );
+}
+
+#[tokio::test]
+async fn test_retry_component_postgresql_fails_at_helm() {
+    // Same test for the postgresql component which takes a slightly different code
+    // path (install_postgresql is called instead of install_component directly).
+    let svc = make_service_with_db_records(&[(
+        "postgresql",
+        "PostgreSQL",
+        "failed",
+        Some("previous error"),
+    )])
+    .await;
+
+    let result = svc.retry_component("postgresql").await;
+
+    assert!(
+        result.is_err(),
+        "retry_component(postgresql) must fail without real helm/chart"
+    );
+}
+
+#[tokio::test]
+async fn test_retry_component_victoriametrics_with_all_records() {
+    // Ensure update_db_status covers the branch where all 4 records exist.
+    let svc = make_service_with_db_records(&[
+        ("postgresql", "PostgreSQL", "healthy", None),
+        ("victoriametrics", "VictoriaMetrics", "failed", Some("err")),
+        ("victorialogs", "VictoriaLogs", "pending", None),
+        ("fluent-bit", "Fluent Bit", "pending", None),
+    ])
+    .await;
+
+    let result = svc.retry_component("victoriametrics").await;
+    assert!(result.is_err(), "must fail without helm");
+}
+
+#[tokio::test]
+async fn test_retry_component_fluent_bit_with_db_record() {
+    // "fluent-bit" exercises the install_component path (not postgresql).
+    // The record already has status="failed" so update_db_status has an existing row.
+    let svc = make_service_with_db_records(&[("fluent-bit", "Fluent Bit", "failed", None)]).await;
+
+    let result = svc.retry_component("fluent-bit").await;
+    assert!(result.is_err(), "must fail without helm");
+}
