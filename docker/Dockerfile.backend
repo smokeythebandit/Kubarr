@@ -57,7 +57,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     PROFILE_DIR=$(if [ "$PROFILE" = "release" ]; then echo "release"; else echo "$PROFILE"; fi) && \
-    rm -f "/app/target/${PROFILE_DIR}/kubarr" "/app/target/${PROFILE_DIR}/deps"/kubarr* && \
+    rm -f "/app/target/${PROFILE_DIR}/kubarr" 2>/dev/null || true && \
+    find "/app/target/${PROFILE_DIR}/deps" -maxdepth 1 -name 'kubarr*' -delete 2>/dev/null || true && \
     touch src/main.rs && \
     cargo build --profile "${PROFILE}" && \
     cp "target/${PROFILE_DIR}/kubarr" /kubarr
