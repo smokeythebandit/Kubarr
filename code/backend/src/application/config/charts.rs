@@ -28,3 +28,37 @@ impl ChartsConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn charts_config_does_not_panic() {
+        let _cfg = ChartsConfig::from_env();
+    }
+
+    #[test]
+    fn charts_config_default_git_ref() {
+        if std::env::var("KUBARR_CHARTS_GIT_REF").is_err() {
+            let cfg = ChartsConfig::from_env();
+            assert_eq!(cfg.git_ref, "main");
+        }
+    }
+
+    #[test]
+    fn charts_config_default_sync_interval() {
+        if std::env::var("KUBARR_CHARTS_SYNC_INTERVAL").is_err() {
+            let cfg = ChartsConfig::from_env();
+            assert_eq!(cfg.sync_interval, 3600);
+        }
+    }
+
+    #[test]
+    fn charts_config_default_repo() {
+        if std::env::var("KUBARR_CHARTS_REPO").is_err() {
+            let cfg = ChartsConfig::from_env();
+            assert!(!cfg.repo.is_empty());
+        }
+    }
+}

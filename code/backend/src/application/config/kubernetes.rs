@@ -20,3 +20,37 @@ impl KubernetesConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kubernetes_config_does_not_panic() {
+        let _cfg = KubernetesConfig::from_env();
+    }
+
+    #[test]
+    fn kubernetes_config_not_in_cluster_by_default() {
+        if std::env::var("KUBARR_IN_CLUSTER").is_err() {
+            let cfg = KubernetesConfig::from_env();
+            assert!(!cfg.in_cluster);
+        }
+    }
+
+    #[test]
+    fn kubernetes_config_default_namespace() {
+        if std::env::var("KUBARR_DEFAULT_NAMESPACE").is_err() {
+            let cfg = KubernetesConfig::from_env();
+            assert_eq!(cfg.default_namespace, "media");
+        }
+    }
+
+    #[test]
+    fn kubernetes_config_no_kubeconfig_by_default() {
+        if std::env::var("KUBARR_KUBECONFIG_PATH").is_err() {
+            let cfg = KubernetesConfig::from_env();
+            assert!(cfg.kubeconfig_path.is_none());
+        }
+    }
+}

@@ -17,3 +17,29 @@ impl ServerConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_config_does_not_panic() {
+        let _cfg = ServerConfig::from_env();
+    }
+
+    #[test]
+    fn server_config_default_host() {
+        if std::env::var("KUBARR_API_HOST").is_err() {
+            let cfg = ServerConfig::from_env();
+            assert_eq!(cfg.host, "0.0.0.0");
+        }
+    }
+
+    #[test]
+    fn server_config_default_port() {
+        if std::env::var("KUBARR_API_PORT").is_err() {
+            let cfg = ServerConfig::from_env();
+            assert_eq!(cfg.port, 8000);
+        }
+    }
+}
