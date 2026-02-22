@@ -26,6 +26,11 @@ use tower::util::ServiceExt;
 mod common;
 use common::{build_test_app_state_with_db, create_test_db_with_seed, create_test_user_with_role};
 use kubarr::endpoints::create_router;
+use kubarr::services::catalog::{AppCatalog, AppConfig, ResourceRequirements};
+use sea_orm::DatabaseConnection;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // ============================================================================
 // JWT key initialization (once per test binary)
@@ -528,4 +533,158 @@ async fn test_sync_charts_succeeds() {
         status,
         body
     );
+}
+
+// ============================================================================
+// Seeded catalog tests (system app protection, catalog content)
+// ============================================================================
+
+/// Build a minimal AppConfig for testing.
+fn make_app_config(name: &str, category: &str, is_system: bool, is_hidden: bool) -> AppConfig {
+    AppConfig {
+        name: name.to_string(),
+        display_name: format!("{} App", name),
+        description: "Test app".to_string(),
+        icon: String::new(),
+        container_image: format!("test/{}:latest", name),
+        default_port: 8080,
+        resource_requirements: ResourceRequirements {
+            cpu_request: "100m".to_string(),
+            cpu_limit: "500m".to_string(),
+            memory_request: "128Mi".to_string(),
+            memory_limit: "512Mi".to_string(),
+        },
+        volumes: vec![],
+        environment_variables: HashMap::new(),
+        category: category.to_string(),
+        is_system,
+        is_hidden,
+        is_browseable: true,
+    }
+}
+
+/// Build an AppState with a seeded catalog and a given DB.
+async fn build_state_with_seeded_catalog(
+    db: DatabaseConnection,
+    apps: Vec<AppConfig>,
+) -> kubarr::state::AppState {
+    use kubarr::services::{
+        audit::AuditService, chart_sync::ChartSyncService, notification::NotificationService,
+    };
+    use kubarr::state::SharedK8sClient;
+
+    let mut app_map = HashMap::new();
+    for a in apps {
+        app_map.insert(a.name.clone(), a);
+    }
+    let catalog = Arc::new(RwLock::new(AppCatalog::with_apps(app_map)));
+    let k8s: SharedK8sClient = Arc::new(RwLock::new(None));
+    let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
+    let audit = AuditService::new();
+    let notification = NotificationService::new();
+    audit.set_db(db.clone()).await;
+    notification.set_db(db.clone()).await;
+    kubarr::state::AppState::new(Some(db), k8s, catalog, chart_sync, audit, notification)
+}
+
+/// Build admin router+cookie with a seeded catalog.
+async fn make_admin_with_catalog(
+    username: &str,
+    email: &str,
+    apps: Vec<AppConfig>,
+) -> (axum::Router, String) {
+    ensure_jwt_keys().await;
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(&db, username, email, "pass123", "admin").await;
+    let state = build_state_with_seeded_catalog(db, apps).await;
+    let app = create_router(state);
+    let cookie = do_login(app.clone(), username, "pass123")
+        .await
+        .expect("admin login must succeed");
+    (app, cookie)
+}
+
+#[tokio::test]
+async fn test_delete_system_app_returns_403() {
+    let apps = vec![make_app_config("postgresql", "system", true, true)];
+    let (app, cookie) =
+        make_admin_with_catalog("admin_sysapp", "admin_sysapp@test.com", apps).await;
+    let (status, body) =
+        make_request(app, "DELETE", "/api/apps/postgresql", Some(&cookie), None).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "deleting system app must return 403, body: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_get_app_from_catalog_found() {
+    let apps = vec![make_app_config("sonarr", "media", false, false)];
+    let (app, cookie) = make_admin_with_catalog("admin_found", "admin_found@test.com", apps).await;
+    let (status, body) =
+        make_request(app, "GET", "/api/apps/catalog/sonarr", Some(&cookie), None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "existing app must return 200, body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("must be JSON");
+    assert_eq!(json["name"].as_str().unwrap_or(""), "sonarr");
+}
+
+#[tokio::test]
+async fn test_list_catalog_filters_hidden_apps() {
+    let apps = vec![
+        make_app_config("sonarr", "media", false, false), // visible
+        make_app_config("postgresql", "system", true, true), // hidden
+    ];
+    let (app, cookie) =
+        make_admin_with_catalog("admin_filter", "admin_filter@test.com", apps).await;
+    let (status, body) = make_request(app, "GET", "/api/apps/catalog", Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let apps_arr: Vec<serde_json::Value> = serde_json::from_str(&body).expect("must be JSON array");
+    // Hidden app must be filtered out
+    assert_eq!(apps_arr.len(), 1, "only non-hidden apps should be returned");
+    assert_eq!(apps_arr[0]["name"].as_str().unwrap_or(""), "sonarr");
+}
+
+#[tokio::test]
+async fn test_list_categories_with_seeded_catalog() {
+    let apps = vec![
+        make_app_config("sonarr", "media", false, false),
+        make_app_config("grafana", "monitoring", false, false),
+    ];
+    let (app, cookie) =
+        make_admin_with_catalog("admin_catseeded", "admin_catseeded@test.com", apps).await;
+    let (status, body) =
+        make_request(app, "GET", "/api/apps/categories", Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cats: Vec<String> = serde_json::from_str(&body).expect("must be JSON array");
+    assert!(
+        cats.contains(&"media".to_string()),
+        "media category must be present"
+    );
+    assert!(
+        cats.contains(&"monitoring".to_string()),
+        "monitoring category must be present"
+    );
+}
+
+#[tokio::test]
+async fn test_get_apps_by_category_with_seeded_catalog() {
+    let apps = vec![
+        make_app_config("sonarr", "media", false, false),
+        make_app_config("radarr", "media", false, false),
+        make_app_config("grafana", "monitoring", false, false),
+    ];
+    let (app, cookie) =
+        make_admin_with_catalog("admin_catfilt", "admin_catfilt@test.com", apps).await;
+    let (status, body) =
+        make_request(app, "GET", "/api/apps/category/media", Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let apps_arr: Vec<serde_json::Value> = serde_json::from_str(&body).expect("must be JSON array");
+    assert_eq!(apps_arr.len(), 2, "only media apps should be returned");
 }
