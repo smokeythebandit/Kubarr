@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(SESSION_COOKIE_BASE, "kubarr_session");
         assert_eq!(SESSION_COOKIE_NAME, "kubarr_session");
         assert_eq!(ACTIVE_SESSION_COOKIE, "kubarr_active");
-        assert!(MAX_SESSIONS > 0);
+        assert_eq!(MAX_SESSIONS, 5);
     }
 
     fn request_with_cookie(cookie: &str) -> Request {

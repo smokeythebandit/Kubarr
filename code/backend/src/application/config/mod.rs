@@ -64,3 +64,41 @@ impl Config {
 }
 
 pub static CONFIG: Lazy<Config> = Lazy::new(Config::from_env);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_from_env_does_not_panic() {
+        let _cfg = Config::from_env();
+    }
+
+    #[test]
+    fn config_version_is_not_empty() {
+        let cfg = Config::from_env();
+        assert!(!cfg.version.is_empty());
+    }
+
+    #[test]
+    fn config_default_channel_is_dev() {
+        if std::env::var("CHANNEL").is_err() {
+            let cfg = Config::from_env();
+            assert_eq!(cfg.channel, "dev");
+        }
+    }
+
+    #[test]
+    fn config_default_log_level_is_info() {
+        if std::env::var("KUBARR_LOG_LEVEL").is_err() {
+            let cfg = Config::from_env();
+            assert_eq!(cfg.log_level, "info");
+        }
+    }
+
+    #[test]
+    fn config_frontend_url_not_empty() {
+        let cfg = Config::from_env();
+        assert!(!cfg.frontend_url.is_empty());
+    }
+}
