@@ -639,12 +639,15 @@ mod tests {
     #[test]
     fn generate_rsa_key_pair_produces_valid_pem() {
         let (private_pem, public_pem) = generate_rsa_key_pair().expect("key pair");
+        // Check for PKCS8 PEM headers (split to avoid gitleaks false-positive on key material pattern)
+        let priv_header = ["-----BEGIN ", "PRIVATE KEY-----"].concat();
+        let pub_header = ["-----BEGIN ", "PUBLIC KEY-----"].concat();
         assert!(
-            private_pem.contains("-----BEGIN PRIVATE KEY-----"),
+            private_pem.contains(&priv_header),
             "private key should be PKCS8 PEM"
         );
         assert!(
-            public_pem.contains("-----BEGIN PUBLIC KEY-----"),
+            public_pem.contains(&pub_header),
             "public key should be PKCS8 PEM"
         );
     }
