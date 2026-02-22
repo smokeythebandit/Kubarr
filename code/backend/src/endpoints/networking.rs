@@ -750,4 +750,96 @@ mod tests {
     fn capitalize_unicode_first_char() {
         assert_eq!(capitalize_first("über"), "Über");
     }
+
+    // -------------------------------------------------------------------------
+    // NetworkNode, NetworkEdge, NetworkTopology, NetworkStats serde
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn network_node_ser() {
+        let n = NetworkNode {
+            id: "ns/media".to_string(),
+            name: "media".to_string(),
+            node_type: "namespace".to_string(),
+            rx_bytes_per_sec: 1234.5,
+            tx_bytes_per_sec: 5678.9,
+            total_traffic: 6913.4,
+            pod_count: 3,
+            color: "#4CAF50".to_string(),
+        };
+        let json = serde_json::to_string(&n).expect("ser");
+        assert!(json.contains("\"id\":\"ns/media\""));
+        assert!(json.contains("\"type\":\"namespace\""));
+        assert!(json.contains("\"pod_count\":3"));
+    }
+
+    #[test]
+    fn network_edge_ser_with_optional() {
+        let e = NetworkEdge {
+            source: "ns/a".to_string(),
+            target: "ns/b".to_string(),
+            edge_type: "egress".to_string(),
+            port: Some(80),
+            protocol: Some("TCP".to_string()),
+            label: "HTTP".to_string(),
+        };
+        let json = serde_json::to_string(&e).expect("ser");
+        assert!(json.contains("\"port\":80"));
+        assert!(json.contains("\"protocol\":\"TCP\""));
+    }
+
+    #[test]
+    fn network_edge_ser_without_optional() {
+        let e = NetworkEdge {
+            source: "ns/a".to_string(),
+            target: "ns/b".to_string(),
+            edge_type: "egress".to_string(),
+            port: None,
+            protocol: None,
+            label: String::new(),
+        };
+        let json = serde_json::to_string(&e).expect("ser");
+        assert!(!json.contains("\"port\""));
+        assert!(!json.contains("\"protocol\""));
+    }
+
+    #[test]
+    fn network_topology_ser() {
+        let t = NetworkTopology {
+            nodes: vec![NetworkNode {
+                id: "n1".to_string(),
+                name: "media".to_string(),
+                node_type: "namespace".to_string(),
+                rx_bytes_per_sec: 0.0,
+                tx_bytes_per_sec: 0.0,
+                total_traffic: 0.0,
+                pod_count: 1,
+                color: "#fff".to_string(),
+            }],
+            edges: vec![],
+        };
+        let json = serde_json::to_string(&t).expect("ser");
+        assert!(json.contains("\"nodes\""));
+        assert!(json.contains("\"edges\":[]"));
+    }
+
+    #[test]
+    fn network_stats_ser() {
+        let s = NetworkStats {
+            namespace: "media".to_string(),
+            app_name: "sonarr".to_string(),
+            rx_bytes_per_sec: 100.0,
+            tx_bytes_per_sec: 200.0,
+            rx_packets_per_sec: 10.0,
+            tx_packets_per_sec: 20.0,
+            rx_errors_per_sec: 0.0,
+            tx_errors_per_sec: 0.0,
+            rx_dropped_per_sec: 0.0,
+            tx_dropped_per_sec: 0.0,
+            pod_count: 1,
+        };
+        let json = serde_json::to_string(&s).expect("ser");
+        assert!(json.contains("\"namespace\":\"media\""));
+        assert!(json.contains("\"app_name\":\"sonarr\""));
+    }
 }

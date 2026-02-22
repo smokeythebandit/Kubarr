@@ -986,4 +986,107 @@ mod tests {
         deduped.dedup();
         assert_eq!(types.len(), deduped.len(), "duplicate event types found");
     }
+
+    // -------------------------------------------------------------------------
+    // Struct serde tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn notification_dto_ser() {
+        let dto = NotificationDto {
+            id: 1,
+            title: "Test".to_string(),
+            message: "A message".to_string(),
+            event_type: Some("login".to_string()),
+            severity: "info".to_string(),
+            read: false,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&dto).expect("ser");
+        assert!(json.contains("\"title\":\"Test\""));
+        assert!(json.contains("\"read\":false"));
+    }
+
+    #[test]
+    fn inbox_response_ser() {
+        let r = InboxResponse {
+            notifications: vec![],
+            total: 10,
+            unread: 3,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"total\":10"));
+        assert!(json.contains("\"unread\":3"));
+    }
+
+    #[test]
+    fn inbox_query_deser() {
+        let q: InboxQuery = serde_json::from_str(r#"{"limit":20,"offset":0}"#).expect("deser");
+        assert_eq!(q.limit, Some(20));
+        assert_eq!(q.offset, Some(0));
+    }
+
+    #[test]
+    fn unread_count_response_ser() {
+        let r = UnreadCountResponse { count: 5 };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"count\":5"));
+    }
+
+    #[test]
+    fn channel_dto_ser() {
+        let dto = ChannelDto {
+            channel_type: "email".to_string(),
+            enabled: true,
+            config: serde_json::json!({"host": "smtp.example.com"}),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&dto).expect("ser");
+        assert!(json.contains("\"channel_type\":\"email\""));
+        assert!(json.contains("\"enabled\":true"));
+    }
+
+    #[test]
+    fn update_channel_request_deser() {
+        let r: UpdateChannelRequest =
+            serde_json::from_str(r#"{"enabled":true,"config":{"host":"smtp.example.com"}}"#)
+                .expect("deser");
+        assert_eq!(r.enabled, Some(true));
+        assert!(r.config.is_some());
+    }
+
+    #[test]
+    fn test_channel_request_deser() {
+        let r: TestChannelRequest =
+            serde_json::from_str(r#"{"destination":"test@example.com"}"#).expect("deser");
+        assert_eq!(r.destination, "test@example.com");
+    }
+
+    #[test]
+    fn test_channel_response_ser() {
+        let r = TestChannelResponse {
+            success: true,
+            error: None,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"success\":true"));
+    }
+
+    #[test]
+    fn logs_query_deser() {
+        let q: LogsQuery = serde_json::from_str(r#"{"limit":50,"offset":10}"#).expect("deser");
+        assert_eq!(q.limit, Some(50));
+        assert_eq!(q.offset, Some(10));
+    }
+
+    #[test]
+    fn logs_response_ser() {
+        let r = LogsResponse {
+            logs: vec![],
+            total: 100,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"total\":100"));
+    }
 }
