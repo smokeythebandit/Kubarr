@@ -2103,3 +2103,106 @@ async fn test_disable_2fa_success() {
         "Disable response must include a message"
     );
 }
+
+// ============================================================================
+// POST /api/users — duplicate username returns 400 (users.rs line 583)
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_user_duplicate_username_returns_400() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "dupuseradmin",
+        "dupuseradmin@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    // Pre-create a user whose username we'll try to reuse
+    create_test_user_with_role(
+        &db,
+        "existinguser",
+        "existinguser@example.com",
+        "password123",
+        "viewer",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(create_router(state.clone()), "dupuseradmin", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Try to create another user with the same username
+    let create_body = serde_json::json!({
+        "username": "existinguser",
+        "email": "differentemail@example.com",
+        "password": "password123"
+    })
+    .to_string();
+
+    let (status, body) =
+        authenticated_post(create_router(state), "/api/users", &cookie, &create_body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Creating a user with a duplicate username must return 400. Body: {}",
+        body
+    );
+}
+
+// ============================================================================
+// PATCH /api/users/{id} — update is_approved field (users.rs line 682)
+// ============================================================================
+
+#[tokio::test]
+async fn test_admin_update_user_is_approved() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "approvaladmin",
+        "approvaladmin@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let target = create_test_user_with_role(
+        &db,
+        "approvaltarget",
+        "approvaltarget@example.com",
+        "password123",
+        "viewer",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(create_router(state.clone()), "approvaladmin", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    let patch_body = serde_json::json!({
+        "is_approved": false
+    })
+    .to_string();
+
+    let uri = format!("/api/users/{}", target.id);
+    let (status, body) =
+        authenticated_patch(create_router(state), &uri, &cookie, &patch_body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Admin PATCH is_approved must return 200. Body: {}",
+        body
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["is_approved"], false,
+        "User is_approved must be updated to false"
+    );
+}

@@ -52,6 +52,20 @@ pub async fn build_test_app_state() -> AppState {
     build_test_app_state_with_db(db).await
 }
 
+/// Build a test AppState with NO database connection (db = None).
+///
+/// Use this to test code paths that execute when the database is unavailable,
+/// such as `admin_user_exists` returning `Ok(false)` on line 85 of setup.rs.
+pub async fn build_test_app_state_no_db() -> AppState {
+    let k8s_client: SharedK8sClient = Arc::new(RwLock::new(None));
+    let catalog: SharedCatalog = Arc::new(RwLock::new(AppCatalog::default()));
+    let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
+    let audit = AuditService::new();
+    let notification = NotificationService::new();
+
+    AppState::new(None, k8s_client, catalog, chart_sync, audit, notification)
+}
+
 /// Create an in-memory SQLite database for testing
 pub async fn create_test_db() -> DatabaseConnection {
     // Use simple in-memory SQLite - each connection gets its own database

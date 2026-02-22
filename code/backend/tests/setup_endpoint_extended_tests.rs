@@ -25,8 +25,8 @@ use tower::util::ServiceExt;
 
 mod common;
 use common::{
-    build_test_app_state, build_test_app_state_with_db, create_test_db_with_seed,
-    create_test_user_with_role,
+    build_test_app_state, build_test_app_state_no_db, build_test_app_state_with_db,
+    create_test_db_with_seed, create_test_user_with_role,
 };
 
 use kubarr::endpoints::create_router;
@@ -1478,4 +1478,43 @@ async fn test_validate_path_root_slash_that_exists_is_valid_dir() {
     // "/" exists and is a directory, so valid = true
     assert_eq!(json["exists"], true);
     assert_eq!(json["valid"], true);
+}
+
+// ============================================================================
+// admin_user_exists: no-database path (setup.rs line 85)
+// ============================================================================
+
+#[tokio::test]
+async fn test_generate_credentials_with_no_db_succeeds() {
+    // Build a state with NO database connection.
+    // admin_user_exists will hit the `None => return Ok(false)` branch (line 85
+    // in setup.rs) and treat setup as incomplete, allowing credentials to be
+    // generated without any DB.
+    let state = build_test_app_state_no_db().await;
+
+    let (status, body) = get_setup(create_router(state), "/api/setup/generate-credentials").await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "generate-credentials must return 200 when db is absent (setup not complete). Body: {}",
+        body
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("admin_username").is_some(),
+        "Response must include 'admin_username'. Body: {}",
+        body
+    );
+    assert!(
+        json.get("admin_email").is_some(),
+        "Response must include 'admin_email'. Body: {}",
+        body
+    );
+    assert!(
+        json.get("admin_password").is_some(),
+        "Response must include 'admin_password'. Body: {}",
+        body
+    );
 }

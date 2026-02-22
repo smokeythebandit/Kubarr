@@ -1750,3 +1750,424 @@ async fn test_list_logs_viewer_without_audit_view_returns_403() {
         "Viewer without audit.view must get 403 on GET /api/notifications/logs"
     );
 }
+
+// ============================================================================
+// Additional coverage tests for previously-uncovered branches
+// ============================================================================
+
+// list_channels: `if let Some(channel) = existing` branch (lines 247-257)
+#[tokio::test]
+async fn test_list_channels_returns_existing_channel_branch() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    setup_admin_with_settings_perms(
+        &db,
+        "listchannelsexist",
+        "listchannelsexist@example.com",
+        "password123",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "listchannelsexist",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Insert an email channel
+    let (s, _) = authenticated_put(
+        create_router(state.clone()),
+        "/api/notifications/channels/email",
+        &cookie,
+        r#"{"enabled":true,"config":{"host":"smtp.test.com"}}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "update_channel must return 200");
+
+    // Now list channels — the email channel now exists, hitting the Some(channel) branch
+    let (status, body) =
+        authenticated_get(create_router(state), "/api/notifications/channels", &cookie).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "list_channels must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let channels = json.as_array().expect("response must be an array");
+    let email_ch = channels
+        .iter()
+        .find(|c| c["channel_type"] == "email")
+        .expect("email channel must appear in list");
+    assert_eq!(
+        email_ch["enabled"], true,
+        "email channel must show enabled=true"
+    );
+}
+
+// get_channel: `Some(ch)` match arm (lines 296-307)
+#[tokio::test]
+async fn test_get_channel_returns_existing_config() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    setup_admin_with_settings_perms(
+        &db,
+        "getchannelexist",
+        "getchannelexist@example.com",
+        "password123",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "getchannelexist",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Insert a telegram channel
+    let (s, _) = authenticated_put(
+        create_router(state.clone()),
+        "/api/notifications/channels/telegram",
+        &cookie,
+        r#"{"enabled":false,"config":{"chat_id":"12345"}}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Get the telegram channel — hits the Some(ch) branch
+    let (status, body) = authenticated_get(
+        create_router(state),
+        "/api/notifications/channels/telegram",
+        &cookie,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "get_channel must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["channel_type"], "telegram");
+    // Config contains chat_id but it's not sensitive so it won't be masked
+    assert!(
+        json["config"].get("chat_id").is_some(),
+        "config must include chat_id"
+    );
+}
+
+// update_channel: `active.config = Set(...)` update branch (line 366)
+#[tokio::test]
+async fn test_update_channel_config_on_existing_channel() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    setup_admin_with_settings_perms(
+        &db,
+        "updatechconfig",
+        "updatechconfig@example.com",
+        "password123",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "updatechconfig",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // First call: insert messagebird channel
+    let (s1, _) = authenticated_put(
+        create_router(state.clone()),
+        "/api/notifications/channels/messagebird",
+        &cookie,
+        r#"{"enabled":false}"#,
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK);
+
+    // Second call: update existing channel WITH config — hits line 366
+    let (status, body) = authenticated_put(
+        create_router(state),
+        "/api/notifications/channels/messagebird",
+        &cookie,
+        r#"{"config":{"originator":"KubarrTest"}}"#,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "second update_channel must return 200. Body: {}",
+        body
+    );
+}
+
+// list_events: `if let Some(event) = existing` branch (lines 480-483)
+#[tokio::test]
+async fn test_list_events_after_event_inserted() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    setup_admin_with_settings_perms(
+        &db,
+        "listeventsexist",
+        "listeventsexist@example.com",
+        "password123",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "listeventsexist",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Insert an event setting
+    let (s, _) = authenticated_put(
+        create_router(state.clone()),
+        "/api/notifications/events/login",
+        &cookie,
+        r#"{"enabled":true,"severity":"info"}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Now list events — the login event now exists, hitting the Some(event) branch
+    let (status, body) =
+        authenticated_get(create_router(state), "/api/notifications/events", &cookie).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "list_events must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let events = json.as_array().expect("response must be an array");
+    let login_ev = events
+        .iter()
+        .find(|e| e["event_type"] == "login")
+        .expect("login event must appear in list");
+    assert_eq!(login_ev["enabled"], true);
+}
+
+// update_event: `active.enabled = Set(enabled)` when existing (line 531)
+#[tokio::test]
+async fn test_update_event_existing_sets_enabled() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    setup_admin_with_settings_perms(
+        &db,
+        "updateeventenabled",
+        "updateeventenabled@example.com",
+        "password123",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "updateeventenabled",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // First call: insert the event
+    let (s1, _) = authenticated_put(
+        create_router(state.clone()),
+        "/api/notifications/events/user_created",
+        &cookie,
+        r#"{"severity":"warning"}"#,
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK);
+
+    // Second call: update existing event WITH enabled — hits line 531
+    let (status, body) = authenticated_put(
+        create_router(state),
+        "/api/notifications/events/user_created",
+        &cookie,
+        r#"{"enabled":true}"#,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "second update_event with enabled must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["enabled"], true, "enabled must be persisted");
+}
+
+// get_preferences: `if let Some(pref) = existing` branch (lines 593-597)
+#[tokio::test]
+async fn test_get_preferences_returns_existing_pref() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "getprefexist",
+        "getprefexist@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(create_router(state.clone()), "getprefexist", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Insert a preference
+    let (s, _) = authenticated_put(
+        create_router(state.clone()),
+        "/api/notifications/preferences/email",
+        &cookie,
+        r#"{"enabled":true,"destination":"user@example.com"}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Get preferences — the email pref now exists, hitting the Some(pref) branch (lines 593-597)
+    let (status, body) = authenticated_get(
+        create_router(state),
+        "/api/notifications/preferences",
+        &cookie,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "get_preferences must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let prefs = json.as_array().expect("response must be an array");
+    let email_pref = prefs
+        .iter()
+        .find(|p| p["channel_type"] == "email")
+        .expect("email pref must appear");
+    assert_eq!(email_pref["enabled"], true);
+    // destination is masked but should be present
+    assert!(email_pref["destination"].is_string());
+}
+
+// update_preference: `active.enabled = Set(enabled)` when existing (line 656)
+#[tokio::test]
+async fn test_update_preference_existing_sets_enabled() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "updateprefenabled",
+        "updateprefenabled@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "updateprefenabled",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // First call: insert preference (no enabled field, destination only)
+    let (s1, _) = authenticated_put(
+        create_router(state.clone()),
+        "/api/notifications/preferences/telegram",
+        &cookie,
+        r#"{"destination":"12345"}"#,
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK);
+
+    // Second call: update existing pref WITH enabled — hits line 656
+    let (status, body) = authenticated_put(
+        create_router(state),
+        "/api/notifications/preferences/telegram",
+        &cookie,
+        r#"{"enabled":true}"#,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "second update_preference with enabled must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["enabled"], true, "enabled must be persisted");
+}
+
+// list_logs: channel_type and status filter branches (lines 746, 749)
+#[tokio::test]
+async fn test_list_logs_with_channel_and_status_filters() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    setup_admin_with_settings_perms(
+        &db,
+        "listlogsfilter",
+        "listlogsfilter@example.com",
+        "password123",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "listlogsfilter",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Call list_logs with channel_type AND status filters — covers lines 746 and 749
+    let (status, body) = authenticated_get(
+        create_router(state),
+        "/api/notifications/logs?channel_type=email&status=sent",
+        &cookie,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "list_logs with filters must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("logs").is_some(),
+        "response must include logs array"
+    );
+    assert!(json.get("total").is_some(), "response must include total");
+}
