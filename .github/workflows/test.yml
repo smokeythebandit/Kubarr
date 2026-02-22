@@ -20,7 +20,7 @@ jobs:
         run: docker load < kubarr-backend-test.tar
 
       - name: Unit tests
-        run: docker run --rm "kubarr-backend-test:${{ inputs.image-tag }}" cargo test --verbose
+        run: docker run --rm "kubarr-backend-test:${{ inputs.image-tag }}" cargo nextest run
 
   frontend:
     runs-on: self-hosted
