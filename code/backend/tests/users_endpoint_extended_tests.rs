@@ -1944,3 +1944,162 @@ async fn test_list_invites_with_created_invite() {
         "Invite must have is_used field"
     );
 }
+
+// ============================================================================
+// POST /api/users/me/2fa/setup + enable — enable 2FA success path (lines 1141-1170)
+// POST /api/users/me/2fa/disable — disable 2FA success path (lines 1209-1228)
+// ============================================================================
+
+#[tokio::test]
+async fn test_enable_2fa_success_generates_recovery_codes() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "enable2fauser",
+        "enable2fauser@example.com",
+        "password123",
+        "viewer",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(create_router(state.clone()), "enable2fauser", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Step 1: call setup to get the TOTP secret
+    let (setup_status, setup_body) = authenticated_post(
+        create_router(state.clone()),
+        "/api/users/me/2fa/setup",
+        &cookie,
+        "{}",
+    )
+    .await;
+    assert_eq!(
+        setup_status,
+        StatusCode::OK,
+        "2FA setup must return 200. Body: {}",
+        setup_body
+    );
+    let setup_json: serde_json::Value = serde_json::from_str(&setup_body).unwrap();
+    let secret = setup_json["secret"]
+        .as_str()
+        .expect("setup must return a secret");
+
+    // Step 2: generate the current TOTP code for this secret
+    let code = {
+        use totp_rs::{Algorithm, Secret, TOTP};
+
+        let secret_bytes = Secret::Encoded(secret.to_string())
+            .to_bytes()
+            .expect("decode TOTP secret");
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some("Kubarr".to_string()),
+            "enable2fauser@example.com".to_string(),
+        )
+        .expect("create TOTP");
+        totp.generate_current().expect("generate TOTP code")
+    };
+
+    // Step 3: enable 2FA with the just-generated code
+    let enable_body = serde_json::json!({ "code": code }).to_string();
+    let (enable_status, enable_resp) = authenticated_post(
+        create_router(state),
+        "/api/users/me/2fa/enable",
+        &cookie,
+        &enable_body,
+    )
+    .await;
+
+    assert_eq!(
+        enable_status,
+        StatusCode::OK,
+        "2FA enable must return 200. Body: {}",
+        enable_resp
+    );
+    let enable_json: serde_json::Value = serde_json::from_str(&enable_resp).unwrap();
+    let recovery_codes = enable_json["recovery_codes"]
+        .as_array()
+        .expect("enable_2fa must return recovery_codes");
+    assert_eq!(
+        recovery_codes.len(),
+        8,
+        "Must generate exactly 8 recovery codes"
+    );
+}
+
+#[tokio::test]
+async fn test_disable_2fa_success() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "disable2fauser",
+        "disable2fauser@example.com",
+        "password123",
+        "viewer", // viewer role does NOT require 2FA
+    )
+    .await;
+
+    // Log in BEFORE enabling 2FA (so the session cookie works without a TOTP challenge)
+    let state_pre = build_test_app_state_with_db(db.clone()).await;
+    let (_, cookie) = do_login(create_router(state_pre), "disable2fauser", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Directly enable 2FA in the DB so we can test disable without going through enable
+    {
+        use kubarr::models::prelude::User;
+        use kubarr::services::security::generate_totp_secret;
+        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+        let user: kubarr::models::user::Model = User::find()
+            .filter(kubarr::models::user::Column::Username.eq("disable2fauser"))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let secret = generate_totp_secret();
+        let now = chrono::Utc::now();
+        let update = kubarr::models::user::ActiveModel {
+            id: Set(user.id),
+            totp_enabled: Set(true),
+            totp_secret: Set(Some(secret)),
+            totp_verified_at: Set(Some(now)),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        update.update(&db).await.expect("enable 2FA in DB");
+    }
+
+    let state = build_test_app_state_with_db(db).await;
+
+    // Now call disable — session cookie is still valid
+    let disable_body = serde_json::json!({ "password": "password123" }).to_string();
+    let (status, body) = authenticated_post(
+        create_router(state),
+        "/api/users/me/2fa/disable",
+        &cookie,
+        &disable_body,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "2FA disable must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("message").is_some(),
+        "Disable response must include a message"
+    );
+}

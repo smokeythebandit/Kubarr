@@ -315,3 +315,153 @@ async fn test_get_audit_logs_after_activity() {
         "Audit total must be a valid non-negative integer"
     );
 }
+
+// ============================================================================
+// POST /api/audit/clear — clear old audit logs (lines 81-92 in audit.rs)
+// ============================================================================
+
+#[tokio::test]
+async fn test_clear_audit_logs_succeeds_as_admin() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "clearauditadmin",
+        "clearauditadmin@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = {
+        let body = serde_json::json!({"username": "clearauditadmin", "password": "password123"})
+            .to_string();
+        let resp = create_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/login")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let cookie = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(|v| {
+                let s = v.to_str().ok()?;
+                if s.starts_with("kubarr_session=") && !s.contains("kubarr_session_") {
+                    Some(s.split(';').next().unwrap().to_string())
+                } else {
+                    None
+                }
+            });
+        (status, cookie)
+    };
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    let clear_body = serde_json::json!({ "days": 0 }).to_string();
+    let response = create_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/audit/clear")
+                .method("POST")
+                .header("Cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(clear_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "POST /api/audit/clear must return 200 for admin"
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&body)).unwrap();
+
+    assert!(
+        json.get("deleted").is_some(),
+        "Response must include 'deleted' count"
+    );
+    assert!(
+        json.get("message").is_some(),
+        "Response must include a 'message'"
+    );
+}
+
+#[tokio::test]
+async fn test_clear_audit_logs_with_default_days() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "clearauditdefault",
+        "clearauditdefault@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = {
+        let body = serde_json::json!({"username": "clearauditdefault", "password": "password123"})
+            .to_string();
+        let resp = create_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/login")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(|v| {
+                let s = v.to_str().ok()?;
+                if s.starts_with("kubarr_session=") && !s.contains("kubarr_session_") {
+                    Some(s.split(';').next().unwrap().to_string())
+                } else {
+                    None
+                }
+            });
+        (resp.status(), cookie)
+    };
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Send without `days` to exercise the `None → 90` default path
+    let clear_body = serde_json::json!({}).to_string();
+    let response = create_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/audit/clear")
+                .method("POST")
+                .header("Cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(clear_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "POST /api/audit/clear without days must use default (90) and return 200"
+    );
+}

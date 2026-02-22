@@ -1378,3 +1378,169 @@ async fn test_create_role_with_requires_2fa() {
         "Created role must have requires_2fa = true"
     );
 }
+
+// ============================================================================
+// PATCH /api/roles/{id} — name update and requires_2fa paths (lines 253-275)
+// ============================================================================
+
+#[tokio::test]
+async fn test_update_role_rename_to_new_name_succeeds() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "renameroleadmin1",
+        "renamerole1@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "renameroleadmin1",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Create a role to rename
+    let create_body = serde_json::json!({
+        "name": "rename_me_role",
+        "description": "Role to rename"
+    })
+    .to_string();
+    let (cs, cb) = authenticated_post(
+        create_router(state.clone()),
+        "/api/roles",
+        &cookie,
+        &create_body,
+    )
+    .await;
+    assert_eq!(cs, StatusCode::OK, "Create role must succeed. Body: {}", cb);
+    let created: serde_json::Value = serde_json::from_str(&cb).unwrap();
+    let role_id = created["id"].as_i64().unwrap();
+
+    // Rename to a brand-new unique name — exercises the "not a duplicate" path
+    let update_body = serde_json::json!({ "name": "rename_me_role_updated" }).to_string();
+    let uri = format!("/api/roles/{}", role_id);
+    let (status, body) =
+        authenticated_patch(create_router(state), &uri, &cookie, &update_body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Renaming to a new unique name must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["name"], "rename_me_role_updated",
+        "Role name must be updated in response"
+    );
+}
+
+#[tokio::test]
+async fn test_update_role_rename_to_duplicate_returns_400() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "renameduproleadmin",
+        "renameduplicate@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "renameduproleadmin",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Create two roles
+    let body_a = serde_json::json!({ "name": "dup_role_a" }).to_string();
+    let body_b = serde_json::json!({ "name": "dup_role_b" }).to_string();
+
+    let (_, ca) =
+        authenticated_post(create_router(state.clone()), "/api/roles", &cookie, &body_a).await;
+    let (_, cb) =
+        authenticated_post(create_router(state.clone()), "/api/roles", &cookie, &body_b).await;
+
+    let role_a: serde_json::Value = serde_json::from_str(&ca).unwrap();
+    let role_a_id = role_a["id"].as_i64().unwrap();
+
+    // Try to rename role A to role B's name — must return 400
+    let update_body = serde_json::json!({ "name": "dup_role_b" }).to_string();
+    let uri = format!("/api/roles/{}", role_a_id);
+    let (status, _) = authenticated_patch(create_router(state), &uri, &cookie, &update_body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Renaming to an existing role name must return 400"
+    );
+}
+
+#[tokio::test]
+async fn test_update_role_requires_2fa_field() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "requires2faadmin",
+        "requires2fa@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "requires2faadmin",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    // Create a custom role without requires_2fa
+    let create_body =
+        serde_json::json!({ "name": "requires2fa_test_role", "requires_2fa": false }).to_string();
+    let (cs, cb) = authenticated_post(
+        create_router(state.clone()),
+        "/api/roles",
+        &cookie,
+        &create_body,
+    )
+    .await;
+    assert_eq!(cs, StatusCode::OK, "Create role must succeed. Body: {}", cb);
+    let created: serde_json::Value = serde_json::from_str(&cb).unwrap();
+    let role_id = created["id"].as_i64().unwrap();
+
+    // Update the role, setting requires_2fa = true — exercises line 275
+    let update_body = serde_json::json!({ "requires_2fa": true }).to_string();
+    let uri = format!("/api/roles/{}", role_id);
+    let (status, body) =
+        authenticated_patch(create_router(state), &uri, &cookie, &update_body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PATCH with requires_2fa must return 200. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["requires_2fa"], true,
+        "requires_2fa must be updated to true"
+    );
+}
