@@ -1362,4 +1362,34 @@ mod tests {
         assert_eq!(json["memory_usage_mb"], 128.0_f64);
         assert!(json["cpu_series"].is_array());
     }
+
+    #[test]
+    fn app_health_serializes() {
+        use crate::services::k8s::{PodStatus, ServiceEndpoint};
+        let h = AppHealth {
+            app_name: "sonarr".to_string(),
+            namespace: "media".to_string(),
+            healthy: true,
+            pods: vec![],
+            metrics: None,
+            endpoints: vec![ServiceEndpoint {
+                name: "sonarr".to_string(),
+                namespace: "media".to_string(),
+                port: 8989,
+                target_port: None,
+                port_forward_command: "kubectl port-forward...".to_string(),
+                url: None,
+                service_type: "ClusterIP".to_string(),
+                base_path: None,
+            }],
+            message: "All pods running".to_string(),
+        };
+        let json = serde_json::to_value(&h).unwrap();
+        assert_eq!(json["app_name"], "sonarr");
+        assert_eq!(json["healthy"], true);
+        assert!(json["pods"].is_array());
+        assert!(json["endpoints"].is_array());
+        // metrics should be omitted when None
+        assert!(json.get("metrics").is_none() || json["metrics"].is_null());
+    }
 }

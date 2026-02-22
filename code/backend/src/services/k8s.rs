@@ -694,4 +694,121 @@ mod tests {
         // 128 * 1024 * 1024 == 134217728 bytes — less than 1 GiB → shown as Mi
         assert_eq!(format_memory(134_217_728), "128Mi");
     }
+
+    // -------------------------------------------------------------------------
+    // PodStatus serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn pod_status_ser_minimal() {
+        let s = PodStatus {
+            name: "sonarr-abc123".to_string(),
+            app: "sonarr".to_string(),
+            namespace: "media".to_string(),
+            status: "Running".to_string(),
+            ready: true,
+            restart_count: 0,
+            age: "2d".to_string(),
+            node: None,
+            ip: None,
+            cpu_usage: None,
+            memory_usage: None,
+        };
+        let json = serde_json::to_string(&s).expect("ser");
+        assert!(json.contains("\"name\":\"sonarr-abc123\""));
+        assert!(json.contains("\"status\":\"Running\""));
+        assert!(json.contains("\"restarts\":0")); // renamed field
+        assert!(!json.contains("cpu_usage")); // skip_serializing_if None
+        assert!(!json.contains("memory_usage")); // skip_serializing_if None
+    }
+
+    #[test]
+    fn pod_status_ser_with_metrics() {
+        let s = PodStatus {
+            name: "radarr-xyz".to_string(),
+            app: "radarr".to_string(),
+            namespace: "media".to_string(),
+            status: "Running".to_string(),
+            ready: true,
+            restart_count: 2,
+            age: "1h".to_string(),
+            node: Some("node1".to_string()),
+            ip: Some("10.0.0.5".to_string()),
+            cpu_usage: Some(0.5),
+            memory_usage: Some(256 * 1024 * 1024),
+        };
+        let json = serde_json::to_string(&s).expect("ser");
+        assert!(json.contains("\"cpu_usage\":0.5"));
+        assert!(json.contains("\"memory_usage\""));
+        assert!(json.contains("\"node\":\"node1\""));
+    }
+
+    // -------------------------------------------------------------------------
+    // PodMetrics serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn pod_metrics_ser() {
+        let m = PodMetrics {
+            name: "sonarr-123".to_string(),
+            namespace: "media".to_string(),
+            cpu_usage: "100m".to_string(),
+            memory_usage: "256Mi".to_string(),
+        };
+        let json = serde_json::to_string(&m).expect("ser");
+        assert!(json.contains("\"name\":\"sonarr-123\""));
+        assert!(json.contains("\"cpu_usage\":\"100m\""));
+        assert!(json.contains("\"memory_usage\":\"256Mi\""));
+    }
+
+    // -------------------------------------------------------------------------
+    // ServiceEndpoint serialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn service_endpoint_ser() {
+        let e = ServiceEndpoint {
+            name: "sonarr".to_string(),
+            namespace: "media".to_string(),
+            port: 8989,
+            target_port: Some("8989".to_string()),
+            port_forward_command: "kubectl port-forward svc/sonarr 8989:8989".to_string(),
+            url: Some("http://localhost:8989".to_string()),
+            service_type: "ClusterIP".to_string(),
+            base_path: None,
+        };
+        let json = serde_json::to_string(&e).expect("ser");
+        assert!(json.contains("\"name\":\"sonarr\""));
+        assert!(json.contains("\"port\":8989"));
+        assert!(json.contains("\"service_type\":\"ClusterIP\""));
+    }
+
+    // -------------------------------------------------------------------------
+    // Private metrics struct deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn container_usage_deser() {
+        let json = r#"{"cpu":"500m","memory":"256Mi"}"#;
+        let usage: ContainerUsage = serde_json::from_str(json).expect("deser");
+        assert_eq!(usage.cpu, "500m");
+        assert_eq!(usage.memory, "256Mi");
+    }
+
+    #[test]
+    fn container_metrics_deser() {
+        let json = r#"{"usage":{"cpu":"100m","memory":"128Mi"}}"#;
+        let cm: ContainerMetrics = serde_json::from_str(json).expect("deser");
+        assert_eq!(cm.usage.cpu, "100m");
+        assert_eq!(cm.usage.memory, "128Mi");
+    }
+
+    #[test]
+    fn pod_metrics_metadata_deser() {
+        let json = r#"{"name":"my-pod","labels":{"app":"sonarr"}}"#;
+        let meta: PodMetricsMetadata = serde_json::from_str(json).expect("deser");
+        assert_eq!(meta.name.as_deref(), Some("my-pod"));
+        let labels = meta.labels.unwrap();
+        assert_eq!(labels.get("app").map(|s| s.as_str()), Some("sonarr"));
+    }
 }

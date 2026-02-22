@@ -1294,6 +1294,179 @@ mod tests {
     use super::*;
 
     #[test]
+    fn list_params_deser() {
+        let p: ListParams = serde_json::from_str(r#"{"skip":10,"limit":20}"#).expect("deser");
+        assert_eq!(p.skip, Some(10));
+        assert_eq!(p.limit, Some(20));
+    }
+
+    #[test]
+    fn list_params_deser_empty() {
+        let p: ListParams = serde_json::from_str("{}").expect("deser");
+        assert_eq!(p.skip, None);
+        assert_eq!(p.limit, None);
+    }
+
+    #[test]
+    fn create_user_request_deser() {
+        let r: CreateUserRequest = serde_json::from_str(
+            r#"{"username":"bob","email":"bob@example.com","password":"pass"}"#,
+        )
+        .expect("deser");
+        assert_eq!(r.username, "bob");
+        assert_eq!(r.email, "bob@example.com");
+        assert_eq!(r.role_ids, Vec::<i64>::new()); // default empty
+    }
+
+    #[test]
+    fn create_user_request_deser_with_roles() {
+        let r: CreateUserRequest = serde_json::from_str(
+            r#"{"username":"bob","email":"bob@example.com","password":"pass","role_ids":[1,2]}"#,
+        )
+        .expect("deser");
+        assert_eq!(r.role_ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn update_user_request_deser_empty() {
+        let r: UpdateUserRequest = serde_json::from_str("{}").expect("deser");
+        assert_eq!(r.email, None);
+        assert_eq!(r.is_active, None);
+    }
+
+    #[test]
+    fn update_user_request_deser_partial() {
+        let r: UpdateUserRequest = serde_json::from_str(r#"{"is_active":false}"#).expect("deser");
+        assert_eq!(r.is_active, Some(false));
+        assert_eq!(r.email, None);
+    }
+
+    #[test]
+    fn role_info_ser() {
+        let r = RoleInfo {
+            id: 1,
+            name: "admin".to_string(),
+            description: Some("Admin role".to_string()),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"id\":1"));
+        assert!(json.contains("\"name\":\"admin\""));
+    }
+
+    #[test]
+    fn preferences_response_ser() {
+        let r = PreferencesResponse {
+            theme: "dark".to_string(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"theme\":\"dark\""));
+    }
+
+    #[test]
+    fn update_preferences_deser() {
+        let r: UpdatePreferences = serde_json::from_str(r#"{"theme":"light"}"#).expect("deser");
+        assert_eq!(r.theme.as_deref(), Some("light"));
+    }
+
+    #[test]
+    fn change_own_password_deser() {
+        let r: ChangeOwnPasswordRequest =
+            serde_json::from_str(r#"{"current_password":"old","new_password":"new"}"#)
+                .expect("deser");
+        assert_eq!(r.current_password, "old");
+        assert_eq!(r.new_password, "new");
+    }
+
+    #[test]
+    fn update_own_profile_deser() {
+        let r: UpdateOwnProfileRequest =
+            serde_json::from_str(r#"{"username":"newname"}"#).expect("deser");
+        assert_eq!(r.username.as_deref(), Some("newname"));
+        assert_eq!(r.email, None);
+    }
+
+    #[test]
+    fn admin_reset_password_deser() {
+        let r: AdminResetPasswordRequest =
+            serde_json::from_str(r#"{"new_password":"newpass"}"#).expect("deser");
+        assert_eq!(r.new_password, "newpass");
+    }
+
+    #[test]
+    fn totp_setup_response_ser() {
+        let r = TwoFactorSetupResponse {
+            secret: "BASE32SECRET".to_string(),
+            provisioning_uri: "otpauth://totp/...".to_string(),
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"secret\":\"BASE32SECRET\""));
+        assert!(json.contains("\"provisioning_uri\""));
+    }
+
+    #[test]
+    fn enable_2fa_deser() {
+        let r: Enable2FARequest = serde_json::from_str(r#"{"code":"123456"}"#).expect("deser");
+        assert_eq!(r.code, "123456");
+    }
+
+    #[test]
+    fn disable_2fa_deser() {
+        let r: Disable2FARequest =
+            serde_json::from_str(r#"{"password":"mypassword"}"#).expect("deser");
+        assert_eq!(r.password, "mypassword");
+    }
+
+    #[test]
+    fn delete_account_deser() {
+        let r: DeleteOwnAccountRequest =
+            serde_json::from_str(r#"{"password":"confirm_pass"}"#).expect("deser");
+        assert_eq!(r.password, "confirm_pass");
+    }
+
+    #[test]
+    fn totp_status_response_ser() {
+        let r = TwoFactorStatusResponse {
+            enabled: true,
+            verified_at: None,
+            required_by_role: false,
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"enabled\":true"));
+        assert!(json.contains("\"required_by_role\":false"));
+    }
+
+    #[test]
+    fn totp_enable_response_ser() {
+        let r = TwoFactorEnableResponse {
+            message: "2FA enabled".to_string(),
+            recovery_codes: vec!["CODE1".to_string(), "CODE2".to_string()],
+        };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"message\":\"2FA enabled\""));
+        assert!(json.contains("\"recovery_codes\""));
+    }
+
+    #[test]
+    fn totp_recovery_codes_response_ser() {
+        let r = TwoFactorRecoveryCodesResponse { remaining: 6 };
+        let json = serde_json::to_string(&r).expect("ser");
+        assert!(json.contains("\"remaining\":6"));
+    }
+
+    #[test]
+    fn create_invite_request_default_days() {
+        let r: CreateInviteRequest = serde_json::from_str("{}").expect("deser");
+        assert_eq!(r.expires_in_days, 7);
+    }
+
+    #[test]
+    fn create_invite_request_custom_days() {
+        let r: CreateInviteRequest =
+            serde_json::from_str(r#"{"expires_in_days":30}"#).expect("deser");
+        assert_eq!(r.expires_in_days, 30);
+    }
+
+    #[test]
     fn invite_response_ser() {
         let r = InviteResponse {
             id: 42,
