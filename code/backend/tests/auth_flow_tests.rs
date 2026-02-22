@@ -584,3 +584,151 @@ async fn test_admin_can_access_settings() {
         "Admin must not get 403 on /api/settings"
     );
 }
+
+// ============================================================================
+// DELETE /auth/sessions/{id} — success and cross-user forbidden paths
+// ============================================================================
+
+/// Revoke one of the current user's *other* sessions successfully (auth.rs lines 476-480).
+#[tokio::test]
+async fn test_revoke_own_non_current_session_succeeds() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "revoke_own_user",
+        "revoke_own@example.com",
+        "password123",
+        "viewer",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    // First login — session A
+    let (_, cookie_a) = do_login(
+        create_router(state.clone()),
+        "revoke_own_user",
+        "password123",
+    )
+    .await;
+    let cookie_a = cookie_a.expect("First login must succeed");
+
+    // Second login — session B (used as the "current" session for DELETE)
+    let (_, cookie_b) = do_login(
+        create_router(state.clone()),
+        "revoke_own_user",
+        "password123",
+    )
+    .await;
+    let cookie_b = cookie_b.expect("Second login must succeed");
+
+    // Get all sessions via session B and find session A's ID
+    let (_, sessions_body) = authenticated_get(state.clone(), "/auth/sessions", &cookie_b).await;
+    let sessions: Vec<serde_json::Value> = serde_json::from_str(&sessions_body).unwrap();
+
+    // Find a session that is NOT the current one (is_current == false)
+    let other_id = sessions
+        .iter()
+        .find(|s| s["is_current"] == false)
+        .and_then(|s| s["id"].as_str())
+        .expect("Must have at least one non-current session");
+
+    // Delete the other session using session B
+    let response = create_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/auth/sessions/{}", other_id))
+                .method("DELETE")
+                .header("Cookie", &cookie_b)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Revoking own non-current session must return 200"
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&body)).unwrap();
+    assert!(
+        json.get("message").is_some(),
+        "Revoke response must include a message"
+    );
+
+    // Verify the first cookie no longer works
+    let (verify_status, _) = authenticated_get(state.clone(), "/auth/sessions", &cookie_a).await;
+    assert_eq!(
+        verify_status,
+        StatusCode::UNAUTHORIZED,
+        "Revoked session cookie must no longer authenticate"
+    );
+}
+
+/// Revoke another user's session is forbidden (auth.rs lines 463-464).
+#[tokio::test]
+async fn test_revoke_another_users_session_returns_403() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "attacker_user",
+        "attacker@example.com",
+        "password123",
+        "viewer",
+    )
+    .await;
+    create_test_user_with_role(
+        &db,
+        "victim_user",
+        "victim@example.com",
+        "password123",
+        "viewer",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    // Attacker logs in
+    let (_, attacker_cookie) =
+        do_login(create_router(state.clone()), "attacker_user", "password123").await;
+    let attacker_cookie = attacker_cookie.expect("Attacker login must succeed");
+
+    // Victim logs in
+    let (_, victim_cookie) =
+        do_login(create_router(state.clone()), "victim_user", "password123").await;
+    let victim_cookie = victim_cookie.expect("Victim login must succeed");
+
+    // Victim: list own sessions to get session ID
+    let (_, victim_sessions_body) =
+        authenticated_get(state.clone(), "/auth/sessions", &victim_cookie).await;
+    let victim_sessions: Vec<serde_json::Value> =
+        serde_json::from_str(&victim_sessions_body).unwrap();
+    let victim_session_id = victim_sessions
+        .first()
+        .and_then(|s| s["id"].as_str())
+        .expect("Victim must have at least one session");
+
+    // Attacker tries to revoke victim's session
+    let response = create_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/auth/sessions/{}", victim_session_id))
+                .method("DELETE")
+                .header("Cookie", &attacker_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "Revoking another user's session must return 403"
+    );
+}

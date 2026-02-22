@@ -421,3 +421,157 @@ async fn test_recovery_login_unapproved_user_returns_401() {
         "Recovery for unapproved user must return 401"
     );
 }
+
+// ============================================================================
+// Login with TOTP code — covers auth.rs lines 256-268
+// ============================================================================
+
+/// Login with a valid TOTP code succeeds (covers auth.rs lines 256-268).
+#[tokio::test]
+async fn test_login_with_valid_totp_code_succeeds() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+
+    // Create user with known TOTP secret
+    let totp_secret = generate_totp_secret();
+    let now = chrono::Utc::now();
+    use kubarr::services::security::hash_password;
+    let user_model = user::ActiveModel {
+        username: Set("totp_login_user".to_string()),
+        email: Set("totp_login@test.com".to_string()),
+        hashed_password: Set(hash_password("password123").unwrap()),
+        is_active: Set(true),
+        is_approved: Set(true),
+        totp_enabled: Set(true),
+        totp_secret: Set(Some(totp_secret.clone())),
+        totp_verified_at: Set(Some(now)),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    user_model.insert(&db).await.unwrap();
+
+    let state = build_test_app_state_with_db(db).await;
+    let app = create_router(state);
+
+    // Generate a valid TOTP code using the known secret
+    let code = {
+        use totp_rs::{Algorithm, Secret, TOTP};
+        let secret_bytes = Secret::Encoded(totp_secret.clone())
+            .to_bytes()
+            .expect("decode TOTP secret");
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some("Kubarr".to_string()),
+            "totp_login@test.com".to_string(),
+        )
+        .expect("create TOTP");
+        totp.generate_current().expect("generate TOTP code")
+    };
+
+    let body = serde_json::json!({
+        "username": "totp_login_user",
+        "password": "password123",
+        "totp_code": code
+    })
+    .to_string();
+
+    let (status, _resp) = post_json(app, "/auth/login", &body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Login with valid TOTP code must return 200"
+    );
+}
+
+/// Login with TOTP enabled but no code supplied returns 400 (auth.rs line 257-259).
+#[tokio::test]
+async fn test_login_totp_enabled_no_code_returns_400() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+
+    let now = chrono::Utc::now();
+    use kubarr::services::security::hash_password;
+    let user_model = user::ActiveModel {
+        username: Set("totp_nocode_user".to_string()),
+        email: Set("totp_nocode@test.com".to_string()),
+        hashed_password: Set(hash_password("password123").unwrap()),
+        is_active: Set(true),
+        is_approved: Set(true),
+        totp_enabled: Set(true),
+        totp_secret: Set(Some(generate_totp_secret())),
+        totp_verified_at: Set(Some(now)),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    user_model.insert(&db).await.unwrap();
+
+    let state = build_test_app_state_with_db(db).await;
+    let app = create_router(state);
+
+    let body = serde_json::json!({
+        "username": "totp_nocode_user",
+        "password": "password123"
+        // intentionally omit totp_code
+    })
+    .to_string();
+
+    let (status, _) = post_json(app, "/auth/login", &body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Login with TOTP enabled but no code must return 400"
+    );
+}
+
+/// Login with TOTP enabled and wrong code returns 401 (auth.rs lines 265-266).
+#[tokio::test]
+async fn test_login_totp_enabled_wrong_code_returns_401() {
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+
+    let now = chrono::Utc::now();
+    use kubarr::services::security::hash_password;
+    let user_model = user::ActiveModel {
+        username: Set("totp_wrongcode_user".to_string()),
+        email: Set("totp_wrongcode@test.com".to_string()),
+        hashed_password: Set(hash_password("password123").unwrap()),
+        is_active: Set(true),
+        is_approved: Set(true),
+        totp_enabled: Set(true),
+        totp_secret: Set(Some(generate_totp_secret())),
+        totp_verified_at: Set(Some(now)),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    user_model.insert(&db).await.unwrap();
+
+    let state = build_test_app_state_with_db(db).await;
+    let app = create_router(state);
+
+    let body = serde_json::json!({
+        "username": "totp_wrongcode_user",
+        "password": "password123",
+        "totp_code": "000000"  // almost certainly wrong
+    })
+    .to_string();
+
+    let (status, _) = post_json(app, "/auth/login", &body).await;
+
+    assert!(
+        status == StatusCode::UNAUTHORIZED || status == StatusCode::BAD_REQUEST,
+        "Login with wrong TOTP code must return 401 or 400, got: {}",
+        status
+    );
+}
