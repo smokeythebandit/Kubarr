@@ -118,7 +118,6 @@ jobs:
             --set backend.readinessProbe.initialDelaySeconds=5 \
             --set backend.readinessProbe.periodSeconds=5 \
             --set backend.readinessProbe.failureThreshold=30 \
-            --set frontend.livenessProbe.initialDelaySeconds=30 \
             --timeout=5m
 
       - name: Wait for pods
