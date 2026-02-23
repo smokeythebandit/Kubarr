@@ -189,7 +189,7 @@ jobs:
 
       - name: Port-forward
         run: |
-          kubectl port-forward svc/kubarr-backend 8000:8000 -n kubarr &
+          kubectl port-forward --address 127.0.0.1 svc/kubarr-backend 8000:8000 -n kubarr &
           echo $! > "/tmp/pf-${KIND_CLUSTER}.pid"
 
           for i in $(seq 1 60); do
