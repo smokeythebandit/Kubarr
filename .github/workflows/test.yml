@@ -190,6 +190,11 @@ jobs:
 
       - name: Port-forward
         run: |
+          echo "=== Port 8000 status before port-forward ==="
+          ss -tlnp sport = :8000 2>/dev/null || true
+          fuser -k 8000/tcp 2>/dev/null || true
+          sleep 1
+
           kubectl port-forward --address 127.0.0.1 svc/kubarr-backend 8000:8000 -n kubarr &
           echo $! > "/tmp/pf-${KIND_CLUSTER}.pid"
 
