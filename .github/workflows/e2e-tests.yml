@@ -43,6 +43,8 @@ jobs:
           done
           # Prune stopped containers and unused images to free disk/memory
           docker container prune -f 2>/dev/null || true
+          # Kill stale port-forward processes from previous runs to free the port
+          pkill -f "kubectl port-forward" 2>/dev/null || true
 
       - name: Create Kind cluster
         run: |
