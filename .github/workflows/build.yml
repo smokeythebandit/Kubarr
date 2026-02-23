@@ -28,10 +28,10 @@ jobs:
     steps:
       - name: Free disk space
         run: |
-          docker image prune -f
-          docker container prune -f
-          docker volume prune -f
-          docker buildx prune -f
+          docker image prune -f || true
+          docker container prune -f || true
+          docker volume prune -f || true
+          docker buildx prune -f || true
           df -h
 
       - uses: actions/checkout@v6
