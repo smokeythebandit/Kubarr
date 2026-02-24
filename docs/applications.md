@@ -25,11 +25,11 @@ The catalog is populated from the Helm charts in the [kubarr-charts](https://git
 
 ```mermaid
 flowchart LR
-    UI["Dashboard\n(catalog)"]
-    API["Kubarr\nbackend"]
-    OCI["OCI Registry\nghcr.io"]
-    HELM["helm upgrade\n--install"]
-    NS["App namespace\n+ pods"]
+    UI["Dashboard<br/>(catalog)"]
+    API["Kubarr<br/>backend"]
+    OCI["OCI Registry<br/>ghcr.io"]
+    HELM["helm upgrade<br/>--install"]
+    NS["App namespace<br/>+ pods"]
 
     UI -->|"POST /api/apps/install"| API
     API -->|"helm pull"| OCI
