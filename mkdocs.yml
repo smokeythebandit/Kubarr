@@ -51,6 +51,7 @@ nav:
   - Versioning: versioning.md
   - Architecture:
     - Storage: storage.md
+    - Networking: networking.md
 
 markdown_extensions:
   - admonition
