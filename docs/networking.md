@@ -10,31 +10,31 @@ Kubarr uses a **reverse proxy architecture** — all traffic to installed apps f
 flowchart TD
     Browser(["🌐 Browser"])
     CF["Cloudflare Edge"]
-    CFD["cloudflared\ntunnel pods"]
-    FE["kubarr-frontend\nClusterIP :80"]
-    BE["kubarr-backend\nNodePort :30080"]
+    CFD["cloudflared<br/>tunnel pods"]
+    FE["kubarr-frontend<br/>ClusterIP :80"]
+    BE["kubarr-backend<br/>NodePort :30080"]
 
     subgraph media ["Media App Namespaces"]
         direction LR
-        QB["qbittorrent\n:8080"]
-        RD["radarr\n:7878"]
-        SN["sonarr\n:8989"]
-        JF["jellyfin\n:8096"]
+        QB["qbittorrent<br/>:8080"]
+        RD["radarr<br/>:7878"]
+        SN["sonarr<br/>:8989"]
+        JF["jellyfin<br/>:8096"]
         DOT["..."]
     end
 
     subgraph mon ["Monitoring"]
-        VM["VictoriaMetrics\n:8428"]
-        VL["VictoriaLogs\n:9428"]
-        GF["Grafana\n:3000"]
+        VM["VictoriaMetrics<br/>:8428"]
+        VL["VictoriaLogs<br/>:9428"]
+        GF["Grafana<br/>:3000"]
     end
 
-    PG[("PostgreSQL\n:5432")]
+    PG[("PostgreSQL<br/>:5432")]
 
     Browser -->|"HTTPS (public)"| CF
     CF --> CFD
     CFD -->|"cluster-internal"| BE
-    Browser -->|"NodePort :30080\n(local)"| BE
+    Browser -->|"NodePort :30080 (local)"| BE
     BE -->|"serves frontend assets"| FE
     BE -->|"/proxy/radarr/*"| RD
     BE -->|"/proxy/sonarr/*"| SN
@@ -106,8 +106,8 @@ Download clients (qBittorrent, Transmission, Deluge, etc.) support an optional *
 ```mermaid
 flowchart LR
     subgraph pod ["qbittorrent pod"]
-        APP["qbittorrent\ncontainer"]
-        VPN["gluetun\nsidecar"]
+        APP["qbittorrent<br/>container"]
+        VPN["gluetun<br/>sidecar"]
     end
 
     APP <-->|"localhost"| VPN
