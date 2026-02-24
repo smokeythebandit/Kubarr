@@ -47,21 +47,6 @@ impl K8sClient {
         &self.client
     }
 
-    /// Test the Kubernetes connection
-    #[allow(dead_code)]
-    pub async fn test_connection(&self) -> Result<bool> {
-        let pods: Api<Pod> = Api::namespaced(self.client.clone(), "default");
-        pods.list(&ListParams::default().limit(1)).await?;
-        Ok(true)
-    }
-
-    /// Get Kubernetes server version
-    #[allow(dead_code)]
-    pub async fn get_server_version(&self) -> Result<String> {
-        let version = self.client.apiserver_version().await?;
-        Ok(format!("{}.{}", version.major, version.minor))
-    }
-
     /// Check if metrics-server is available
     #[allow(clippy::expect_used)]
     pub async fn check_metrics_server_available(&self) -> bool {

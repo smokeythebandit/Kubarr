@@ -318,20 +318,6 @@ pub fn generate_random_string(length: usize) -> String {
     hex::encode(bytes)
 }
 
-/// Generate a secure random password
-#[allow(dead_code)]
-pub fn generate_secure_password(length: usize) -> String {
-    const CHARSET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()";
-    let mut rng = rand::rng();
-    (0..length)
-        .map(|_| {
-            let idx = rng.random_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect()
-}
-
 // ==========================================================================
 // TOTP (Time-based One-Time Password) Functions
 // ==========================================================================
@@ -374,17 +360,6 @@ pub fn verify_totp(secret: &str, code: &str, account_name: &str) -> Result<bool>
 pub fn get_totp_provisioning_uri(secret: &str, account_name: &str) -> Result<String> {
     let totp = create_totp(secret, account_name)?;
     Ok(totp.get_url())
-}
-
-/// Get TOTP QR code as base64-encoded PNG data URL
-#[allow(dead_code)]
-pub fn get_totp_qr_code_base64(secret: &str, account_name: &str) -> Result<String> {
-    let totp = create_totp(secret, account_name)?;
-    let base64 = totp
-        .get_qr_base64()
-        .map_err(|e| AppError::Internal(format!("Failed to generate QR code: {}", e)))?;
-    // Return as data URL for direct use in <img src="">
-    Ok(format!("data:image/png;base64,{}", base64))
 }
 
 /// Generate a 2FA challenge token
@@ -479,24 +454,6 @@ mod tests {
         let b = generate_random_string(16);
         // Extremely unlikely to be identical
         assert_ne!(a, b);
-    }
-
-    // -------------------------------------------------------------------------
-    // generate_secure_password
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn secure_password_length() {
-        let p = generate_secure_password(20);
-        assert_eq!(p.len(), 20);
-    }
-
-    #[test]
-    fn secure_password_charset() {
-        let p = generate_secure_password(100);
-        let valid: &[u8] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()";
-        assert!(p.bytes().all(|b| valid.contains(&b)));
     }
 
     // -------------------------------------------------------------------------
@@ -617,19 +574,6 @@ mod tests {
         let result = verify_totp("not-base32!!!", "123456", "user");
         // May succeed or fail depending on secret parsing, but should not panic
         let _ = result;
-    }
-
-    // -------------------------------------------------------------------------
-    // get_totp_qr_code_base64
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn totp_qr_code_base64_is_data_url() {
-        let secret = generate_totp_secret();
-        let result = get_totp_qr_code_base64(&secret, "testuser@example.com");
-        let data_url = result.expect("qr code ok");
-        assert!(data_url.starts_with("data:image/png;base64,"));
-        assert!(data_url.len() > 30);
     }
 
     // -------------------------------------------------------------------------

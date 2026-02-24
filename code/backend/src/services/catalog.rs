@@ -313,12 +313,6 @@ impl AppCatalog {
             .collect()
     }
 
-    /// Check if an app exists in the catalog
-    #[allow(dead_code)]
-    pub fn app_exists(&self, app_name: &str) -> bool {
-        self.apps.contains_key(&app_name.to_lowercase())
-    }
-
     /// Get all unique categories
     pub fn get_categories(&self) -> Vec<String> {
         let mut categories: Vec<_> = self
@@ -420,18 +414,6 @@ mod tests {
     fn get_apps_by_category_missing() {
         let catalog = make_catalog();
         assert!(catalog.get_apps_by_category("nonexistent").is_empty());
-    }
-
-    #[test]
-    fn app_exists_true() {
-        let catalog = make_catalog();
-        assert!(catalog.app_exists("sonarr"));
-    }
-
-    #[test]
-    fn app_exists_false() {
-        let catalog = make_catalog();
-        assert!(!catalog.app_exists("plex"));
     }
 
     #[test]

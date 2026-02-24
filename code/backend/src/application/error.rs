@@ -20,10 +20,6 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
-    #[error("Conflict: {0}")]
-    #[allow(dead_code)]
-    Conflict(String),
-
     #[error("Internal server error: {0}")]
     Internal(String),
 
@@ -76,7 +72,6 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             AppError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
@@ -185,13 +180,6 @@ mod tests {
         let (status, body) = into_parts(AppError::Forbidden("access denied".into())).await;
         assert_eq!(status, 403);
         assert!(body.contains("access denied"));
-    }
-
-    #[tokio::test]
-    async fn test_conflict_returns_409() {
-        let (status, body) = into_parts(AppError::Conflict("already exists".into())).await;
-        assert_eq!(status, 409);
-        assert!(body.contains("already exists"));
     }
 
     #[tokio::test]

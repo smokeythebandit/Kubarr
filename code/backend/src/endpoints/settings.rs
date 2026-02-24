@@ -14,7 +14,7 @@ use crate::error::{AppError, Result};
 use crate::middleware::permissions::{Authorized, SettingsManage, SettingsView};
 use crate::models::prelude::*;
 use crate::models::system_setting;
-use crate::state::{AppState, DbConn};
+use crate::state::AppState;
 
 /// Default settings values
 static DEFAULT_SETTINGS: Lazy<HashMap<&'static str, (&'static str, &'static str)>> =
@@ -208,32 +208,6 @@ async fn update_setting(
     }))
 }
 
-/// Get a setting value from the database (helper for other modules)
-#[allow(dead_code)]
-pub async fn get_setting_value(db: &DbConn, key: &str) -> Result<Option<String>> {
-    let setting = SystemSetting::find_by_id(key).one(db).await?;
-
-    if let Some(s) = setting {
-        return Ok(Some(s.value));
-    }
-
-    // Return default if exists
-    if let Some((default_value, _)) = DEFAULT_SETTINGS.get(key) {
-        return Ok(Some(default_value.to_string()));
-    }
-
-    Ok(None)
-}
-
-/// Get a boolean setting value (helper for other modules)
-#[allow(dead_code)]
-pub async fn get_setting_bool(db: &DbConn, key: &str) -> Result<bool> {
-    let value = get_setting_value(db, key).await?;
-    Ok(value
-        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
-        .unwrap_or(false))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,166 +244,5 @@ mod tests {
     fn setting_update_deser() {
         let u: SettingUpdate = serde_json::from_str(r#"{"value":"false"}"#).expect("deser");
         assert_eq!(u.value, "false");
-    }
-
-    async fn make_db() -> crate::state::DbConn {
-        crate::application::database::connect_with_url("sqlite::memory:")
-            .await
-            .expect("in-memory SQLite")
-    }
-
-    #[tokio::test]
-    async fn get_setting_value_returns_default_when_not_in_db() {
-        let db = make_db().await;
-        let val = get_setting_value(&db, "registration_enabled")
-            .await
-            .expect("should succeed");
-        assert_eq!(val, Some("true".to_string()));
-    }
-
-    #[tokio::test]
-    async fn get_setting_value_returns_none_for_unknown_key() {
-        let db = make_db().await;
-        let val = get_setting_value(&db, "nonexistent_key")
-            .await
-            .expect("should succeed");
-        assert_eq!(val, None);
-    }
-
-    #[tokio::test]
-    async fn get_setting_bool_true_for_default_registration() {
-        let db = make_db().await;
-        let val = get_setting_bool(&db, "registration_enabled")
-            .await
-            .expect("should succeed");
-        assert!(val);
-    }
-
-    #[tokio::test]
-    async fn get_setting_bool_false_for_unknown_key() {
-        let db = make_db().await;
-        let val = get_setting_bool(&db, "nonexistent_key")
-            .await
-            .expect("should succeed");
-        assert!(!val);
-    }
-
-    #[tokio::test]
-    async fn get_setting_value_returns_default_when_row_is_deleted() {
-        use crate::models::prelude::SystemSetting;
-        use sea_orm::EntityTrait;
-        let db = make_db().await;
-        // Delete the seeded row so the function falls through to DEFAULT_SETTINGS
-        SystemSetting::delete_by_id("registration_enabled")
-            .exec(&db)
-            .await
-            .expect("delete");
-        let val = get_setting_value(&db, "registration_enabled")
-            .await
-            .expect("should succeed");
-        // Should return the DEFAULT_SETTINGS value, not None
-        assert_eq!(val, Some("true".to_string()));
-    }
-
-    #[tokio::test]
-    async fn get_setting_value_returns_none_when_row_deleted_and_not_in_defaults() {
-        use crate::models::prelude::SystemSetting;
-        use sea_orm::EntityTrait;
-        let db = make_db().await;
-        // Delete all rows; then query a key not in DEFAULT_SETTINGS
-        SystemSetting::delete_many()
-            .exec(&db)
-            .await
-            .expect("delete");
-        let val = get_setting_value(&db, "unknown_key_xyz")
-            .await
-            .expect("should succeed");
-        assert_eq!(val, None);
-    }
-
-    #[tokio::test]
-    async fn get_setting_value_returns_seeded_db_value() {
-        // The seed migration inserts registration_enabled=true
-        let db = make_db().await;
-        let val = get_setting_value(&db, "registration_enabled")
-            .await
-            .expect("should succeed");
-        // DB value returned (seeded as "true")
-        assert_eq!(val, Some("true".to_string()));
-    }
-
-    #[tokio::test]
-    async fn get_setting_value_db_value_takes_precedence_over_default() {
-        use crate::models::prelude::SystemSetting;
-        use crate::models::system_setting;
-        use chrono::Utc;
-        use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, Set};
-
-        let db = make_db().await;
-        // Update the already-seeded row to a different value
-        let existing = SystemSetting::find_by_id("registration_enabled")
-            .one(&db)
-            .await
-            .expect("query")
-            .expect("seeded row must exist");
-        let mut active: system_setting::ActiveModel = existing.into_active_model();
-        active.value = Set("false".to_string());
-        active.updated_at = Set(Utc::now());
-        active.update(&db).await.expect("update setting");
-
-        let val = get_setting_value(&db, "registration_enabled")
-            .await
-            .expect("should succeed");
-        assert_eq!(val, Some("false".to_string()));
-    }
-
-    #[tokio::test]
-    async fn get_setting_bool_false_when_db_value_is_false() {
-        use crate::models::prelude::SystemSetting;
-        use crate::models::system_setting;
-        use chrono::Utc;
-        use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, Set};
-
-        let db = make_db().await;
-        let existing = SystemSetting::find_by_id("registration_enabled")
-            .one(&db)
-            .await
-            .expect("query")
-            .expect("seeded row must exist");
-        let mut active: system_setting::ActiveModel = existing.into_active_model();
-        active.value = Set("false".to_string());
-        active.updated_at = Set(Utc::now());
-        active.update(&db).await.expect("update setting");
-
-        let val = get_setting_bool(&db, "registration_enabled")
-            .await
-            .expect("should succeed");
-        assert!(!val);
-    }
-
-    #[tokio::test]
-    async fn get_setting_bool_true_for_various_truthy_values() {
-        use crate::models::prelude::SystemSetting;
-        use crate::models::system_setting;
-        use chrono::Utc;
-        use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, Set};
-
-        for truthy in &["true", "1", "yes", "TRUE", "YES"] {
-            let db = make_db().await;
-            let existing = SystemSetting::find_by_id("registration_enabled")
-                .one(&db)
-                .await
-                .expect("query")
-                .expect("seeded row must exist");
-            let mut active: system_setting::ActiveModel = existing.into_active_model();
-            active.value = Set(truthy.to_string());
-            active.updated_at = Set(Utc::now());
-            active.update(&db).await.expect("update setting");
-
-            let val = get_setting_bool(&db, "registration_enabled")
-                .await
-                .expect("should succeed");
-            assert!(val, "Expected true for value: {}", truthy);
-        }
     }
 }

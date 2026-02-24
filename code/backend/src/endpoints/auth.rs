@@ -106,16 +106,6 @@ fn create_active_session_cookie(slot: usize, secure: bool) -> HeaderValue {
     HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""))
 }
 
-/// Create a cookie that clears an indexed session
-#[allow(dead_code)]
-fn clear_session_cookie_for_slot(slot: usize) -> HeaderValue {
-    let cookie = format!(
-        "{}_{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
-        SESSION_COOKIE_BASE, slot
-    );
-    HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""))
-}
-
 /// Legacy: Create a session cookie with the given token (for backwards compatibility)
 fn create_session_cookie(token: &str, secure: bool) -> HeaderValue {
     let cookie = format!(
@@ -866,18 +856,6 @@ mod tests {
     fn legacy_session_cookie_secure() {
         let hv = create_session_cookie("tok", true);
         assert!(hv.to_str().unwrap().contains("Secure"));
-    }
-
-    // -------------------------------------------------------------------------
-    // clear_session_cookie_for_slot
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn clear_slot_cookie_sets_max_age_zero() {
-        let hv = clear_session_cookie_for_slot(0);
-        let s = hv.to_str().unwrap();
-        assert!(s.contains("Max-Age=0"));
-        assert!(s.contains("kubarr_session_0="));
     }
 
     // -------------------------------------------------------------------------
