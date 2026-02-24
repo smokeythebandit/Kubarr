@@ -49,6 +49,7 @@ nav:
   - Docker: docker.md
   - Development: development.md
   - Versioning: versioning.md
+  - Applications: applications.md
   - Architecture:
     - Storage: storage.md
     - Networking: networking.md
