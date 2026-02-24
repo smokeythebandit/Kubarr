@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 
 use crate::error::{AppError, Result};
 use crate::models::prelude::*;
-use crate::models::{role, system_setting, user, user_role};
+use crate::models::{role, user, user_role};
 use crate::services::bootstrap::{self, BootstrapService, ComponentStatus};
 use crate::state::AppState;
 
@@ -203,19 +203,7 @@ async fn get_setup_status(State(state): State<AppState>) -> Result<Json<SetupSta
         }
     };
 
-    // Check for storage configuration (legacy - now in server_config)
-    let storage_configured = {
-        let db_guard = state.db.read().await;
-        if let Some(ref db) = *db_guard {
-            server_configured
-                || SystemSetting::find_by_id("storage_path")
-                    .one(db)
-                    .await?
-                    .is_some()
-        } else {
-            false
-        }
-    };
+    let storage_configured = server_configured;
 
     Ok(Json(SetupStatusResponse {
         setup_required: !admin_exists,
@@ -311,16 +299,6 @@ async fn initialize_setup(
         .insert(&db)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to assign admin role: {}", e)))?;
-
-    // Also save storage path to system_setting for backwards compatibility
-    let storage_setting = system_setting::ActiveModel {
-        key: Set("storage_path".to_string()),
-        value: Set(server_config.storage_path.clone()),
-        description: Set(Some("Root storage path for media apps".to_string())),
-        updated_at: Set(now),
-    };
-    // Try to insert, ignore if already exists
-    let _ = storage_setting.insert(&db).await;
 
     Ok(Json(serde_json::json!({
         "success": true,

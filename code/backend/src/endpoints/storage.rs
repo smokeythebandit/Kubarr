@@ -86,8 +86,8 @@ pub struct CreateDirectoryRequest {
 
 /// Get the configured storage path
 async fn get_storage_path(db: &DbConn) -> Result<PathBuf> {
-    // Check if storage is configured in DB
-    let db_path = SystemSetting::find_by_id("storage_path").one(db).await?;
+    // Check if storage is configured in server_config
+    let server_cfg = ServerConfig::find().one(db).await?;
 
     // Use environment variable for the actual path inside the container
     let storage_path = std::env::var("KUBARR_STORAGE_PATH").unwrap_or_else(|_| "/data".to_string());
@@ -98,8 +98,8 @@ async fn get_storage_path(db: &DbConn) -> Result<PathBuf> {
         return Ok(path);
     }
 
-    // If no mount path but DB has a path, storage might not be mounted
-    if db_path.is_some() {
+    // If no mount path but server is configured, storage might not be mounted
+    if server_cfg.is_some() {
         return Err(AppError::Internal(
             "Storage is configured but not mounted. Check kubarr deployment.".to_string(),
         ));
