@@ -28,8 +28,6 @@ pub enum Relation {
     UserRoles,
     #[sea_orm(has_one = "super::user_preferences::Entity")]
     Preferences,
-    #[sea_orm(has_many = "super::pending_2fa_challenge::Entity")]
-    Pending2faChallenges,
 }
 
 impl Related<super::role::Entity> for Entity {

@@ -7,7 +7,6 @@ mod m20260127_000004_create_role_app_permissions;
 mod m20260127_000005_create_role_permissions;
 mod m20260127_000006_create_oauth_accounts;
 mod m20260127_000007_create_oauth_providers;
-mod m20260127_000008_create_pending_2fa_challenges;
 mod m20260127_000009_create_system_settings;
 mod m20260127_000010_create_user_preferences;
 mod m20260127_000011_create_invites;
@@ -41,7 +40,6 @@ impl MigratorTrait for Migrator {
             Box::new(m20260127_000005_create_role_permissions::Migration),
             Box::new(m20260127_000006_create_oauth_accounts::Migration),
             Box::new(m20260127_000007_create_oauth_providers::Migration),
-            Box::new(m20260127_000008_create_pending_2fa_challenges::Migration),
             Box::new(m20260127_000009_create_system_settings::Migration),
             Box::new(m20260127_000010_create_user_preferences::Migration),
             Box::new(m20260127_000011_create_invites::Migration),

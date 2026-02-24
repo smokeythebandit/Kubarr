@@ -8,7 +8,6 @@ pub mod notification_event;
 pub mod notification_log;
 pub mod oauth_account;
 pub mod oauth_provider;
-pub mod pending_2fa_challenge;
 pub mod role;
 pub mod role_app_permission;
 pub mod role_permission;
@@ -35,7 +34,6 @@ pub mod prelude {
     pub use super::notification_log::{self, Entity as NotificationLog};
     pub use super::oauth_account::{self, Entity as OauthAccount};
     pub use super::oauth_provider::{self, Entity as OauthProvider};
-    pub use super::pending_2fa_challenge::{self, Entity as Pending2faChallenge};
     pub use super::role::{self, Entity as Role};
     pub use super::role_app_permission::{self, Entity as RoleAppPermission};
     pub use super::role_permission::{self, Entity as RolePermission};
