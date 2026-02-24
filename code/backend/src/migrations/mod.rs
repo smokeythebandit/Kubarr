@@ -26,6 +26,7 @@ mod m20260131_000001_add_port_forwarding;
 mod m20260219_000001_create_two_factor_recovery_codes;
 mod m20260221_000001_create_cloudflare_tunnels;
 mod m20260221_000002_add_cloudflare_api_fields;
+mod m20260225_000001_add_nfs_server_to_server_config;
 
 pub struct Migrator;
 
@@ -59,6 +60,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260219_000001_create_two_factor_recovery_codes::Migration),
             Box::new(m20260221_000001_create_cloudflare_tunnels::Migration),
             Box::new(m20260221_000002_add_cloudflare_api_fields::Migration),
+            Box::new(m20260225_000001_add_nfs_server_to_server_config::Migration),
         ]
     }
 }

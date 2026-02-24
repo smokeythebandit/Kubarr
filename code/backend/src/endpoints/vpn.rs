@@ -276,7 +276,10 @@ async fn assign_vpn(
             app_name: app_name.clone(),
             custom_config: std::collections::HashMap::new(),
         };
-        match deployment_manager.deploy_app(&deploy_request, None).await {
+        match deployment_manager
+            .deploy_app(&deploy_request, None, None)
+            .await
+        {
             Ok(status) => {
                 tracing::info!("Redeployed app {} with VPN: {}", app_name, status.message);
             }
@@ -322,7 +325,10 @@ async fn remove_vpn(
         app_name: app_name.clone(),
         custom_config: std::collections::HashMap::new(),
     };
-    match deployment_manager.deploy_app(&deploy_request, None).await {
+    match deployment_manager
+        .deploy_app(&deploy_request, None, None)
+        .await
+    {
         Ok(status) => {
             tracing::info!(
                 "Redeployed app {} without VPN: {}",

@@ -840,12 +840,14 @@ async fn handle_bootstrap_socket(socket: WebSocket, state: AppState) {
 pub struct ServerConfigRequest {
     pub name: String,
     pub storage_path: String,
+    pub nfs_server: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ServerConfigResponse {
     pub name: String,
     pub storage_path: String,
+    pub nfs_server: Option<String>,
 }
 
 /// Get server configuration
@@ -870,6 +872,7 @@ async fn get_server_config(
     Ok(Json(config.map(|c| ServerConfigResponse {
         name: c.name,
         storage_path: c.storage_path,
+        nfs_server: c.nfs_server,
     })))
 }
 
@@ -898,31 +901,38 @@ async fn configure_server(
         ));
     }
 
-    // Validate storage path
-    let path = Path::new(&request.storage_path);
-    if !path.exists() {
-        // Check if parent exists
-        if let Some(parent) = path.parent() {
-            if !parent.exists() || !parent.is_dir() {
-                return Err(AppError::BadRequest(
-                    "Invalid storage path: parent directory does not exist".to_string(),
-                ));
+    let nfs_server = request.nfs_server.as_deref().filter(|s| !s.is_empty());
+
+    // Validate storage path only for hostPath mode (no NFS server configured)
+    if nfs_server.is_none() {
+        let path = Path::new(&request.storage_path);
+        if !path.exists() {
+            // Check if parent exists
+            if let Some(parent) = path.parent() {
+                if !parent.exists() || !parent.is_dir() {
+                    return Err(AppError::BadRequest(
+                        "Invalid storage path: parent directory does not exist".to_string(),
+                    ));
+                }
+            } else {
+                return Err(AppError::BadRequest("Invalid storage path".to_string()));
             }
-        } else {
-            return Err(AppError::BadRequest("Invalid storage path".to_string()));
+        } else if !path.is_dir() {
+            return Err(AppError::BadRequest(
+                "Storage path exists but is not a directory".to_string(),
+            ));
         }
-    } else if !path.is_dir() {
-        return Err(AppError::BadRequest(
-            "Storage path exists but is not a directory".to_string(),
-        ));
     }
 
     // Save server config
-    let config = bootstrap::save_server_config(&db, &request.name, &request.storage_path).await?;
+    let config =
+        bootstrap::save_server_config(&db, &request.name, &request.storage_path, nfs_server)
+            .await?;
 
     Ok(Json(ServerConfigResponse {
         name: config.name,
         storage_path: config.storage_path,
+        nfs_server: config.nfs_server,
     }))
 }
 

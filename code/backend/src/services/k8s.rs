@@ -1,8 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use k8s_openapi::api::core::v1::{Pod, Secret, Service};
+use k8s_openapi::api::core::v1::{
+    NFSVolumeSource, Namespace, PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+    PersistentVolumeSpec, Pod, Secret, Service, VolumeResourceRequirements,
+};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{
-    api::{Api, ListParams},
+    api::{Api, ListParams, PostParams},
     config::{Config, KubeConfigOptions, Kubeconfig},
     Client,
 };
@@ -319,6 +324,97 @@ impl K8sClient {
         let secrets: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
         let secret = secrets.get(secret_name).await?;
         Ok(secret)
+    }
+
+    /// Ensure an NFS-backed PV and PVC exist for a media app.
+    ///
+    /// Creates (idempotently):
+    ///   - Namespace `{app_name}` if it doesn't exist
+    ///   - PersistentVolume `hdd-media-{app_name}` pointing at the NFS server
+    ///   - PersistentVolumeClaim `media-data` in namespace `{app_name}`
+    pub async fn ensure_media_pvc(
+        &self,
+        app_name: &str,
+        nfs_server: &str,
+        nfs_path: &str,
+    ) -> Result<()> {
+        let pv_name = format!("hdd-media-{}", app_name);
+        let pvc_name = "media-data";
+        let capacity = {
+            let mut m = BTreeMap::new();
+            m.insert("storage".to_string(), Quantity("14Ti".to_string()));
+            m
+        };
+
+        // 1. Create namespace if it doesn't exist
+        let namespaces: Api<Namespace> = Api::all(self.client.clone());
+        if namespaces.get(app_name).await.is_err() {
+            let ns = Namespace {
+                metadata: ObjectMeta {
+                    name: Some(app_name.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            namespaces
+                .create(&PostParams::default(), &ns)
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to create namespace: {}", e)))?;
+        }
+
+        // 2. Create PV if it doesn't exist
+        let pvs: Api<PersistentVolume> = Api::all(self.client.clone());
+        if pvs.get(&pv_name).await.is_err() {
+            let pv = PersistentVolume {
+                metadata: ObjectMeta {
+                    name: Some(pv_name.clone()),
+                    ..Default::default()
+                },
+                spec: Some(PersistentVolumeSpec {
+                    capacity: Some(capacity.clone()),
+                    access_modes: Some(vec!["ReadWriteMany".to_string()]),
+                    persistent_volume_reclaim_policy: Some("Retain".to_string()),
+                    nfs: Some(NFSVolumeSource {
+                        server: nfs_server.to_string(),
+                        path: nfs_path.to_string(),
+                        read_only: None,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            pvs.create(&PostParams::default(), &pv)
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to create PV: {}", e)))?;
+        }
+
+        // 3. Create PVC if it doesn't exist
+        let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(self.client.clone(), app_name);
+        if pvcs.get(pvc_name).await.is_err() {
+            let pvc = PersistentVolumeClaim {
+                metadata: ObjectMeta {
+                    name: Some(pvc_name.to_string()),
+                    namespace: Some(app_name.to_string()),
+                    ..Default::default()
+                },
+                spec: Some(PersistentVolumeClaimSpec {
+                    access_modes: Some(vec!["ReadWriteMany".to_string()]),
+                    storage_class_name: Some("".to_string()),
+                    volume_name: Some(pv_name),
+                    resources: Some(VolumeResourceRequirements {
+                        requests: Some(capacity),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            pvcs.create(&PostParams::default(), &pvc)
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to create PVC: {}", e)))?;
+        }
+
+        Ok(())
     }
 
     /// Get database URL from PostgreSQL secret

@@ -174,14 +174,15 @@ async fn install_app(
         .as_ref()
         .ok_or_else(|| AppError::Internal("Kubernetes client not available".to_string()))?;
 
-    // Get storage path from settings
-    let storage_setting = SystemSetting::find_by_id("storage_path").one(&db).await?;
-    let storage_path = storage_setting.map(|s| s.value);
+    // Get storage config from server_config
+    let server_cfg = ServerConfig::find().one(&db).await?;
+    let nfs_server = server_cfg.as_ref().and_then(|c| c.nfs_server.clone());
+    let storage_path = server_cfg.as_ref().map(|c| c.storage_path.clone());
 
     // Use with_db to enable VPN support
     let manager = DeploymentManager::with_db(client, &catalog, &db);
     let status = manager
-        .deploy_app(&request, storage_path.as_deref())
+        .deploy_app(&request, storage_path.as_deref(), nfs_server.as_deref())
         .await?;
 
     // Invalidate cache to ensure fresh lookup when app becomes ready

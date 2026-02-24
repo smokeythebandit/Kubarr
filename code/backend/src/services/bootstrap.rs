@@ -735,6 +735,7 @@ pub async fn save_server_config(
     db: &DatabaseConnection,
     name: &str,
     storage_path: &str,
+    nfs_server: Option<&str>,
 ) -> Result<server_config::Model> {
     let now = Utc::now();
 
@@ -744,11 +745,13 @@ pub async fn save_server_config(
         let mut active: server_config::ActiveModel = existing.into();
         active.name = Set(name.to_string());
         active.storage_path = Set(storage_path.to_string());
+        active.nfs_server = Set(nfs_server.map(|s| s.to_string()));
         Ok(active.update(db).await?)
     } else {
         let config = server_config::ActiveModel {
             name: Set(name.to_string()),
             storage_path: Set(storage_path.to_string()),
+            nfs_server: Set(nfs_server.map(|s| s.to_string())),
             created_at: Set(now),
             ..Default::default()
         };
@@ -1046,7 +1049,7 @@ mod tests {
         let db = crate::application::database::connect_with_url("sqlite::memory:")
             .await
             .expect("create db");
-        let model = save_server_config(&db, "My Kubarr", "/data/kubarr")
+        let model = save_server_config(&db, "My Kubarr", "/data/kubarr", None)
             .await
             .expect("save_server_config");
         assert_eq!(model.name, "My Kubarr");
@@ -1058,10 +1061,10 @@ mod tests {
         let db = crate::application::database::connect_with_url("sqlite::memory:")
             .await
             .expect("create db");
-        save_server_config(&db, "Original", "/original/path")
+        save_server_config(&db, "Original", "/original/path", None)
             .await
             .expect("first save");
-        let updated = save_server_config(&db, "Updated", "/new/path")
+        let updated = save_server_config(&db, "Updated", "/new/path", None)
             .await
             .expect("second save");
         assert_eq!(updated.name, "Updated");
@@ -1082,7 +1085,7 @@ mod tests {
         let db = crate::application::database::connect_with_url("sqlite::memory:")
             .await
             .expect("create db");
-        save_server_config(&db, "Test Server", "/test")
+        save_server_config(&db, "Test Server", "/test", None)
             .await
             .expect("save");
         let cfg = get_server_config(&db).await.expect("get").expect("Some");

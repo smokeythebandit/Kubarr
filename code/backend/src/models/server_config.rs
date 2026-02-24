@@ -8,6 +8,7 @@ pub struct Model {
     pub id: i64,
     pub name: String,
     pub storage_path: String,
+    pub nfs_server: Option<String>,
     pub created_at: DateTimeUtc,
 }
 

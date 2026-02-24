@@ -89,6 +89,7 @@ impl<'a> DeploymentManager<'a> {
         &self,
         request: &DeploymentRequest,
         storage_path: Option<&str>,
+        nfs_server: Option<&str>,
     ) -> Result<DeploymentStatus> {
         // Get app config from catalog
         let app_config = self.catalog.get_app(&request.app_name).ok_or_else(|| {
@@ -114,7 +115,16 @@ impl<'a> DeploymentManager<'a> {
         let mut set_string_args: Vec<String> = Vec::new();
 
         // Add storage configuration
-        if let Some(path) = storage_path {
+        if let Some(nfs) = nfs_server {
+            if let Some(path) = storage_path {
+                // NFS mode: ensure PV+PVC exist then reference by claim name
+                self.k8s
+                    .ensure_media_pvc(&request.app_name, nfs, path)
+                    .await?;
+                set_args.push("storage.data.existingClaim=media-data".to_string());
+            }
+        } else if let Some(path) = storage_path {
+            // Legacy hostPath mode
             set_args.push("storage.hostPath.enabled=true".to_string());
             set_args.push(format!("storage.hostPath.rootPath={}", path));
         }
