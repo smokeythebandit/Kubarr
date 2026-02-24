@@ -36,10 +36,10 @@ flowchart TD
     CFD -->|"cluster-internal"| BE
     Browser -->|"NodePort :30080 (local)"| BE
     BE -->|"serves frontend assets"| FE
-    BE -->|"/proxy/radarr/*"| RD
-    BE -->|"/proxy/sonarr/*"| SN
-    BE -->|"/proxy/qbittorrent/*"| QB
-    BE -->|"/proxy/jellyfin/*"| JF
+    BE -->|"/radarr/*"| RD
+    BE -->|"/sonarr/*"| SN
+    BE -->|"/qbittorrent/*"| QB
+    BE -->|"/jellyfin/*"| JF
     BE --- PG
     BE -.->|"metrics & logs"| VM & VL
     media -.->|"scraped by"| VM
@@ -67,7 +67,7 @@ The frontend is a React SPA served by a BusyBox httpd container over ClusterIP â
 
 ## App Proxy
 
-The backend reverse-proxies all traffic to installed apps under `/proxy/{app}/*`. When a request comes in for, say, `/proxy/radarr/api/v3/movie`, the backend:
+The backend reverse-proxies all traffic to installed apps under `/{app}/*`. When a request comes in for, say, `/radarr/api/v3/movie`, the backend:
 
 1. Checks the user has permission to access Radarr
 2. Looks up the ClusterIP service for the `radarr` namespace (cached for performance)
