@@ -16,23 +16,9 @@ use crate::models::prelude::*;
 use crate::models::system_setting;
 use crate::state::AppState;
 
-/// Default settings values
+/// Default settings values (keyed by setting name)
 static DEFAULT_SETTINGS: Lazy<HashMap<&'static str, (&'static str, &'static str)>> =
-    Lazy::new(|| {
-        let mut m = HashMap::new();
-        m.insert(
-            "registration_enabled",
-            (
-                "true",
-                "Allow new user registration (invites still work when disabled)",
-            ),
-        );
-        m.insert(
-            "registration_require_approval",
-            ("true", "Require admin approval for new registrations"),
-        );
-        m
-    });
+    Lazy::new(HashMap::new);
 
 /// Create settings routes
 pub fn settings_routes(state: AppState) -> Router {
@@ -213,31 +199,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_has_registration_enabled() {
-        assert!(DEFAULT_SETTINGS.contains_key("registration_enabled"));
-        let (val, _desc) = DEFAULT_SETTINGS["registration_enabled"];
-        assert_eq!(val, "true");
-    }
-
-    #[test]
-    fn default_settings_has_registration_require_approval() {
-        assert!(DEFAULT_SETTINGS.contains_key("registration_require_approval"));
-    }
-
-    #[test]
-    fn default_settings_count() {
-        assert_eq!(DEFAULT_SETTINGS.len(), 2);
-    }
-
-    #[test]
     fn setting_response_ser() {
         let r = SettingResponse {
-            key: "registration_enabled".to_string(),
-            value: "true".to_string(),
-            description: Some("Allow registration".to_string()),
+            key: "some_key".to_string(),
+            value: "some_value".to_string(),
+            description: Some("A setting".to_string()),
         };
         let json = serde_json::to_string(&r).expect("ser");
-        assert!(json.contains("\"key\":\"registration_enabled\""));
+        assert!(json.contains("\"key\":\"some_key\""));
     }
 
     #[test]

@@ -14,9 +14,6 @@ impl MigrationTrait for Migration {
         // Seed default roles
         seed_roles(db).await?;
 
-        // Seed default system settings
-        seed_system_settings(db).await?;
-
         // Seed OAuth providers
         seed_oauth_providers(db).await?;
 
@@ -174,43 +171,6 @@ async fn seed_roles(db: &SchemaManagerConnection<'_>) -> Result<(), DbErr> {
             ..Default::default()
         };
         permission.insert(db).await?;
-    }
-
-    Ok(())
-}
-
-async fn seed_system_settings(db: &SchemaManagerConnection<'_>) -> Result<(), DbErr> {
-    use crate::models::prelude::*;
-    use crate::models::system_setting;
-
-    let settings_count = SystemSetting::find().count(db).await?;
-    if settings_count > 0 {
-        return Ok(());
-    }
-
-    let now = chrono::Utc::now();
-
-    let default_settings = [
-        (
-            "registration_enabled",
-            "true",
-            "Allow new user registration",
-        ),
-        (
-            "registration_require_approval",
-            "true",
-            "Require admin approval for new registrations",
-        ),
-    ];
-
-    for (key, value, description) in default_settings {
-        let setting = system_setting::ActiveModel {
-            key: Set(key.to_string()),
-            value: Set(value.to_string()),
-            description: Set(Some(description.to_string())),
-            updated_at: Set(now),
-        };
-        setting.insert(db).await?;
     }
 
     Ok(())
