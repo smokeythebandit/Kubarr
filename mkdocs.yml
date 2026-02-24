@@ -1,5 +1,5 @@
-docs_dir: .
-site_dir: ../site
+docs_dir: docs
+site_dir: site
 
 site_name: Kubarr
 site_url: https://bmartensNL.github.io/Kubarr/
@@ -46,10 +46,11 @@ theme:
 nav:
   - Home: index.md
   - Quick Start: quick-start.md
-  - Storage: storage.md
   - Docker: docker.md
   - Development: development.md
   - Versioning: versioning.md
+  - Architecture:
+    - Storage: storage.md
 
 markdown_extensions:
   - admonition
@@ -79,4 +80,4 @@ plugins:
   - search
 
 hooks:
-  - hooks/version_info.py
+  - docs/hooks/version_info.py
