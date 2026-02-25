@@ -12,7 +12,7 @@ env:
 
 jobs:
   docker:
-    runs-on: self-hosted
+    runs-on: kubarr-arc-runners
     permissions:
       contents: read
       packages: write
