@@ -143,11 +143,38 @@ jobs:
           echo "ERROR: Registry did not become ready"
           exit 1
 
+      - name: Cache third-party images in local registry
+        run: |
+          # Pre-pull bootstrap component images and push to the local registry so
+          # Kind nodes (inside DinD) don't have to fetch them from DockerHub at
+          # deploy time. This avoids rate-limit-induced startup delays that cause
+          # the bootstrap timeout to expire (victoriametrics image is ~100MB and
+          # takes 4-5 min to pull cold from a rate-limited IP).
+          #
+          # Images are pushed with paths matching the DockerHub mirror namespace:
+          #   - Official library images: localhost:5001/library/<image>:<tag>
+          #   - Other images:            localhost:5001/<org>/<image>:<tag>
+          pull_and_cache() {
+            local image="$1"
+            local dest="$2"
+            echo "Pulling ${image}..."
+            docker pull --platform linux/amd64 "${image}"
+            echo "Pushing to local registry as ${dest}..."
+            docker tag "${image}" "localhost:5001/${dest}"
+            docker push "localhost:5001/${dest}"
+          }
+          pull_and_cache postgres:16-alpine                                   library/postgres:16-alpine
+          pull_and_cache victoriametrics/victoria-metrics:v1.96.0             victoriametrics/victoria-metrics:v1.96.0
+          pull_and_cache victoriametrics/victoria-logs:v1.3.2-victorialogs    victoriametrics/victoria-logs:v1.3.2-victorialogs
+          pull_and_cache fluent/fluent-bit:3.2.2                              fluent/fluent-bit:3.2.2
+
       - name: Create Kind cluster
         run: |
           # Use native snapshotter — overlayfs is not available inside DinD.
-          # Mirror localhost:5001 to the local registry container; Kind nodes
-          # resolve kind-registry via the shared Docker network.
+          # Mirror localhost:5001 to the local registry for kubarr images.
+          # Mirror docker.io to the local registry (with DockerHub fallback) so
+          # bootstrap component pods (postgres, victoriametrics, etc.) are served
+          # instantly from the local cache instead of pulling from DockerHub.
           cat > /tmp/kind-config.yaml << 'EOF'
           kind: Cluster
           apiVersion: kind.x-k8s.io/v1alpha4
@@ -157,6 +184,8 @@ jobs:
                 snapshotter = "native"
               [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5001"]
                 endpoint = ["http://kind-registry:5000"]
+              [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+                endpoint = ["http://kind-registry:5000", "https://registry-1.docker.io"]
           EOF
           for attempt in 1 2 3; do
             echo "=== Kind cluster creation attempt ${attempt}/3 ==="
