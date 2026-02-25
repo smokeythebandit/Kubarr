@@ -2,7 +2,7 @@ githubConfigUrl: "https://github.com/bmartensnl/kubarr"
 githubConfigSecret: "pre-defined-secret"
 
 minRunners: 0
-maxRunners: 2
+maxRunners: 4
 
 template:
   spec:
