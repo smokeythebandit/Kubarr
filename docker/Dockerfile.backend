@@ -46,7 +46,9 @@ COPY code/backend/src ./src
 FROM rust-builder AS test
 RUN rustup component add clippy rustfmt
 RUN apk add --no-cache curl && \
-    curl -LsSf https://get.nexte.st/latest/linux-musl | tar zxf - -C /usr/local/bin && \
+    curl -LsSf -o /tmp/nextest.tar.gz https://get.nexte.st/latest/linux-musl && \
+    tar zxf /tmp/nextest.tar.gz -C /usr/local/bin && \
+    rm /tmp/nextest.tar.gz && \
     cargo build && \
     cargo nextest run --no-run
 
