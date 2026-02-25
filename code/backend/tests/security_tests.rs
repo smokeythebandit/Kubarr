@@ -1,9 +1,8 @@
 use kubarr::services::security::{
     create_access_token, create_refresh_token, create_session_token, decode_session_token,
     decode_token, generate_random_string, generate_recovery_codes, generate_rsa_key_pair,
-    generate_secure_password, generate_totp_secret, get_jwks, get_totp_provisioning_uri,
-    hash_password, hash_recovery_code, init_jwt_keys, verify_password, verify_recovery_code,
-    verify_totp,
+    generate_totp_secret, get_jwks, get_totp_provisioning_uri, hash_password, hash_recovery_code,
+    init_jwt_keys, verify_password, verify_recovery_code, verify_totp,
 };
 use once_cell::sync::Lazy;
 use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey};
@@ -82,12 +81,9 @@ fn test_random_string_large_length() {
 
 #[test]
 fn test_secure_password_generation() {
-    let password = generate_secure_password(20);
-    assert_eq!(password.len(), 20);
-
-    let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
-    let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
-    assert!(has_lower || has_upper);
+    let password = generate_random_string(10);
+    assert_eq!(password.len(), 20); // hex encoding: 10 bytes → 20 hex chars
+    assert!(password.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
 // ==========================================================================
