@@ -85,5 +85,11 @@ template:
       - name: dind-externals
         emptyDir: {}
       - name: dind-cache
-        persistentVolumeClaim:
-          claimName: arc-dind-cache
+        ephemeral:
+          volumeClaimTemplate:
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              storageClassName: ssd-storage
+              resources:
+                requests:
+                  storage: 50Gi
