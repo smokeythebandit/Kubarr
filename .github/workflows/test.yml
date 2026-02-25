@@ -166,12 +166,16 @@ jobs:
 
       - name: Load images into Kind
         run: |
-          kind load docker-image "kubarr-backend:${TAG}" --name "$KIND_CLUSTER"
-          kind load docker-image "kubarr-frontend:${TAG}" --name "$KIND_CLUSTER"
-          kind load docker-image postgres:16-alpine --name "$KIND_CLUSTER"
-          kind load docker-image victoriametrics/victoria-metrics:v1.96.0 --name "$KIND_CLUSTER"
-          kind load docker-image victoriametrics/victoria-logs:v1.3.2-victorialogs --name "$KIND_CLUSTER"
-          kind load docker-image fluent/fluent-bit:3.2.2 --name "$KIND_CLUSTER"
+          # Use image-archive (avoids --all-platforms flag that causes digest errors
+          # with BuildKit-produced images in DinD).
+          # kubarr images are already downloaded as tar files
+          kind load image-archive kubarr-backend.tar --name "$KIND_CLUSTER"
+          kind load image-archive kubarr-frontend.tar --name "$KIND_CLUSTER"
+          # Save pulled images to tar, then load via image-archive
+          docker save postgres:16-alpine | kind load image-archive - --name "$KIND_CLUSTER"
+          docker save victoriametrics/victoria-metrics:v1.96.0 | kind load image-archive - --name "$KIND_CLUSTER"
+          docker save victoriametrics/victoria-logs:v1.3.2-victorialogs | kind load image-archive - --name "$KIND_CLUSTER"
+          docker save fluent/fluent-bit:3.2.2 | kind load image-archive - --name "$KIND_CLUSTER"
 
       - name: Clone charts
         run: git clone --depth 1 https://github.com/bmartensNL/kubarr-charts.git charts
