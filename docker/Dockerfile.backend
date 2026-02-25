@@ -40,17 +40,25 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Copy actual source code
 COPY code/backend/src ./src
 
-# Test stage: has full Rust toolchain + source for running tests
-# NOTE: No --mount=type=cache here so compiled artifacts persist in the image layer.
-# Uses default dev profile to match cargo clippy/test commands in backend-tests.yml.
-FROM rust-builder AS test
+# Test stage: has full Rust toolchain + source for running tests.
+# Uses rust:slim (glibc/Debian) instead of Alpine (musl) to avoid rustc SIGSEGV
+# on cold debug builds in CI. No cache mounts so compiled artifacts persist in
+# the image layer and tests can run without recompilation.
+FROM rust:slim AS test
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev curl && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 RUN rustup component add clippy rustfmt
-RUN apk add --no-cache curl && \
-    curl -LsSf -o /tmp/nextest.tar.gz https://get.nexte.st/latest/linux-musl && \
+RUN curl -LsSf -o /tmp/nextest.tar.gz https://get.nexte.st/latest/linux && \
     tar zxf /tmp/nextest.tar.gz -C /usr/local/bin && \
-    rm /tmp/nextest.tar.gz && \
-    cargo build && \
-    cargo nextest run --no-run
+    rm /tmp/nextest.tar.gz
+# Copy Cargo files and build deps first for layer caching
+COPY code/backend/Cargo.toml code/backend/Cargo.lock* ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build && rm -rf src
+# Copy actual source and compile test binaries
+COPY code/backend/src ./src
+RUN cargo build && cargo nextest run --no-run
 
 # Build stage: produce the final binary
 FROM rust-builder AS builder
