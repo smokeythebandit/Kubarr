@@ -159,8 +159,15 @@ jobs:
 
       - name: Pull images
         run: |
-          # Pull with explicit platform to avoid OCI multi-arch manifest list
-          # in the local Docker store; the cross-platform content references cause
+          # Remove any cached versions first — runner pods persist between jobs, so
+          # images from previous runs (pulled without --platform) may be cached with
+          # the full OCI manifest list. docker pull won't re-download if cached.
+          docker rmi postgres:16-alpine \
+                      victoriametrics/victoria-metrics:v1.96.0 \
+                      victoriametrics/victoria-logs:v1.3.2-victorialogs \
+                      fluent/fluent-bit:3.2.2 2>/dev/null || true
+          # Pull with explicit platform so only the amd64 manifest is stored locally;
+          # avoids OCI manifest list references to cross-platform content that causes
           # "content digest not found" errors when importing into containerd.
           docker pull --platform linux/amd64 postgres:16-alpine
           docker pull --platform linux/amd64 victoriametrics/victoria-metrics:v1.96.0
