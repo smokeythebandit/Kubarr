@@ -7,16 +7,17 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  workers: undefined,
+  workers: process.env.CI ? 1 : undefined,
   reporter: [['html'], ['list']],
 
   use: {
     baseURL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    video: process.env.CI ? 'off' : 'retain-on-failure',
     launchOptions: {
       slowMo: process.env.SLOW_MO ? parseInt(process.env.SLOW_MO) : 0,
+      args: process.env.CI ? ['--disable-dev-shm-usage', '--disable-gpu'] : [],
     },
     viewport: { width: 1920, height: 1080 },
   },
