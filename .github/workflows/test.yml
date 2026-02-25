@@ -69,13 +69,24 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Kind
+      - name: Install tools (kind, kubectl, helm)
         run: |
           mkdir -p "$HOME/.local/bin"
+          # kind
           curl -sSLo "$HOME/.local/bin/kind" https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
           chmod +x "$HOME/.local/bin/kind"
+          # kubectl (matching Kind node image version)
+          curl -sSLo "$HOME/.local/bin/kubectl" "https://dl.k8s.io/release/v1.29.2/bin/linux/amd64/kubectl"
+          chmod +x "$HOME/.local/bin/kubectl"
+          # helm
+          curl -fsSLo /tmp/helm.tar.gz "https://github.com/helm/helm/releases/download/v3.14.0/helm-v3.14.0-linux-amd64.tar.gz"
+          tar zxf /tmp/helm.tar.gz -C /tmp linux-amd64/helm
+          mv /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
+          rm -rf /tmp/helm.tar.gz /tmp/linux-amd64
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/kind" version
+          "$HOME/.local/bin/kubectl" version --client
+          "$HOME/.local/bin/helm" version
 
       - uses: actions/setup-node@v6
         with:
