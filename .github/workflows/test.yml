@@ -61,7 +61,7 @@ jobs:
 
   e2e:
     runs-on: kubarr-arc-runners
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       KIND_CLUSTER: kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       TAG: ${{ inputs.image-tag }}
