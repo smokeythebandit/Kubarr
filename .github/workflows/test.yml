@@ -125,12 +125,29 @@ jobs:
               kind delete cluster --name "$cluster" 2>/dev/null || true
             fi
           done
+          docker rm -f kind-registry 2>/dev/null || true
           docker container prune -f 2>/dev/null || true
           pkill -f "kubectl port-forward" 2>/dev/null || true
 
+      - name: Start local registry
+        run: |
+          docker run -d -p 5001:5000 --name kind-registry --restart=always registry:2
+          # Wait for registry to be ready
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:5001/v2/ 2>/dev/null; then
+              echo "Registry is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "ERROR: Registry did not become ready"
+          exit 1
+
       - name: Create Kind cluster
         run: |
-          # Use native snapshotter — overlayfs is not available inside DinD
+          # Use native snapshotter — overlayfs is not available inside DinD.
+          # Mirror localhost:5001 to the local registry container; Kind nodes
+          # resolve kind-registry via the shared Docker network.
           cat > /tmp/kind-config.yaml << 'EOF'
           kind: Cluster
           apiVersion: kind.x-k8s.io/v1alpha4
@@ -138,12 +155,16 @@ jobs:
             - |-
               [plugins."io.containerd.grpc.v1.cri".containerd]
                 snapshotter = "native"
+              [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5001"]
+                endpoint = ["http://kind-registry:5000"]
           EOF
           for attempt in 1 2 3; do
             echo "=== Kind cluster creation attempt ${attempt}/3 ==="
             if kind create cluster --name "$KIND_CLUSTER" --image kindest/node:v1.29.2 \
                 --config /tmp/kind-config.yaml --wait 180s 2>&1; then
               echo "Cluster created successfully on attempt ${attempt}"
+              # Connect registry to Kind network so nodes can resolve kind-registry hostname
+              docker network connect "kind" kind-registry 2>/dev/null || true
               kubectl cluster-info --context "kind-${KIND_CLUSTER}"
               exit 0
             fi
@@ -157,40 +178,12 @@ jobs:
           echo "ERROR: Failed to create Kind cluster after 3 attempts"
           exit 1
 
-      - name: Pull images
+      - name: Push kubarr images to local registry
         run: |
-          # Remove any cached versions first — runner pods persist between jobs, so
-          # images from previous runs (pulled without --platform) may be cached with
-          # the full OCI manifest list. docker pull won't re-download if cached.
-          docker rmi postgres:16-alpine \
-                      victoriametrics/victoria-metrics:v1.96.0 \
-                      victoriametrics/victoria-logs:v1.3.2-victorialogs \
-                      fluent/fluent-bit:3.2.2 2>/dev/null || true
-          # Pull with explicit platform so only the amd64 manifest is stored locally;
-          # avoids OCI manifest list references to cross-platform content that causes
-          # "content digest not found" errors when importing into containerd.
-          docker pull --platform linux/amd64 postgres:16-alpine
-          docker pull --platform linux/amd64 victoriametrics/victoria-metrics:v1.96.0
-          docker pull --platform linux/amd64 victoriametrics/victoria-logs:v1.3.2-victorialogs
-          docker pull --platform linux/amd64 fluent/fluent-bit:3.2.2
-
-      - name: Load images into Kind
-        run: |
-          # kind load (docker-image and image-archive) always passes --all-platforms
-          # to containerd's ctr import, causing "content digest not found" errors for
-          # BuildKit-produced images that only have one platform in the local store.
-          # Workaround: directly exec ctr import WITHOUT --all-platforms.
-          NODE="${KIND_CLUSTER}-control-plane"
-          load_image() {
-            docker save "$1" | docker exec --privileged -i "$NODE" \
-              ctr --namespace=k8s.io images import --snapshotter=native -
-          }
-          load_image "kubarr-backend:${TAG}"
-          load_image "kubarr-frontend:${TAG}"
-          load_image postgres:16-alpine
-          load_image victoriametrics/victoria-metrics:v1.96.0
-          load_image "victoriametrics/victoria-logs:v1.3.2-victorialogs"
-          load_image fluent/fluent-bit:3.2.2
+          docker tag "kubarr-backend:${TAG}" "localhost:5001/kubarr-backend:${TAG}"
+          docker push "localhost:5001/kubarr-backend:${TAG}"
+          docker tag "kubarr-frontend:${TAG}" "localhost:5001/kubarr-frontend:${TAG}"
+          docker push "localhost:5001/kubarr-frontend:${TAG}"
 
       - name: Clone charts
         run: git clone --depth 1 https://github.com/bmartensNL/kubarr-charts.git charts
@@ -210,12 +203,12 @@ jobs:
           helm upgrade --install kubarr ./charts/kubarr \
             --namespace kubarr \
             --set namespace.create=false \
-            --set backend.image.repository=kubarr-backend \
+            --set backend.image.repository=localhost:5001/kubarr-backend \
             --set backend.image.tag=${TAG} \
-            --set backend.image.pullPolicy=Never \
-            --set frontend.image.repository=kubarr-frontend \
+            --set backend.image.pullPolicy=IfNotPresent \
+            --set frontend.image.repository=localhost:5001/kubarr-frontend \
             --set frontend.image.tag=${TAG} \
-            --set frontend.image.pullPolicy=Never \
+            --set frontend.image.pullPolicy=IfNotPresent \
             --set oauth2.enabled=true \
             --set auth.jwt.existingSecret=kubarr-jwt-keys \
             --set networkPolicy.enabled=false \
@@ -287,3 +280,4 @@ jobs:
           kill "$(cat /tmp/pf-${KIND_CLUSTER}.pid 2>/dev/null)" 2>/dev/null || true
           rm -f /tmp/jwt-*-${KIND_CLUSTER}.pem /tmp/pf-${KIND_CLUSTER}.pid
           kind delete cluster --name "$KIND_CLUSTER" 2>/dev/null || true
+          docker rm -f kind-registry 2>/dev/null || true
