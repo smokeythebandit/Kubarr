@@ -1085,6 +1085,7 @@ mod tests {
         let r = ServerConfigResponse {
             name: "my-server".to_string(),
             storage_path: "/mnt/storage".to_string(),
+            nfs_server: None,
         };
         let json = serde_json::to_string(&r).expect("ser");
         assert!(json.contains("\"name\":\"my-server\""));
