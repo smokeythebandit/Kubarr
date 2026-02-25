@@ -207,15 +207,15 @@ fn test_app_exists() {
     let catalog = AppCatalog::with_apps(apps);
 
     assert!(
-        catalog.app_exists("sonarr"),
+        catalog.get_app("sonarr").is_some(),
         "app_exists must return true for known apps"
     );
     assert!(
-        catalog.app_exists("SONARR"),
+        catalog.get_app("SONARR").is_some(),
         "app_exists must be case-insensitive"
     );
     assert!(
-        !catalog.app_exists("radarr"),
+        !catalog.get_app("radarr").is_some(),
         "app_exists must return false for unknown apps"
     );
 }

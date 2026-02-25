@@ -332,6 +332,7 @@ fn server_config_response_ser() {
     let r = ServerConfigResponse {
         name: "myserver".to_string(),
         storage_path: "/data".to_string(),
+        nfs_server: None,
     };
     let json = serde_json::to_string(&r).expect("ser");
     assert!(json.contains("\"name\":\"myserver\""));

@@ -178,7 +178,6 @@ fn catalog_can_query_after_loading() {
     let _ = catalog.get_categories();
     let _ = catalog.get_app("sonarr");
     let _ = catalog.get_app("nonexistent");
-    let _ = catalog.app_exists("sonarr");
     let _ = catalog.get_apps_by_category("media");
 }
 

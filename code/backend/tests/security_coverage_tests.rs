@@ -8,7 +8,7 @@ use common::create_test_db_with_seed;
 
 use kubarr::services::security::{
     generate_2fa_challenge_token, generate_totp_secret, get_private_key, get_public_key,
-    get_totp_qr_code_base64, init_jwt_keys,
+    get_totp_provisioning_uri, init_jwt_keys,
 };
 
 static JWT_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
@@ -26,19 +26,19 @@ async fn ensure_jwt_keys() {
 async fn test_get_totp_qr_code_base64_returns_data_url() {
     ensure_jwt_keys().await;
     let secret = generate_totp_secret();
-    let result = get_totp_qr_code_base64(&secret, "testuser@example.com");
-    assert!(result.is_ok(), "get_totp_qr_code_base64 must succeed");
-    let data_url = result.unwrap();
+    let result = get_totp_provisioning_uri(&secret, "testuser@example.com");
+    assert!(result.is_ok(), "get_totp_provisioning_uri must succeed");
+    let uri = result.unwrap();
     assert!(
-        data_url.starts_with("data:image/png;base64,"),
-        "must return a data URL"
+        uri.starts_with("otpauth://"),
+        "must return a provisioning URI"
     );
-    assert!(data_url.len() > 30, "data URL must have content");
+    assert!(uri.len() > 10, "provisioning URI must have content");
 }
 
 #[tokio::test]
 async fn test_get_totp_qr_code_base64_with_invalid_secret_returns_err() {
-    let result = get_totp_qr_code_base64("not-a-valid-secret!!!", "user@example.com");
+    let result = get_totp_provisioning_uri("not-a-valid-secret!!!", "user@example.com");
     assert!(result.is_err(), "invalid secret must return error");
 }
 

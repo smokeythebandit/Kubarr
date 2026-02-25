@@ -225,14 +225,14 @@ fn get_categories_returns_sorted_order() {
 #[test]
 fn app_exists_empty_string_returns_false() {
     let catalog = catalog_of(&[("sonarr", "media")]);
-    assert!(!catalog.app_exists(""));
+    assert!(!catalog.get_app("").is_some());
 }
 
 #[test]
 fn app_exists_whitespace_returns_false() {
     let catalog = catalog_of(&[("sonarr", "media")]);
     // " sonarr" is not the same as "sonarr"
-    assert!(!catalog.app_exists(" sonarr"));
+    assert!(!catalog.get_app(" sonarr").is_some());
 }
 
 #[test]
@@ -241,7 +241,7 @@ fn app_exists_returns_true_for_all_inserted() {
     let pairs: Vec<(&str, &str)> = names.iter().map(|n| (*n, "cat")).collect();
     let catalog = catalog_of(&pairs);
     for name in &names {
-        assert!(catalog.app_exists(name), "must exist: {}", name);
+        assert!(catalog.get_app(name).is_some(), "must exist: {}", name);
     }
 }
 
@@ -477,5 +477,5 @@ fn catalog_new_returns_usable_catalog() {
     // Must be callable without panicking regardless of filesystem state
     let _ = catalog.get_all_apps();
     let _ = catalog.get_categories();
-    assert!(!catalog.app_exists("")); // empty string never exists
+    assert!(!catalog.get_app("").is_some()); // empty string never exists
 }

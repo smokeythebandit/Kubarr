@@ -95,7 +95,7 @@ fn test_with_apps_empty_map() {
     assert!(catalog.get_all_apps().is_empty());
     assert!(catalog.get_categories().is_empty());
     assert!(catalog.get_app("anything").is_none());
-    assert!(!catalog.app_exists("anything"));
+    assert!(!catalog.get_app("anything").is_some());
 }
 
 #[test]
@@ -192,12 +192,12 @@ fn test_reload_clears_app_exists() {
     apps.insert("jellyfin".to_string(), make_app("jellyfin", "media"));
 
     let mut catalog = AppCatalog::with_apps(apps);
-    assert!(catalog.app_exists("jellyfin"));
+    assert!(catalog.get_app("jellyfin").is_some());
 
     catalog.reload();
 
     assert!(
-        !catalog.app_exists("jellyfin"),
+        !catalog.get_app("jellyfin").is_some(),
         "After reload(), app_exists must return false for cleared apps"
     );
 }
@@ -289,9 +289,9 @@ fn test_app_exists_case_insensitive() {
     apps.insert("jellyfin".to_string(), make_app("jellyfin", "media"));
     let catalog = AppCatalog::with_apps(apps);
 
-    assert!(catalog.app_exists("jellyfin"));
-    assert!(catalog.app_exists("JELLYFIN"));
-    assert!(catalog.app_exists("Jellyfin"));
+    assert!(catalog.get_app("jellyfin").is_some());
+    assert!(catalog.get_app("JELLYFIN").is_some());
+    assert!(catalog.get_app("Jellyfin").is_some());
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn test_app_exists_false_for_unknown() {
     apps.insert("sonarr".to_string(), make_app("sonarr", "media"));
     let catalog = AppCatalog::with_apps(apps);
 
-    assert!(!catalog.app_exists("radarr"));
+    assert!(!catalog.get_app("radarr").is_some());
 }
 
 // ============================================================================
@@ -640,6 +640,6 @@ fn test_large_catalog_reload_clears_everything() {
     assert!(catalog.get_categories().is_empty());
     for i in 0..n {
         let name = format!("app_{:02}", i);
-        assert!(!catalog.app_exists(&name));
+        assert!(!catalog.get_app(&name).is_some());
     }
 }

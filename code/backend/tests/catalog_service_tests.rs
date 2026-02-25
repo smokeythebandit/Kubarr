@@ -120,20 +120,20 @@ fn get_app_is_case_insensitive() {
 #[test]
 fn app_exists_true_when_present() {
     let catalog = make_catalog_with(&[("radarr", "media")]);
-    assert!(catalog.app_exists("radarr"));
+    assert!(catalog.get_app("radarr").is_some());
 }
 
 #[test]
 fn app_exists_false_when_absent() {
     let catalog = make_catalog_with(&[("radarr", "media")]);
-    assert!(!catalog.app_exists("sonarr"));
+    assert!(!catalog.get_app("sonarr").is_some());
 }
 
 #[test]
 fn app_exists_is_case_insensitive() {
     let catalog = make_catalog_with(&[("radarr", "media")]);
-    assert!(catalog.app_exists("RADARR"));
-    assert!(catalog.app_exists("Radarr"));
+    assert!(catalog.get_app("RADARR").is_some());
+    assert!(catalog.get_app("Radarr").is_some());
 }
 
 // ============================================================================

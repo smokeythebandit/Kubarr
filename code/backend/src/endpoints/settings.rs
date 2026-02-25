@@ -194,6 +194,42 @@ async fn update_setting(
     }))
 }
 
+// ============================================================================
+// Public helper functions (used by tests and other modules)
+// ============================================================================
+
+/// Get a setting value from the database, falling back to defaults.
+/// Returns None if the key is not found in the database or defaults.
+pub async fn get_setting_value(
+    db: &sea_orm::DatabaseConnection,
+    key: &str,
+) -> crate::error::Result<Option<String>> {
+    // Check DB first
+    let db_setting = SystemSetting::find_by_id(key).one(db).await?;
+    if let Some(setting) = db_setting {
+        return Ok(Some(setting.value));
+    }
+    // Fall back to defaults
+    if let Some((default_value, _)) = DEFAULT_SETTINGS.get(key) {
+        return Ok(Some(default_value.to_string()));
+    }
+    Ok(None)
+}
+
+/// Get a setting value as a boolean.
+/// Returns true if the value is "true", "yes", or "1" (case-insensitive).
+/// Returns false for unknown keys or other values.
+pub async fn get_setting_bool(
+    db: &sea_orm::DatabaseConnection,
+    key: &str,
+) -> crate::error::Result<bool> {
+    let value = get_setting_value(db, key).await?;
+    Ok(match value.as_deref() {
+        Some(v) => matches!(v.to_lowercase().as_str(), "true" | "yes" | "1"),
+        None => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

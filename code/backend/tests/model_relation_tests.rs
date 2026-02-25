@@ -153,20 +153,6 @@ async fn test_role_permission_related_role_join() {
 }
 
 // ============================================================================
-// pending_2fa_challenge::Related<user::Entity>
-// ============================================================================
-
-#[tokio::test]
-async fn test_pending_2fa_challenge_related_user_join() {
-    let db = create_test_db_with_seed().await;
-    let _ = Pending2faChallenge::find()
-        .find_also_related(User)
-        .all(&db)
-        .await
-        .expect("pending_2fa_challenge → user JOIN");
-}
-
-// ============================================================================
 // notification_log::Related<user::Entity>
 // ============================================================================
 
