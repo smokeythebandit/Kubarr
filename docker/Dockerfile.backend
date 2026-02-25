@@ -45,7 +45,8 @@ COPY code/backend/src ./src
 # Uses default dev profile to match cargo clippy/test commands in backend-tests.yml.
 FROM rust-builder AS test
 RUN rustup component add clippy rustfmt
-RUN cargo install cargo-nextest --locked && \
+RUN apk add --no-cache curl && \
+    curl -LsSf https://get.nexte.st/latest/linux-musl | tar zxf - -C /usr/local/bin && \
     cargo build && \
     cargo nextest run --no-run
 
