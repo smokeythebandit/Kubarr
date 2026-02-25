@@ -31,7 +31,6 @@ jobs:
           docker image prune -f || true
           docker container prune -f || true
           docker volume prune -f || true
-          docker buildx prune -f || true
           df -h
 
       - uses: actions/checkout@v6
@@ -57,13 +56,25 @@ jobs:
         env:
           DOCKER_BUILDKIT: '1'
         run: |
-          docker build -f ${{ matrix.dockerfile }} \
-            ${{ matrix.target && format('--target {0}', matrix.target) || '' }} \
-            -t "${{ matrix.image }}:${{ inputs.image-tag }}" \
-            --build-arg VERSION=${{ steps.meta.outputs.version }} \
-            --build-arg CHANNEL=${{ steps.meta.outputs.channel }} \
-            --build-arg COMMIT_HASH=${{ github.sha }} \
-            --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
+          for attempt in 1 2 3; do
+            echo "=== Build attempt ${attempt}/3 ==="
+            if docker build -f ${{ matrix.dockerfile }} \
+                ${{ matrix.target && format('--target {0}', matrix.target) || '' }} \
+                -t "${{ matrix.image }}:${{ inputs.image-tag }}" \
+                --build-arg VERSION=${{ steps.meta.outputs.version }} \
+                --build-arg CHANNEL=${{ steps.meta.outputs.channel }} \
+                --build-arg COMMIT_HASH=${{ github.sha }} \
+                --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) .; then
+              echo "Build succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Build failed, waiting 3 minutes before retry (rate limit backoff)..."
+              sleep 180
+            fi
+          done
+          echo "ERROR: Build failed after 3 attempts"
+          exit 1
 
       - name: Save image
         run: docker save "${{ matrix.image }}:${{ inputs.image-tag }}" > "${{ matrix.image }}.tar"
