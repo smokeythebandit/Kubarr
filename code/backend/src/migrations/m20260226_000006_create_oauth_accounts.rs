@@ -1,8 +1,8 @@
-//! Migration: Create user_notification_prefs table
+//! Migration: Create oauth_accounts table
 
 use sea_orm_migration::prelude::*;
 
-use super::m20260127_000001_create_users::Users;
+use super::m20260226_000001_create_users::Users;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -13,55 +13,48 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
-                    .table(UserNotificationPrefs::Table)
+                    .table(OauthAccounts::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(UserNotificationPrefs::Id)
+                        ColumnDef::new(OauthAccounts::Id)
                             .big_integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
                     .col(
-                        ColumnDef::new(UserNotificationPrefs::UserId)
+                        ColumnDef::new(OauthAccounts::UserId)
                             .big_integer()
                             .not_null(),
                     )
+                    .col(ColumnDef::new(OauthAccounts::Provider).string().not_null())
                     .col(
-                        ColumnDef::new(UserNotificationPrefs::ChannelType)
+                        ColumnDef::new(OauthAccounts::ProviderUserId)
                             .string()
                             .not_null(),
                     )
+                    .col(ColumnDef::new(OauthAccounts::Email).string().null())
+                    .col(ColumnDef::new(OauthAccounts::DisplayName).string().null())
+                    .col(ColumnDef::new(OauthAccounts::AccessToken).string().null())
+                    .col(ColumnDef::new(OauthAccounts::RefreshToken).string().null())
                     .col(
-                        ColumnDef::new(UserNotificationPrefs::Enabled)
-                            .boolean()
-                            .not_null()
-                            .default(true),
-                    )
-                    .col(
-                        ColumnDef::new(UserNotificationPrefs::Destination)
-                            .string()
+                        ColumnDef::new(OauthAccounts::TokenExpiresAt)
+                            .timestamp_with_time_zone()
                             .null(),
                     )
                     .col(
-                        ColumnDef::new(UserNotificationPrefs::Verified)
-                            .boolean()
-                            .not_null()
-                            .default(false),
-                    )
-                    .col(
-                        ColumnDef::new(UserNotificationPrefs::CreatedAt)
+                        ColumnDef::new(OauthAccounts::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(UserNotificationPrefs::UpdatedAt)
+                        ColumnDef::new(OauthAccounts::UpdatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .from(UserNotificationPrefs::Table, UserNotificationPrefs::UserId)
+                            .from(OauthAccounts::Table, OauthAccounts::UserId)
                             .to(Users::Table, Users::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
@@ -72,9 +65,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_user_notification_prefs_user")
-                    .table(UserNotificationPrefs::Table)
-                    .col(UserNotificationPrefs::UserId)
+                    .name("idx_oauth_accounts_user")
+                    .table(OauthAccounts::Table)
+                    .col(OauthAccounts::UserId)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -83,10 +76,10 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_user_notification_prefs_unique")
-                    .table(UserNotificationPrefs::Table)
-                    .col(UserNotificationPrefs::UserId)
-                    .col(UserNotificationPrefs::ChannelType)
+                    .name("idx_oauth_accounts_provider")
+                    .table(OauthAccounts::Table)
+                    .col(OauthAccounts::Provider)
+                    .col(OauthAccounts::ProviderUserId)
                     .unique()
                     .if_not_exists()
                     .to_owned(),
@@ -100,7 +93,7 @@ impl MigrationTrait for Migration {
         manager
             .drop_table(
                 Table::drop()
-                    .table(UserNotificationPrefs::Table)
+                    .table(OauthAccounts::Table)
                     .if_exists()
                     .to_owned(),
             )
@@ -109,17 +102,24 @@ impl MigrationTrait for Migration {
 }
 
 #[derive(Iden)]
-#[iden = "user_notification_prefs"]
-enum UserNotificationPrefs {
+#[iden = "oauth_accounts"]
+enum OauthAccounts {
     Table,
     Id,
     #[iden = "user_id"]
     UserId,
-    #[iden = "channel_type"]
-    ChannelType,
-    Enabled,
-    Destination,
-    Verified,
+    Provider,
+    #[iden = "provider_user_id"]
+    ProviderUserId,
+    Email,
+    #[iden = "display_name"]
+    DisplayName,
+    #[iden = "access_token"]
+    AccessToken,
+    #[iden = "refresh_token"]
+    RefreshToken,
+    #[iden = "token_expires_at"]
+    TokenExpiresAt,
     #[iden = "created_at"]
     CreatedAt,
     #[iden = "updated_at"]

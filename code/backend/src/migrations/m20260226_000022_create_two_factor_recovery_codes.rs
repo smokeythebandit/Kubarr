@@ -1,8 +1,8 @@
-//! Migration: Create role_app_permissions table
+//! Migration: Create two_factor_recovery_codes table
 
 use sea_orm_migration::prelude::*;
 
-use super::m20260127_000002_create_roles::Roles;
+use super::m20260226_000001_create_users::Users;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -13,29 +13,42 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
-                    .table(RoleAppPermissions::Table)
+                    .table(TwoFactorRecoveryCodes::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(RoleAppPermissions::Id)
+                        ColumnDef::new(TwoFactorRecoveryCodes::Id)
                             .big_integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
                     .col(
-                        ColumnDef::new(RoleAppPermissions::RoleId)
+                        ColumnDef::new(TwoFactorRecoveryCodes::UserId)
                             .big_integer()
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(RoleAppPermissions::AppName)
+                        ColumnDef::new(TwoFactorRecoveryCodes::CodeHash)
                             .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TwoFactorRecoveryCodes::UsedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(TwoFactorRecoveryCodes::CreatedAt)
+                            .timestamp_with_time_zone()
                             .not_null(),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .from(RoleAppPermissions::Table, RoleAppPermissions::RoleId)
-                            .to(Roles::Table, Roles::Id)
+                            .from(
+                                TwoFactorRecoveryCodes::Table,
+                                TwoFactorRecoveryCodes::UserId,
+                            )
+                            .to(Users::Table, Users::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
@@ -45,22 +58,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_role_app_permissions_role")
-                    .table(RoleAppPermissions::Table)
-                    .col(RoleAppPermissions::RoleId)
-                    .if_not_exists()
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_role_app_permissions_unique")
-                    .table(RoleAppPermissions::Table)
-                    .col(RoleAppPermissions::RoleId)
-                    .col(RoleAppPermissions::AppName)
-                    .unique()
+                    .name("idx_2fa_recovery_user_id")
+                    .table(TwoFactorRecoveryCodes::Table)
+                    .col(TwoFactorRecoveryCodes::UserId)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -73,7 +73,7 @@ impl MigrationTrait for Migration {
         manager
             .drop_table(
                 Table::drop()
-                    .table(RoleAppPermissions::Table)
+                    .table(TwoFactorRecoveryCodes::Table)
                     .if_exists()
                     .to_owned(),
             )
@@ -82,12 +82,16 @@ impl MigrationTrait for Migration {
 }
 
 #[derive(Iden)]
-#[iden = "role_app_permissions"]
-enum RoleAppPermissions {
+#[iden = "two_factor_recovery_codes"]
+pub enum TwoFactorRecoveryCodes {
     Table,
     Id,
-    #[iden = "role_id"]
-    RoleId,
-    #[iden = "app_name"]
-    AppName,
+    #[iden = "user_id"]
+    UserId,
+    #[iden = "code_hash"]
+    CodeHash,
+    #[iden = "used_at"]
+    UsedAt,
+    #[iden = "created_at"]
+    CreatedAt,
 }

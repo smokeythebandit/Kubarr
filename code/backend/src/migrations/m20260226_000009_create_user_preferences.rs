@@ -1,6 +1,8 @@
-//! Migration: Create cloudflare_tunnels table
+//! Migration: Create user_preferences table
 
 use sea_orm_migration::prelude::*;
+
+use super::m20260226_000001_create_users::Users;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -11,37 +13,30 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
-                    .table(CloudflareTunnels::Table)
+                    .table(UserPreferences::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(CloudflareTunnels::Id)
+                        ColumnDef::new(UserPreferences::UserId)
                             .big_integer()
                             .not_null()
-                            .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(CloudflareTunnels::Name).text().not_null())
                     .col(
-                        ColumnDef::new(CloudflareTunnels::TunnelToken)
-                            .text()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(CloudflareTunnels::Status)
+                        ColumnDef::new(UserPreferences::Theme)
                             .string()
                             .not_null()
-                            .default("not_deployed"),
+                            .default("system"),
                     )
-                    .col(ColumnDef::new(CloudflareTunnels::Error).text().null())
                     .col(
-                        ColumnDef::new(CloudflareTunnels::CreatedAt)
+                        ColumnDef::new(UserPreferences::UpdatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(CloudflareTunnels::UpdatedAt)
-                            .timestamp_with_time_zone()
-                            .not_null(),
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(UserPreferences::Table, UserPreferences::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
             )
@@ -52,7 +47,7 @@ impl MigrationTrait for Migration {
         manager
             .drop_table(
                 Table::drop()
-                    .table(CloudflareTunnels::Table)
+                    .table(UserPreferences::Table)
                     .if_exists()
                     .to_owned(),
             )
@@ -61,17 +56,12 @@ impl MigrationTrait for Migration {
 }
 
 #[derive(Iden)]
-#[iden = "cloudflare_tunnels"]
-enum CloudflareTunnels {
+#[iden = "user_preferences"]
+enum UserPreferences {
     Table,
-    Id,
-    Name,
-    #[iden = "tunnel_token"]
-    TunnelToken,
-    Status,
-    Error,
-    #[iden = "created_at"]
-    CreatedAt,
+    #[iden = "user_id"]
+    UserId,
+    Theme,
     #[iden = "updated_at"]
     UpdatedAt,
 }

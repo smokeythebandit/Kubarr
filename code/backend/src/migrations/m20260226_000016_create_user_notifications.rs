@@ -1,8 +1,8 @@
-//! Migration: Create notification_logs table
+//! Migration: Create user_notifications table
 
 use sea_orm_migration::prelude::*;
 
-use super::m20260127_000001_create_users::Users;
+use super::m20260226_000001_create_users::Users;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -13,52 +13,49 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
-                    .table(NotificationLogs::Table)
+                    .table(UserNotifications::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(NotificationLogs::Id)
+                        ColumnDef::new(UserNotifications::Id)
                             .big_integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
                     .col(
-                        ColumnDef::new(NotificationLogs::UserId)
+                        ColumnDef::new(UserNotifications::UserId)
                             .big_integer()
-                            .null(),
+                            .not_null(),
                     )
+                    .col(ColumnDef::new(UserNotifications::Title).string().not_null())
                     .col(
-                        ColumnDef::new(NotificationLogs::ChannelType)
+                        ColumnDef::new(UserNotifications::Message)
                             .string()
                             .not_null(),
                     )
+                    .col(ColumnDef::new(UserNotifications::EventType).string().null())
                     .col(
-                        ColumnDef::new(NotificationLogs::EventType)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(ColumnDef::new(NotificationLogs::Recipient).string().null())
-                    .col(
-                        ColumnDef::new(NotificationLogs::Status)
+                        ColumnDef::new(UserNotifications::Severity)
                             .string()
                             .not_null()
-                            .default("pending"),
+                            .default("info"),
                     )
                     .col(
-                        ColumnDef::new(NotificationLogs::ErrorMessage)
-                            .string()
-                            .null(),
+                        ColumnDef::new(UserNotifications::Read)
+                            .boolean()
+                            .not_null()
+                            .default(false),
                     )
                     .col(
-                        ColumnDef::new(NotificationLogs::CreatedAt)
+                        ColumnDef::new(UserNotifications::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .from(NotificationLogs::Table, NotificationLogs::UserId)
+                            .from(UserNotifications::Table, UserNotifications::UserId)
                             .to(Users::Table, Users::Id)
-                            .on_delete(ForeignKeyAction::SetNull),
+                            .on_delete(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
             )
@@ -67,9 +64,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_notification_logs_user")
-                    .table(NotificationLogs::Table)
-                    .col(NotificationLogs::UserId)
+                    .name("idx_user_notifications_user")
+                    .table(UserNotifications::Table)
+                    .col(UserNotifications::UserId)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -78,9 +75,10 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_notification_logs_status")
-                    .table(NotificationLogs::Table)
-                    .col(NotificationLogs::Status)
+                    .name("idx_user_notifications_read")
+                    .table(UserNotifications::Table)
+                    .col(UserNotifications::UserId)
+                    .col(UserNotifications::Read)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -89,9 +87,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_notification_logs_created")
-                    .table(NotificationLogs::Table)
-                    .col(NotificationLogs::CreatedAt)
+                    .name("idx_user_notifications_created")
+                    .table(UserNotifications::Table)
+                    .col(UserNotifications::CreatedAt)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -104,7 +102,7 @@ impl MigrationTrait for Migration {
         manager
             .drop_table(
                 Table::drop()
-                    .table(NotificationLogs::Table)
+                    .table(UserNotifications::Table)
                     .if_exists()
                     .to_owned(),
             )
@@ -113,20 +111,18 @@ impl MigrationTrait for Migration {
 }
 
 #[derive(Iden)]
-#[iden = "notification_logs"]
-enum NotificationLogs {
+#[iden = "user_notifications"]
+enum UserNotifications {
     Table,
     Id,
     #[iden = "user_id"]
     UserId,
-    #[iden = "channel_type"]
-    ChannelType,
+    Title,
+    Message,
     #[iden = "event_type"]
     EventType,
-    Recipient,
-    Status,
-    #[iden = "error_message"]
-    ErrorMessage,
+    Severity,
+    Read,
     #[iden = "created_at"]
     CreatedAt,
 }

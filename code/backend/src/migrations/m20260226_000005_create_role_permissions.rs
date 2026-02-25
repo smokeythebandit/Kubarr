@@ -2,7 +2,7 @@
 
 use sea_orm_migration::prelude::*;
 
-use super::m20260127_000002_create_roles::Roles;
+use super::m20260226_000002_create_roles::Roles;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;

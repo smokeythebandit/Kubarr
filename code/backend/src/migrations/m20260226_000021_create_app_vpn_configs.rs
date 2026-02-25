@@ -30,6 +30,12 @@ impl MigrationTrait for Migration {
                             .null(),
                     )
                     .col(
+                        ColumnDef::new(AppVpnConfigs::PortForwarding)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
                         ColumnDef::new(AppVpnConfigs::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
@@ -73,6 +79,8 @@ enum AppVpnConfigs {
     VpnProviderId,
     #[iden = "kill_switch_override"]
     KillSwitchOverride,
+    #[iden = "port_forwarding"]
+    PortForwarding,
     #[iden = "created_at"]
     CreatedAt,
     #[iden = "updated_at"]

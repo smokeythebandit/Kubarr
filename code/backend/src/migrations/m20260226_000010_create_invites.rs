@@ -2,7 +2,7 @@
 
 use sea_orm_migration::prelude::*;
 
-use super::m20260127_000001_create_users::Users;
+use super::m20260226_000001_create_users::Users;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;

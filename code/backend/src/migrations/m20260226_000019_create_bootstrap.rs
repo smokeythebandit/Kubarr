@@ -6,7 +6,6 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Create bootstrap_status table
         manager
             .create_table(
                 Table::create()
@@ -44,7 +43,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // Create server_config table
         manager
             .create_table(
                 Table::create()
@@ -63,6 +61,7 @@ impl MigrationTrait for Migration {
                             .string()
                             .not_null(),
                     )
+                    .col(ColumnDef::new(ServerConfig::NfsServer).text().null())
                     .col(
                         ColumnDef::new(ServerConfig::CreatedAt)
                             .timestamp_with_time_zone()
@@ -105,5 +104,6 @@ enum ServerConfig {
     Id,
     Name,
     StoragePath,
+    NfsServer,
     CreatedAt,
 }
