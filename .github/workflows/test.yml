@@ -176,7 +176,7 @@ jobs:
           NODE="${KIND_CLUSTER}-control-plane"
           load_image() {
             docker save "$1" | docker exec --privileged -i "$NODE" \
-              ctr --namespace=k8s.io images import --digests --snapshotter=native -
+              ctr --namespace=k8s.io images import --snapshotter=native -
           }
           load_image "kubarr-backend:${TAG}"
           load_image "kubarr-frontend:${TAG}"
