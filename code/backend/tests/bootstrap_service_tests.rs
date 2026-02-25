@@ -266,7 +266,7 @@ async fn save_and_get_server_config_roundtrip() {
     assert!(initial.is_none(), "no config initially");
 
     // Save a config
-    let saved = save_server_config(&db, "my-server", "/data/storage")
+    let saved = save_server_config(&db, "my-server", "/data/storage", None)
         .await
         .expect("save_server_config must not fail");
     assert_eq!(saved.name, "my-server");
@@ -287,10 +287,10 @@ async fn save_server_config_upserts_on_second_call() {
 
     let db = create_test_db_with_seed().await;
 
-    save_server_config(&db, "original-name", "/original/path")
+    save_server_config(&db, "original-name", "/original/path", None)
         .await
         .expect("first save");
-    save_server_config(&db, "updated-name", "/updated/path")
+    save_server_config(&db, "updated-name", "/updated/path", None)
         .await
         .expect("second save (upsert)");
 
