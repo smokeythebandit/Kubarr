@@ -1,0 +1,35 @@
+githubConfigUrl: "https://github.com/bmartensnl/kubarr"
+githubConfigSecret: "pre-defined-secret"
+
+minRunners: 0
+maxRunners: 2
+
+containerMode:
+  type: dind
+
+template:
+  spec:
+    containers:
+      - name: runner
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+      - name: dind
+        resources:
+          requests:
+            cpu: "2"
+            memory: "2Gi"
+          limits:
+            cpu: "6"
+            memory: "10Gi"
+        volumeMounts:
+          - name: dind-cache
+            mountPath: /var/lib/docker
+    volumes:
+      - name: dind-cache
+        persistentVolumeClaim:
+          claimName: arc-dind-cache
