@@ -76,20 +76,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp "target/${PROFILE_DIR}/kubarr" /kubarr
 
 # Stage 2: Download Helm and prepare assets
+FROM alpine/helm:3.14.0 AS helm-source
+
 FROM alpine:3.23 AS asset-builder
 
-ARG TARGETARCH=amd64
-
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
-RUN apk add --no-cache curl tar tzdata ca-certificates && \
-    curl -fsSL --retry 3 --retry-delay 5 -o /tmp/helm.tar.gz "https://github.com/helm/helm/releases/download/v3.14.0/helm-v3.14.0-linux-${TARGETARCH}.tar.gz" && \
-    tar xz -f /tmp/helm.tar.gz && \
-    mv "linux-${TARGETARCH}/helm" /helm && \
-    chmod +x /helm && \
-    rm /tmp/helm.tar.gz
+COPY --from=helm-source /usr/bin/helm /helm
 
 # Download managed charts from kubarr-charts
-RUN mkdir -p /charts /tmp/kubarr-charts && \
+RUN apk add --no-cache curl tar && \
+    mkdir -p /charts /tmp/kubarr-charts && \
     curl -fsSL --retry 3 --retry-delay 5 -o /tmp/kubarr-charts.tar.gz "https://github.com/bmartensNL/kubarr-charts/archive/refs/heads/main.tar.gz" && \
     tar xz -f /tmp/kubarr-charts.tar.gz -C /tmp/kubarr-charts --strip-components=1 && \
     rm /tmp/kubarr-charts.tar.gz && \
