@@ -159,10 +159,13 @@ jobs:
 
       - name: Pull images
         run: |
-          docker pull postgres:16-alpine
-          docker pull victoriametrics/victoria-metrics:v1.96.0
-          docker pull victoriametrics/victoria-logs:v1.3.2-victorialogs
-          docker pull fluent/fluent-bit:3.2.2
+          # Pull with explicit platform to avoid OCI multi-arch manifest list
+          # in the local Docker store; the cross-platform content references cause
+          # "content digest not found" errors when importing into containerd.
+          docker pull --platform linux/amd64 postgres:16-alpine
+          docker pull --platform linux/amd64 victoriametrics/victoria-metrics:v1.96.0
+          docker pull --platform linux/amd64 victoriametrics/victoria-logs:v1.3.2-victorialogs
+          docker pull --platform linux/amd64 fluent/fluent-bit:3.2.2
 
       - name: Load images into Kind
         run: |
