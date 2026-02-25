@@ -166,22 +166,21 @@ jobs:
 
       - name: Load images into Kind
         run: |
-          # Use image-archive (avoids --all-platforms flag that causes digest errors
-          # with BuildKit-produced images in DinD).
-          # kubarr images are already downloaded as tar files
-          kind load image-archive kubarr-backend.tar --name "$KIND_CLUSTER"
-          kind load image-archive kubarr-frontend.tar --name "$KIND_CLUSTER"
-          # Save pulled images to tar files, then load via image-archive
-          # (kind load image-archive does not support reading from stdin)
-          docker save postgres:16-alpine -o /tmp/postgres.tar
-          kind load image-archive /tmp/postgres.tar --name "$KIND_CLUSTER"
-          docker save victoriametrics/victoria-metrics:v1.96.0 -o /tmp/vm.tar
-          kind load image-archive /tmp/vm.tar --name "$KIND_CLUSTER"
-          docker save victoriametrics/victoria-logs:v1.3.2-victorialogs -o /tmp/vl.tar
-          kind load image-archive /tmp/vl.tar --name "$KIND_CLUSTER"
-          docker save fluent/fluent-bit:3.2.2 -o /tmp/fb.tar
-          kind load image-archive /tmp/fb.tar --name "$KIND_CLUSTER"
-          rm -f /tmp/postgres.tar /tmp/vm.tar /tmp/vl.tar /tmp/fb.tar
+          # kind load (docker-image and image-archive) always passes --all-platforms
+          # to containerd's ctr import, causing "content digest not found" errors for
+          # BuildKit-produced images that only have one platform in the local store.
+          # Workaround: directly exec ctr import WITHOUT --all-platforms.
+          NODE="${KIND_CLUSTER}-control-plane"
+          load_image() {
+            docker save "$1" | docker exec --privileged -i "$NODE" \
+              ctr --namespace=k8s.io images import --digests --snapshotter=native -
+          }
+          load_image "kubarr-backend:${TAG}"
+          load_image "kubarr-frontend:${TAG}"
+          load_image postgres:16-alpine
+          load_image victoriametrics/victoria-metrics:v1.96.0
+          load_image "victoriametrics/victoria-logs:v1.3.2-victorialogs"
+          load_image fluent/fluent-bit:3.2.2
 
       - name: Clone charts
         run: git clone --depth 1 https://github.com/bmartensNL/kubarr-charts.git charts
