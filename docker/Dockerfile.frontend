@@ -1,5 +1,5 @@
 # Build stage
-FROM node:25-alpine AS builder
+FROM public.ecr.aws/docker/library/node:25-alpine AS builder
 
 WORKDIR /app
 
@@ -32,7 +32,7 @@ FROM builder AS built
 RUN npm run build
 
 # Production stage - minimal BusyBox httpd (~1MB total)
-FROM busybox:1.37
+FROM public.ecr.aws/docker/library/busybox:1.37
 
 WORKDIR /var/www
 

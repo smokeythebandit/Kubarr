@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.4
 # Stage 1: Build Rust backend (fully static with musl)
-FROM rust:alpine AS rust-builder
+FROM public.ecr.aws/docker/library/rust:alpine AS rust-builder
 
 # Install build dependencies including static SSL libs
 RUN apk add --no-cache \
@@ -44,7 +44,7 @@ COPY code/backend/src ./src
 # Uses rust:slim (glibc/Debian) instead of Alpine (musl) to avoid rustc SIGSEGV
 # on cold debug builds in CI. No cache mounts so compiled artifacts persist in
 # the image layer and tests can run without recompilation.
-FROM rust:slim AS test
+FROM public.ecr.aws/docker/library/rust:slim AS test
 RUN apt-get update && \
     apt-get install -y --no-install-recommends pkg-config libssl-dev curl && \
     rm -rf /var/lib/apt/lists/*
@@ -78,7 +78,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Stage 2: Download Helm and prepare assets
 FROM alpine/helm:3.14.0 AS helm-source
 
-FROM alpine:3.23 AS asset-builder
+FROM public.ecr.aws/docker/library/alpine:3.23 AS asset-builder
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 COPY --from=helm-source /usr/bin/helm /helm
@@ -93,7 +93,7 @@ RUN apk add --no-cache curl tar && \
     rm -rf /tmp/kubarr-charts
 
 # Stage 3: Final Alpine image (includes DNS resolution)
-FROM alpine:3.23
+FROM public.ecr.aws/docker/library/alpine:3.23
 
 # Build args for environment
 ARG COMMIT_HASH=unknown
