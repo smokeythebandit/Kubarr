@@ -63,6 +63,7 @@ jobs:
           retention-days: 30
 
   e2e:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: kubarr-arc-runners
     timeout-minutes: 120
     env:
