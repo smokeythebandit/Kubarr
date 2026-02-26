@@ -80,7 +80,7 @@ jobs:
         run: docker save "${{ matrix.image }}:${{ inputs.image-tag }}" > "${{ matrix.image }}.tar"
 
       - name: Upload image artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.image }}
           path: ${{ matrix.image }}.tar

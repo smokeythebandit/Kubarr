@@ -28,7 +28,7 @@ jobs:
         run: echo "image=${{ env.REGISTRY }}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/kubarr-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
 
       - name: Download image artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: kubarr-${{ matrix.image }}
 
