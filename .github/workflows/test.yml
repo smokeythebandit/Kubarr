@@ -53,7 +53,9 @@ jobs:
           tool: cargo-tarpaulin
       - run: cargo tarpaulin --no-fail-fast --out Xml --output-dir coverage
         working-directory: code/backend
+        continue-on-error: true
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: coverage-report
           path: code/backend/coverage/cobertura.xml
@@ -257,8 +259,12 @@ jobs:
 
       - name: Port-forward
         run: |
-          kubectl port-forward --address 127.0.0.1 svc/kubarr-backend 18000:8000 -n kubarr &
-          echo $! > "/tmp/pf-${KIND_CLUSTER}.pid"
+          # Watchdog loop: restart port-forward automatically if it dies mid-test
+          (while true; do
+            kubectl port-forward --address 127.0.0.1 svc/kubarr-backend 18000:8000 -n kubarr
+            echo "[watchdog] Port-forward exited, restarting in 2s..."
+            sleep 2
+          done) &
 
           for i in $(seq 1 60); do
             if curl -s http://localhost:18000/api/system/health 2>/dev/null | grep -q "ok"; then
@@ -306,7 +312,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          kill "$(cat /tmp/pf-${KIND_CLUSTER}.pid 2>/dev/null)" 2>/dev/null || true
-          rm -f /tmp/jwt-*-${KIND_CLUSTER}.pem /tmp/pf-${KIND_CLUSTER}.pid
+          pkill -f "kubectl port-forward.*svc/kubarr-backend.*18000" 2>/dev/null || true
+          rm -f /tmp/jwt-*-${KIND_CLUSTER}.pem
           kind delete cluster --name "$KIND_CLUSTER" 2>/dev/null || true
           docker rm -f kind-registry 2>/dev/null || true

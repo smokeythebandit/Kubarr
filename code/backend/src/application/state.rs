@@ -600,8 +600,12 @@ impl AppState {
 
     /// Set the database connection after PostgreSQL is installed
     pub async fn set_db(&self, db: DbConn) {
-        let mut db_guard = self.db.write().await;
-        *db_guard = Some(db);
+        {
+            let mut db_guard = self.db.write().await;
+            *db_guard = Some(db.clone());
+        }
+        self.notification.set_db(db.clone()).await;
+        self.audit.set_db(db).await;
     }
 
     /// Get the database connection (returns error if not connected)
