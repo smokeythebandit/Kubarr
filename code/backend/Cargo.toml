@@ -43,10 +43,10 @@ jiff = "0.2"
 
 # Authentication & Security
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
-bcrypt = "0.18"
+bcrypt = "0.19"
 rsa = { version = "0.9", features = ["sha2"] }
 rand = "0.10"
-rand_core = "0.6"
+rand_core = "0.10"
 base64 = "0.22"
 hex = "0.4"
 totp-rs = { version = "5", features = ["qr", "gen_secret"] }
@@ -90,8 +90,8 @@ parking_lot = "0.12"
 
 [dev-dependencies]
 http-body-util = "0.1"
-pastey = "0.1"
-tempfile = "3.25.0"
+pastey = "0.2"
+tempfile = "3.26.0"
 tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
