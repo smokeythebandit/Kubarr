@@ -33,7 +33,7 @@ jobs:
           docker volume prune -f || true
           df -h
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
 
       - name: Extract version metadata
         id: meta
@@ -80,7 +80,7 @@ jobs:
         run: docker save "${{ matrix.image }}:${{ inputs.image-tag }}" > "${{ matrix.image }}.tar"
 
       - name: Upload image artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ${{ matrix.image }}
           path: ${{ matrix.image }}.tar
@@ -88,7 +88,7 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
 
       - name: Extract version metadata
         id: meta
@@ -107,7 +107,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: '3.x'
 
