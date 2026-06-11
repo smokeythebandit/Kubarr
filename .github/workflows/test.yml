@@ -12,7 +12,7 @@ jobs:
     runs-on: kubarr-arc-runners
     steps:
       - name: Download image artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: kubarr-backend-test
 
@@ -26,7 +26,7 @@ jobs:
     runs-on: kubarr-arc-runners
     steps:
       - name: Download image artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: kubarr-frontend-test
 
@@ -55,7 +55,7 @@ jobs:
       - run: cargo tarpaulin --no-fail-fast --out Xml --output-dir coverage
         working-directory: code/backend
         continue-on-error: true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-report
@@ -107,12 +107,12 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Download backend image
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: kubarr-backend
 
       - name: Download frontend image
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: kubarr-frontend
 
@@ -286,7 +286,7 @@ jobs:
           CI: true
 
       - name: Upload report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: playwright-report
