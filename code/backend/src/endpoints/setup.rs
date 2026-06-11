@@ -601,7 +601,7 @@ async fn browse_setup_directory(
     }
 
     // Sort alphabetically
-    directories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    directories.sort_by_key(|entry| entry.name.to_lowercase());
 
     Ok(Json(BrowseSetupResponse {
         path: host_path,

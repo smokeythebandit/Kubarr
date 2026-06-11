@@ -26,7 +26,7 @@ use crate::models::{
 /// Note: Signal was previously listed here as a stub but had no implementation
 /// and would always fail with "Channel signal not configured". It has been
 /// removed. To add Signal support in the future, implement a `SignalProvider`
-/// using the signal-cli REST API (https://github.com/bbernhard/signal-cli-rest-api)
+/// using the signal-cli REST API (<https://github.com/bbernhard/signal-cli-rest-api>)
 /// and add a `KUBARR_SIGNAL_CLI_URL` config option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

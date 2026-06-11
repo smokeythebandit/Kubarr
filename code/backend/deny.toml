@@ -12,6 +12,12 @@ yanked = "warn"
 # attacker-controlled timing observations in this deployment context.
 id = "RUSTSEC-2023-0071"
 
+[[advisories.ignore]]
+# proc-macro-error2 is pulled in by sea-orm 1.1.x through sea-orm-macros.
+# It is an unmaintained proc-macro dependency, not runtime application code;
+# revisit when moving SeaORM to a release line that removes it.
+id = "RUSTSEC-2026-0173"
+
 [licenses]
 version = 2
 # Skip license check for private (publish = false) packages like the root crate

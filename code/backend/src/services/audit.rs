@@ -290,7 +290,7 @@ pub async fn get_audit_stats(db: &DbConn) -> Result<AuditStats> {
         .into_iter()
         .map(|(action, count)| ActionCount { action, count })
         .collect();
-    top_actions.sort_by(|a, b| b.count.cmp(&a.count));
+    top_actions.sort_by_key(|entry| std::cmp::Reverse(entry.count));
     top_actions.truncate(10);
 
     Ok(AuditStats {

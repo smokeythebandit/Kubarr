@@ -46,7 +46,7 @@ jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 bcrypt = "0.19"
 rsa = { version = "0.9", features = ["sha2"] }
 rand = "0.10"
-rand_core = "0.10"
+rand_core = "0.6"
 base64 = "0.22"
 hex = "0.4"
 totp-rs = { version = "5", features = ["qr", "gen_secret"] }
