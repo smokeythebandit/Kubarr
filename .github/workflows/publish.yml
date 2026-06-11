@@ -12,7 +12,7 @@ env:
 
 jobs:
   docker:
-    runs-on: kubarr-arc-runners
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
