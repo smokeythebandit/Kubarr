@@ -9,7 +9,7 @@ on:
 
 jobs:
   docker:
-    runs-on: kubarr-arc-runners
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
