@@ -1,0 +1,7 @@
+[Unit]
+Description=CI Runner Storage Cleanup
+
+[Service]
+Type=oneshot
+ExecStart=/mnt/storage/personal/runners/cleanup.sh
+User=root

@@ -1,0 +1,184 @@
+name: E2E Tests
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        required: true
+        type: string
+
+jobs:
+  test:
+    runs-on: self-hosted
+    timeout-minutes: 45
+    env:
+      KIND_CLUSTER: kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      TAG: ${{ inputs.image-tag }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: code/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: code/frontend
+        run: npm ci
+
+      - name: Install Playwright
+        working-directory: code/frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Cleanup stale Kind resources
+        run: |
+          # Remove any leftover Kind clusters from previous runs to free resources
+          for cluster in $(kind get clusters 2>/dev/null); do
+            if [[ "$cluster" == kubarr-e2e-* && "$cluster" != "$KIND_CLUSTER" ]]; then
+              echo "Removing stale cluster: $cluster"
+              kind delete cluster --name "$cluster" 2>/dev/null || true
+            fi
+          done
+          # Prune stopped containers and unused images to free disk/memory
+          docker container prune -f 2>/dev/null || true
+          # Kill stale port-forward processes from previous runs to free the port
+          pkill -f "kubectl port-forward" 2>/dev/null || true
+
+      - name: Create Kind cluster
+        run: |
+          # Retry Kind cluster creation up to 3 times to handle transient
+          # infrastructure issues on self-hosted runners (API server may fail
+          # to start due to resource pressure or Docker networking).
+          for attempt in 1 2 3; do
+            echo "=== Kind cluster creation attempt ${attempt}/3 ==="
+            if kind create cluster --name "$KIND_CLUSTER" --image kindest/node:v1.29.2 --wait 180s 2>&1; then
+              echo "Cluster created successfully on attempt ${attempt}"
+              kubectl cluster-info --context "kind-${KIND_CLUSTER}"
+              exit 0
+            fi
+            echo "Attempt ${attempt} failed"
+            kind delete cluster --name "$KIND_CLUSTER" 2>/dev/null || true
+            if [ "$attempt" -lt 3 ]; then
+              echo "Waiting 10s before retry..."
+              sleep 10
+            fi
+          done
+          echo "ERROR: Failed to create Kind cluster after 3 attempts"
+          exit 1
+
+      - name: Pull images
+        run: |
+          docker pull postgres:16-alpine
+          docker pull victoriametrics/victoria-metrics:v1.96.0
+          docker pull victoriametrics/victoria-logs:v1.3.2-victorialogs
+          docker pull fluent/fluent-bit:3.2.2
+
+      - name: Load images into Kind
+        run: |
+          kind load docker-image "kubarr-backend:${TAG}" --name "$KIND_CLUSTER"
+          kind load docker-image "kubarr-frontend:${TAG}" --name "$KIND_CLUSTER"
+          kind load docker-image postgres:16-alpine --name "$KIND_CLUSTER"
+          kind load docker-image victoriametrics/victoria-metrics:v1.96.0 --name "$KIND_CLUSTER"
+          kind load docker-image victoriametrics/victoria-logs:v1.3.2-victorialogs --name "$KIND_CLUSTER"
+          kind load docker-image fluent/fluent-bit:3.2.2 --name "$KIND_CLUSTER"
+
+      - name: Clone charts
+        run: git clone --depth 1 https://github.com/smokeythebandit/kubarr-charts.git charts
+
+      - name: Deploy Kubarr
+        run: |
+          openssl genrsa -out /tmp/jwt-private-${KIND_CLUSTER}.pem 2048
+          openssl rsa -in /tmp/jwt-private-${KIND_CLUSTER}.pem -pubout -out /tmp/jwt-public-${KIND_CLUSTER}.pem
+
+          kubectl create namespace kubarr --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic kubarr-jwt-keys \
+            --from-file=private.pem=/tmp/jwt-private-${KIND_CLUSTER}.pem \
+            --from-file=public.pem=/tmp/jwt-public-${KIND_CLUSTER}.pem \
+            -n kubarr --dry-run=client -o yaml | kubectl apply -f -
+
+          helm upgrade --install kubarr ./charts/kubarr \
+            --namespace kubarr \
+            --set namespace.create=false \
+            --set backend.image.repository=kubarr-backend \
+            --set backend.image.tag=${TAG} \
+            --set backend.image.pullPolicy=Never \
+            --set frontend.image.repository=kubarr-frontend \
+            --set frontend.image.tag=${TAG} \
+            --set frontend.image.pullPolicy=Never \
+            --set oauth2.enabled=true \
+            --set auth.jwt.existingSecret=kubarr-jwt-keys \
+            --set networkPolicy.enabled=false \
+            --set backend.livenessProbe.initialDelaySeconds=30 \
+            --set backend.livenessProbe.timeoutSeconds=5 \
+            --set backend.livenessProbe.failureThreshold=6 \
+            --set backend.readinessProbe.initialDelaySeconds=5 \
+            --set backend.readinessProbe.periodSeconds=5 \
+            --set backend.readinessProbe.failureThreshold=30 \
+            --timeout=5m
+
+      - name: Wait for pods
+        run: |
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kubarr-backend -n kubarr --timeout=300s
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kubarr-frontend -n kubarr --timeout=120s
+          kubectl get pods -n kubarr
+
+      - name: Port-forward
+        run: |
+          kubectl port-forward --address 127.0.0.1 svc/kubarr-backend 18000:8000 -n kubarr &
+          echo $! > "/tmp/pf-${KIND_CLUSTER}.pid"
+
+          for i in $(seq 1 60); do
+            if curl -s http://localhost:18000/api/system/health 2>/dev/null | grep -q "ok"; then
+              echo "Backend is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: Backend did not become healthy"
+          exit 1
+
+      - name: Playwright
+        working-directory: code/frontend
+        run: npx playwright test
+        env:
+          BASE_URL: http://localhost:18000
+          CI: true
+
+      - name: Upload report
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: playwright-report
+          path: code/frontend/playwright-report/
+          retention-days: 14
+
+      - name: Debug logs
+        if: failure()
+        run: |
+          echo "=== Kind version ==="
+          kind version 2>/dev/null || true
+          echo "=== Docker info ==="
+          docker info --format '{{.MemTotal}} memory, {{.NCPU}} CPUs, {{.ContainersRunning}} running' 2>/dev/null || true
+          echo "=== Kind clusters ==="
+          kind get clusters 2>/dev/null || true
+          echo "=== Pod status ==="
+          kubectl get pods -A -o wide 2>/dev/null || true
+          echo "=== Backend logs ==="
+          kubectl logs -l app.kubernetes.io/name=kubarr-backend -n kubarr --tail=100 2>/dev/null || true
+          echo "=== Frontend logs ==="
+          kubectl logs -l app.kubernetes.io/name=kubarr-frontend -n kubarr --tail=50 2>/dev/null || true
+          echo "=== Pod events ==="
+          kubectl get events -n kubarr --sort-by='.lastTimestamp' 2>/dev/null | tail -30 || true
+          echo "=== PostgreSQL namespace ==="
+          kubectl get pods -n postgresql 2>/dev/null || true
+          kubectl logs -l app.kubernetes.io/name=postgresql -n postgresql --tail=30 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$(cat /tmp/pf-${KIND_CLUSTER}.pid 2>/dev/null)" 2>/dev/null || true
+          rm -f /tmp/jwt-*-${KIND_CLUSTER}.pem /tmp/pf-${KIND_CLUSTER}.pid
+          kind delete cluster --name "$KIND_CLUSTER" 2>/dev/null || true

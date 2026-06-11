@@ -1,0 +1,85 @@
+docs_dir: docs
+site_dir: site
+
+site_name: Kubarr
+site_url: https://smokeythebandit.github.io/Kubarr/
+site_description: Smooth sailing for self-hosted media on Kubernetes
+repo_url: https://github.com/smokeythebandit/Kubarr
+repo_name: smokeythebandit/Kubarr
+edit_uri: edit/main/docs/
+
+# Version info (displayed in footer and used by plugins)
+# This can be overridden during build with: mkdocs build -e KUBARR_VERSION=1.0.0
+extra:
+  version:
+    provider: mike
+    default: stable
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Home: index.md
+  - Quick Start: quick-start.md
+  - Docker: docker.md
+  - Development: development.md
+  - Versioning: versioning.md
+  - Architecture:
+    - Storage: storage.md
+    - Networking: networking.md
+    - Applications: applications.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search
+
+hooks:
+  - docs/hooks/version_info.py

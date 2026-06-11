@@ -1,0 +1,134 @@
+# syntax=docker/dockerfile:1.4
+# Stage 1: Build Rust backend (fully static with musl)
+FROM public.ecr.aws/docker/library/rust:alpine AS rust-builder
+
+# Install build dependencies including static SSL libs
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconf \
+    openssl-dev \
+    openssl-libs-static
+
+WORKDIR /app
+
+# Build profile: "release" (slow, optimized) or "dev-release" (fast, still optimized)
+ARG PROFILE=release
+
+# Set static linking environment
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+ENV CARGO_INCREMENTAL=1
+
+# Copy Cargo files first for dependency caching
+COPY code/backend/Cargo.toml code/backend/Cargo.lock* ./
+
+# Create dummy src to build dependencies
+RUN mkdir src && \
+    echo 'fn main() { println!("dummy"); }' > src/main.rs
+
+# Build dependencies with cache mounts (this dramatically speeds up rebuilds)
+# - cargo registry: caches downloaded crates
+# - cargo git: caches git dependencies
+# - target: caches compiled artifacts for incremental builds
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --profile ${PROFILE} && \
+    rm -rf src
+
+# Copy actual source code
+COPY code/backend/src ./src
+
+# Test stage: has full Rust toolchain + source for running tests.
+# Uses rust:slim (glibc/Debian) instead of Alpine (musl) to avoid rustc SIGSEGV
+# on cold debug builds in CI. No cache mounts so compiled artifacts persist in
+# the image layer and tests can run without recompilation.
+FROM public.ecr.aws/docker/library/rust:slim AS test
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev curl && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+RUN rustup component add clippy rustfmt
+RUN curl -LsSf -o /tmp/nextest.tar.gz https://get.nexte.st/latest/linux && \
+    tar zxf /tmp/nextest.tar.gz -C /usr/local/bin && \
+    rm /tmp/nextest.tar.gz
+# Copy Cargo files and build deps first for layer caching
+COPY code/backend/Cargo.toml code/backend/Cargo.lock* ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build && rm -rf src
+# Copy actual source and compile test binaries
+COPY code/backend/src ./src
+RUN cargo build && cargo nextest run --no-run
+
+# Build stage: produce the final binary
+FROM rust-builder AS builder
+ARG PROFILE=release
+
+# Touch main.rs to force rebuild after copying real source, clear cached binary
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    PROFILE_DIR=$(if [ "$PROFILE" = "release" ]; then echo "release"; else echo "$PROFILE"; fi) && \
+    rm -f "/app/target/${PROFILE_DIR}/kubarr" 2>/dev/null || true && \
+    find "/app/target/${PROFILE_DIR}/deps" -maxdepth 1 -name 'kubarr*' -delete 2>/dev/null || true && \
+    touch src/main.rs && \
+    cargo build --profile "${PROFILE}" && \
+    cp "target/${PROFILE_DIR}/kubarr" /kubarr
+
+# Stage 2: Download Helm and prepare assets
+FROM alpine/helm:3.14.0 AS helm-source
+
+FROM public.ecr.aws/docker/library/alpine:3.23 AS asset-builder
+
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+COPY --from=helm-source /usr/bin/helm /helm
+
+# Download managed charts from kubarr-charts
+RUN apk add --no-cache curl tar && \
+    mkdir -p /charts /tmp/kubarr-charts && \
+    curl -fsSL --retry 3 --retry-delay 5 -o /tmp/kubarr-charts.tar.gz "https://github.com/smokeythebandit/kubarr-charts/archive/refs/heads/main.tar.gz" && \
+    tar xz -f /tmp/kubarr-charts.tar.gz -C /tmp/kubarr-charts --strip-components=1 && \
+    rm /tmp/kubarr-charts.tar.gz && \
+    cp -r /tmp/kubarr-charts/cloudflared /charts/ && \
+    rm -rf /tmp/kubarr-charts
+
+# Stage 3: Final Alpine image (includes DNS resolution)
+FROM public.ecr.aws/docker/library/alpine:3.23
+
+# Build args for environment
+ARG COMMIT_HASH=unknown
+ARG BUILD_TIME=unknown
+ARG CHANNEL=dev
+
+# Install CA certificates for HTTPS
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+
+# Copy the Rust binary
+COPY --from=builder /kubarr /app/kubarr
+
+# Copy Helm binary (statically linked)
+COPY --from=asset-builder /helm /usr/local/bin/helm
+
+# Copy managed charts (downloaded from kubarr-charts in asset-builder)
+COPY --from=asset-builder /charts /app/charts
+
+# Add non-root user and set ownership
+RUN adduser -D -u 1000 -g kubarr kubarr && \
+    chown -R kubarr:kubarr /app
+
+# Set environment variables
+ENV COMMIT_HASH=${COMMIT_HASH}
+ENV BUILD_TIME=${BUILD_TIME}
+ENV CHANNEL=${CHANNEL}
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+# Expose API port
+EXPOSE 8000
+
+# Run as non-root user
+USER kubarr
+
+# Run the Rust binary
+ENTRYPOINT ["/app/kubarr"]

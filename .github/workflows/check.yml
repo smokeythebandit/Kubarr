@@ -1,0 +1,141 @@
+name: Lint
+
+on:
+  workflow_call:
+
+jobs:
+  # ── Backend ──────────────────────────────────────────────────────────────────
+
+  backend-fmt-clippy:
+    name: backend / fmt & clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code/backend
+      - run: cargo fmt --check
+        working-directory: code/backend
+      - run: cargo clippy --no-deps -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+        working-directory: code/backend
+
+  backend-docs:
+    name: backend / docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code/backend
+      - run: cargo doc --no-deps --document-private-items
+        working-directory: code/backend
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"
+
+  backend-msrv:
+    name: backend / msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code/backend
+      - run: cargo check --locked
+        working-directory: code/backend
+
+  backend-deny:
+    name: backend / deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: code/backend/Cargo.toml
+
+  backend-unused-deps:
+    name: backend / unused deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code/backend
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - run: cargo machete
+        working-directory: code/backend
+
+  backend-toml-fmt:
+    name: backend / toml fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: taplo-cli
+      - run: taplo fmt --check
+        working-directory: code/backend
+
+  # ── Frontend ─────────────────────────────────────────────────────────────────
+
+  frontend-lint:
+    name: frontend / lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: code/frontend/package-lock.json
+      - run: npm ci
+        working-directory: code/frontend
+      - run: npm run lint
+        working-directory: code/frontend
+
+  # ── General ──────────────────────────────────────────────────────────────────
+
+  secrets:
+    name: general / secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  trivy:
+    name: general / trivy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+
+  dockerfiles:
+    name: general / dockerfiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: docker/Dockerfile.backend
+          config: docker/.hadolint.yaml
+      - uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: docker/Dockerfile.frontend
+          config: docker/.hadolint.yaml

@@ -1,0 +1,121 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        required: true
+        type: string
+
+jobs:
+  docker:
+    runs-on: kubarr-arc-runners
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: kubarr-backend-test
+            dockerfile: docker/Dockerfile.backend
+            target: test
+          - image: kubarr-frontend-test
+            dockerfile: docker/Dockerfile.frontend
+            target: test
+          - image: kubarr-backend
+            dockerfile: docker/Dockerfile.backend
+          - image: kubarr-frontend
+            dockerfile: docker/Dockerfile.frontend
+
+    steps:
+      - name: Free disk space
+        run: |
+          docker image prune -f || true
+          docker container prune -f || true
+          docker volume prune -f || true
+          df -h
+
+      - uses: actions/checkout@v6
+
+      - name: Extract version metadata
+        id: meta
+        run: |
+          # Extract version from package.json
+          VERSION=$(grep '"version"' code/frontend/package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Detect channel from git ref
+          if [[ "${{ github.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            CHANNEL="stable"
+          elif [[ "${{ github.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+-(rc|beta) ]]; then
+            CHANNEL="release"
+          else
+            CHANNEL="dev"
+          fi
+          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
+
+      - name: Build ${{ matrix.image }}
+        env:
+          DOCKER_BUILDKIT: '1'
+        run: |
+          for attempt in 1 2 3; do
+            echo "=== Build attempt ${attempt}/3 ==="
+            if docker build -f ${{ matrix.dockerfile }} \
+                ${{ matrix.target && format('--target {0}', matrix.target) || '' }} \
+                -t "${{ matrix.image }}:${{ inputs.image-tag }}" \
+                --build-arg VERSION=${{ steps.meta.outputs.version }} \
+                --build-arg CHANNEL=${{ steps.meta.outputs.channel }} \
+                --build-arg COMMIT_HASH=${{ github.sha }} \
+                --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) .; then
+              echo "Build succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Build failed, waiting 3 minutes before retry (rate limit backoff)..."
+              sleep 180
+            fi
+          done
+          echo "ERROR: Build failed after 3 attempts"
+          exit 1
+
+      - name: Save image
+        run: docker save "${{ matrix.image }}:${{ inputs.image-tag }}" > "${{ matrix.image }}.tar"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.image }}
+          path: ${{ matrix.image }}.tar
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract version metadata
+        id: meta
+        run: |
+          # Extract version from package.json
+          VERSION=$(grep '"version"' code/frontend/package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Detect channel from git ref
+          if [[ "${{ github.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            CHANNEL="stable"
+          elif [[ "${{ github.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+-(rc|beta) ]]; then
+            CHANNEL="release"
+          else
+            CHANNEL="dev"
+          fi
+          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - run: pip install mkdocs-material
+
+      - name: Build documentation
+        env:
+          KUBARR_VERSION: ${{ steps.meta.outputs.version }}
+          KUBARR_CHANNEL: ${{ steps.meta.outputs.channel }}
+          KUBARR_COMMIT: ${{ github.sha }}
+        run: mkdocs build --strict -f docs/mkdocs.yml

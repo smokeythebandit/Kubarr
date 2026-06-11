@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /code/backend
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: kube
+        versions: [">=1.0.0"]
+      - dependency-name: k8s-openapi
+        versions: [">=0.24.0"]
+
+  - package-ecosystem: npm
+    directory: /code/frontend
+    schedule:
+      interval: weekly
+    groups:
+      npm_and_yarn:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: eslint
+        versions: [">=10.0.0"]
+
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

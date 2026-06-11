@@ -1,0 +1,50 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Deny crates with known security vulnerabilities (RustSec advisory DB)
+version = 2
+yanked = "warn"
+
+[[advisories.ignore]]
+# rsa 0.9.x timing side-channel (Marvin Attack) — no upstream fix available.
+# Used only for RS256 JWT signing/verification; not directly exposed to
+# attacker-controlled timing observations in this deployment context.
+id = "RUSTSEC-2023-0071"
+
+[licenses]
+version = 2
+# Skip license check for private (publish = false) packages like the root crate
+private.ignore = true
+# Common permissive licenses used in the Rust ecosystem
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "ISC",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Unicode-3.0",
+  "Zlib",
+  "CC0-1.0",
+  "0BSD",
+  "MPL-2.0",
+  "OpenSSL",
+]
+
+# ring combines ISC, MIT, and OpenSSL under a non-standard SPDX expression
+[[licenses.exceptions]]
+allow = ["ISC", "MIT", "OpenSSL"]
+name = "ring"
+
+[bans]
+# Error on wildcard deps (e.g. foo = "*"), warn on duplicate crate versions
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+# Only allow crates published to crates.io
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

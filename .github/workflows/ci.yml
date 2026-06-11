@@ -1,0 +1,38 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+
+  build:
+    needs: check
+    uses: ./.github/workflows/build.yml
+    with:
+      image-tag: ci-${{ github.sha }}
+
+  test:
+    needs: build
+    uses: ./.github/workflows/test.yml
+    with:
+      image-tag: ci-${{ github.sha }}
+
+  publish:
+    needs: test
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/publish.yml
+    with:
+      image-tag: ci-${{ github.sha }}
+    permissions:
+      contents: read
+      packages: write
+      pages: write
+      id-token: write
+    secrets: inherit

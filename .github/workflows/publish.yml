@@ -1,0 +1,94 @@
+name: Publish
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  docker:
+    runs-on: kubarr-arc-runners
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [backend, frontend]
+
+    steps:
+      - name: Compute image name
+        id: vars
+        run: echo "image=${{ env.REGISTRY }}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/kubarr-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: kubarr-${{ matrix.image }}
+
+      - name: Load image
+        run: docker load < "kubarr-${{ matrix.image }}.tar"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Tag and push
+        run: |
+          LOCAL_IMAGE="kubarr-${{ matrix.image }}:${{ inputs.image-tag }}"
+          REPO="${{ steps.vars.outputs.image }}"
+          echo "${{ steps.meta.outputs.tags }}" | while IFS= read -r tag; do
+            docker tag "$LOCAL_IMAGE" "$tag"
+          done
+          docker push --all-tags "$REPO"
+
+      - name: Summary
+        run: |
+          echo "## ${{ matrix.image }} published" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - run: pip install mkdocs-material
+      - run: mkdocs build --strict -f docs/mkdocs.yml
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

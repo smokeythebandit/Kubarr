@@ -1,0 +1,52 @@
+pub mod app_vpn_config;
+pub mod audit_log;
+pub mod bootstrap_status;
+pub mod cloudflare_tunnel;
+pub mod invite;
+pub mod notification_channel;
+pub mod notification_event;
+pub mod notification_log;
+pub mod oauth_account;
+pub mod oauth_provider;
+pub mod role;
+pub mod role_app_permission;
+pub mod role_permission;
+pub mod server_config;
+pub mod session;
+pub mod storage_config;
+pub mod system_setting;
+pub mod two_factor_recovery_code;
+pub mod user;
+pub mod user_notification;
+pub mod user_notification_pref;
+pub mod user_preferences;
+pub mod user_role;
+pub mod vpn_provider;
+
+#[allow(unused_imports)]
+pub mod prelude {
+    pub use super::app_vpn_config::{self, Entity as AppVpnConfig};
+    pub use super::audit_log::{self, Entity as AuditLog};
+    pub use super::bootstrap_status::{self, Entity as BootstrapStatus};
+    pub use super::cloudflare_tunnel::{self, Entity as CloudflareTunnel};
+    pub use super::invite::{self, Entity as Invite};
+    pub use super::notification_channel::{self, Entity as NotificationChannel};
+    pub use super::notification_event::{self, Entity as NotificationEvent};
+    pub use super::notification_log::{self, Entity as NotificationLog};
+    pub use super::oauth_account::{self, Entity as OauthAccount};
+    pub use super::oauth_provider::{self, Entity as OauthProvider};
+    pub use super::role::{self, Entity as Role};
+    pub use super::role_app_permission::{self, Entity as RoleAppPermission};
+    pub use super::role_permission::{self, Entity as RolePermission};
+    pub use super::server_config::{self, Entity as ServerConfig};
+    pub use super::session::{self, Entity as Session};
+    pub use super::storage_config::{self, Entity as StorageConfig};
+    pub use super::system_setting::{self, Entity as SystemSetting};
+    pub use super::two_factor_recovery_code::{self, Entity as TwoFactorRecoveryCode};
+    pub use super::user::{self, Entity as User};
+    pub use super::user_notification::{self, Entity as UserNotification};
+    pub use super::user_notification_pref::{self, Entity as UserNotificationPref};
+    pub use super::user_preferences::{self, Entity as UserPreferences};
+    pub use super::user_role::{self, Entity as UserRole};
+    pub use super::vpn_provider::{self, Entity as VpnProvider};
+}

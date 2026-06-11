@@ -1,0 +1,53 @@
+# Build stage
+FROM public.ecr.aws/docker/library/node:25-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY code/frontend/package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source code
+COPY code/frontend/ ./
+
+# Build args for version info
+ARG VERSION=0.0.0
+ARG CHANNEL=dev
+ARG COMMIT_HASH=unknown
+ARG BUILD_TIME=unknown
+
+# Set build-time environment variables for Vite
+ENV VITE_VERSION=${VERSION}
+ENV VITE_CHANNEL=${CHANNEL}
+ENV VITE_COMMIT_HASH=${COMMIT_HASH}
+ENV VITE_BUILD_TIME=${BUILD_TIME}
+
+# Test stage: has Node.js + all dev dependencies for lint/build checks
+FROM builder AS test
+
+# Build the app
+FROM builder AS built
+RUN npm run build
+
+# Production stage - minimal BusyBox httpd (~1MB total)
+FROM public.ecr.aws/docker/library/busybox:1.37
+
+WORKDIR /var/www
+
+# Copy built files
+COPY --from=built /app/dist /var/www
+
+# Add non-root user
+RUN adduser -D -u 1000 kubarr
+
+# Expose port
+EXPOSE 8080
+
+# Run as non-root user
+USER kubarr
+
+# Run BusyBox httpd in foreground on unprivileged port 8080
+# SPA routing handled by the backend proxy (intercepts 404s and serves index.html)
+CMD ["httpd", "-f", "-v", "-p", "8080", "-h", "/var/www"]

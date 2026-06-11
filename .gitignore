@@ -1,0 +1,51 @@
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+NUL
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Kubernetes
+*.kubeconfig
+
+# Rust
+**/target/
+
+# Node.js
+node_modules/
+dist/
+.vite/
+
+# Claude Code
+.claude/
+
+# Auto Claude data directory
+.auto-claude/
+
+# Auto Claude generated files
+.auto-claude-security.json
+.auto-claude-status
+.claude_settings.json
+.worktrees/
+.security-key
+logs/security/
+
+# MkDocs build artifacts
+site/
+docs/hooks/__pycache__/
+
+# Playwright test results
+test-results/
