@@ -9,7 +9,7 @@ on:
 
 jobs:
   backend:
-    runs-on: kubarr-arc-runners
+    runs-on: ubuntu-latest
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v8
@@ -23,7 +23,7 @@ jobs:
         run: docker run --rm "kubarr-backend-test:${{ inputs.image-tag }}" cargo nextest run
 
   frontend:
-    runs-on: kubarr-arc-runners
+    runs-on: ubuntu-latest
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v8
@@ -64,7 +64,7 @@ jobs:
 
   e2e:
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: kubarr-arc-runners
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       KIND_CLUSTER: kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}
