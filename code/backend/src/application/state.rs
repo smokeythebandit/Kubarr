@@ -547,9 +547,6 @@ pub type SharedCatalog = Arc<RwLock<AppCatalog>>;
 /// Broadcast channel for real-time network metrics to WebSocket clients
 pub type NetworkMetricsBroadcast = broadcast::Sender<String>;
 
-/// Broadcast channel for bootstrap progress to WebSocket clients
-pub type BootstrapBroadcast = broadcast::Sender<String>;
-
 /// Shared database connection (optional until PostgreSQL is installed)
 pub type SharedDbConn = Arc<RwLock<Option<DbConn>>>;
 
@@ -566,7 +563,6 @@ pub struct AppState {
     pub endpoint_cache: EndpointCache,
     pub network_metrics_cache: NetworkMetricsCache,
     pub network_metrics_tx: NetworkMetricsBroadcast,
-    pub bootstrap_tx: BootstrapBroadcast,
 }
 
 impl AppState {
@@ -580,8 +576,6 @@ impl AppState {
     ) -> Self {
         // Create broadcast channel for network metrics (capacity of 16 messages)
         let (network_metrics_tx, _) = broadcast::channel(16);
-        // Create broadcast channel for bootstrap progress (capacity of 32 messages)
-        let (bootstrap_tx, _) = broadcast::channel(32);
 
         Self {
             db: Arc::new(RwLock::new(db)),
@@ -594,7 +588,6 @@ impl AppState {
             endpoint_cache: EndpointCache::new(60), // Cache endpoints for 60 seconds
             network_metrics_cache: NetworkMetricsCache::new(),
             network_metrics_tx,
-            bootstrap_tx,
         }
     }
 

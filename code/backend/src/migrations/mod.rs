@@ -18,7 +18,6 @@ mod m20260226_000015_create_notification_logs;
 mod m20260226_000016_create_user_notifications;
 mod m20260226_000017_create_sessions;
 mod m20260226_000018_seed_defaults;
-mod m20260226_000019_create_bootstrap;
 mod m20260226_000020_create_vpn_providers;
 mod m20260226_000021_create_app_vpn_configs;
 mod m20260226_000022_create_two_factor_recovery_codes;
@@ -49,7 +48,6 @@ impl MigratorTrait for Migrator {
             Box::new(m20260226_000016_create_user_notifications::Migration),
             Box::new(m20260226_000017_create_sessions::Migration),
             Box::new(m20260226_000018_seed_defaults::Migration),
-            Box::new(m20260226_000019_create_bootstrap::Migration),
             Box::new(m20260226_000020_create_vpn_providers::Migration),
             Box::new(m20260226_000021_create_app_vpn_configs::Migration),
             Box::new(m20260226_000022_create_two_factor_recovery_codes::Migration),

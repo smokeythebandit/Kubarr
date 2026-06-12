@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react'
-import { BrowserRouter, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
 import AppsPage from './pages/AppsPage'
 import StoragePage from './pages/StoragePage'
@@ -9,7 +9,6 @@ import NetworkingPage from './pages/NetworkingPage'
 import SecurityPage from './pages/SecurityPage'
 import SettingsPage from './pages/SettingsPage'
 import AccountPage from './pages/AccountPage'
-import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
 import NotFoundPage from './pages/NotFoundPage'
 import AppErrorPage from './pages/AppErrorPage'
@@ -18,7 +17,6 @@ import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { MonitoringProvider, useMonitoring } from './contexts/MonitoringContext'
 import { VersionFooter } from './components/VersionFooter'
 import { PageTransition } from './components/PageTransition'
-import { setupApi } from './api/setup'
 import { sessionLogout } from './api/auth'
 import { Grid3X3, HardDrive, FileText, Activity, Settings, User, LogOut, Ship, ChevronDown, Sun, Moon, Monitor, Network, Menu, X, Shield, Bell, Check, Trash2, AlertCircle, Info, AlertTriangle } from 'lucide-react'
 import { notificationsApi, Notification } from './api/notifications'
@@ -883,92 +881,17 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 function AppContent() {
   const location = useLocation()
-  const [setupRequired, setSetupRequired] = useState<boolean | null>(null)
-  const [databasePending, setDatabasePending] = useState(false)
-  const [setupCheckLoading, setSetupCheckLoading] = useState(true)
 
   const isSettingsPage = location.pathname === '/settings'
   const isAccountPage = location.pathname === '/account'
   const isLogsPage = location.pathname === '/logs'
-  const isSetupPage = location.pathname === '/setup'
   const isLoginPage = location.pathname === '/login'
-
-  // Check if setup is required on mount, with polling when database is pending
-  useEffect(() => {
-    let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-
-    const checkSetup = async () => {
-      try {
-        const { setup_required, database_pending } = await setupApi.checkRequired()
-        if (cancelled) return
-
-        if (database_pending) {
-          setDatabasePending(true)
-          setSetupRequired(false)
-          setSetupCheckLoading(false)
-          // Retry in 3 seconds
-          timer = setTimeout(checkSetup, 3000)
-        } else {
-          setDatabasePending(false)
-          setSetupRequired(setup_required)
-          setSetupCheckLoading(false)
-        }
-      } catch (err) {
-        if (cancelled) return
-        // If we can't check, assume setup is not required
-        setSetupRequired(false)
-        setSetupCheckLoading(false)
-      }
-    }
-    checkSetup()
-
-    return () => {
-      cancelled = true
-      if (timer) clearTimeout(timer)
-    }
-  }, [])
-
-  // Show loading while checking setup
-  if (setupCheckLoading) {
-    return (
-      <div className="h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white flex items-center justify-center">
-        <div className="text-xl">Loading...</div>
-      </div>
-    )
-  }
-
-  // Show waiting screen while database is coming up
-  if (databasePending) {
-    return (
-      <div className="h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-xl font-semibold mb-2">Waiting for database...</div>
-          <div className="text-sm text-gray-500 dark:text-gray-400">PostgreSQL is starting up. This page will refresh automatically.</div>
-        </div>
-      </div>
-    )
-  }
 
   // Render login page without navigation and without protection
   if (isLoginPage) {
     return (
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-      </Routes>
-    )
-  }
-
-  // Redirect to setup if required and not already on setup page
-  if (setupRequired && !isSetupPage) {
-    return <Navigate to="/setup" replace />
-  }
-
-  // Render setup page without navigation
-  if (isSetupPage) {
-    return (
-      <Routes>
-        <Route path="/setup" element={<SetupPage />} />
       </Routes>
     )
   }

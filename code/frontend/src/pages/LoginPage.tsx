@@ -62,21 +62,10 @@ export default function LoginPage() {
     return '/'
   }, [oauthParams.state])
 
-  // Check if setup is required or user is already logged in
+  // Check if user is already logged in
   useEffect(() => {
     const checkSession = async () => {
       try {
-        // First, check if setup is required via health endpoint
-        const healthResponse = await fetch('/api/system/health')
-        if (healthResponse.ok) {
-          const health = await healthResponse.json()
-          if (health.setup_required) {
-            // Redirect to setup page
-            window.location.href = '/setup'
-            return
-          }
-        }
-
         // Fetch existing accounts (if any)
         try {
           const accounts = await getAccounts()

@@ -12,19 +12,15 @@ pub mod oauth;
 pub mod proxy;
 pub mod roles;
 pub mod settings;
-pub mod setup;
 pub mod storage;
 pub mod users;
 pub mod vpn;
 
 use axum::{extract::State, middleware as axum_middleware, response::Html, Router};
-use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
 use utoipa::OpenApi;
 
 use crate::config::CONFIG;
 use crate::middleware::require_auth;
-use crate::models::prelude::*;
-use crate::models::{role, user_role};
 use crate::state::AppState;
 
 #[derive(OpenApi)]
@@ -39,21 +35,6 @@ use crate::state::AppState;
         health_check,
         health_check_detailed,
         get_version,
-        // Setup
-        setup::check_setup_required,
-        setup::get_setup_status,
-        setup::initialize_setup,
-        setup::generate_credentials,
-        setup::validate_path,
-        setup::get_storage_config,
-        setup::validate_storage,
-        setup::configure_storage,
-        setup::provision_storage,
-        setup::get_bootstrap_status,
-        setup::start_bootstrap,
-        setup::retry_bootstrap_component,
-        setup::get_server_config,
-        setup::configure_server,
         // Auth
         auth::login,
         auth::logout,
@@ -193,7 +174,6 @@ use crate::state::AppState;
     ),
     tags(
         (name = "Health", description = "Health check and version endpoints"),
-        (name = "Setup", description = "Initial setup and bootstrap endpoints"),
         (name = "Auth", description = "Authentication and session management"),
         (name = "Users", description = "User management, preferences, and 2FA"),
         (name = "Roles", description = "Role-based access control"),
@@ -225,9 +205,7 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state.clone());
 
     // Public routes (no auth required) - these already have state applied internally
-    let public_routes = Router::new()
-        .nest("/auth", auth::auth_routes(state.clone()))
-        .nest("/api/setup", setup::setup_routes(state.clone()));
+    let public_routes = Router::new().nest("/auth", auth::auth_routes(state.clone()));
 
     // Protected API routes (auth required)
     let protected_api_routes = Router::new().nest("/api", api_routes(state.clone())).layer(
@@ -284,22 +262,12 @@ async fn health_check() -> &'static str {
 
 #[utoipa::path(get, path = "/api/system/health", tag = "Health", responses((status = 200, body = serde_json::Value)))]
 async fn health_check_detailed(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
-    // Check if any user with admin role exists (setup complete)
-    let admin_exists = match state.get_db().await {
-        Ok(db) => UserRole::find()
-            .join(JoinType::InnerJoin, user_role::Relation::Role.def())
-            .filter(role::Column::Name.eq("admin"))
-            .one(&db)
-            .await
-            .map(|r| r.is_some())
-            .unwrap_or(false),
-        Err(_) => false,
-    };
+    let db_connected = state.is_db_connected().await;
 
     axum::Json(serde_json::json!({
         "status": "ok",
-        "ready": admin_exists,
-        "setup_required": !admin_exists
+        "ready": db_connected,
+        "database_connected": db_connected
     }))
 }
 

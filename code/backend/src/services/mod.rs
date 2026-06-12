@@ -1,5 +1,4 @@
 pub mod audit;
-pub mod bootstrap;
 pub mod cadvisor;
 pub mod catalog;
 pub mod chart_sync;
@@ -15,7 +14,6 @@ pub mod storage_config;
 pub mod vpn;
 
 pub use audit::*;
-pub use bootstrap::BootstrapService;
 pub use cadvisor::*;
 pub use catalog::*;
 pub use chart_sync::ChartSyncService;
