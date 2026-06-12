@@ -6,7 +6,6 @@
 //! Tests cover:
 //! - Protected endpoints reject unauthenticated requests (401)
 //! - Public endpoints allow unauthenticated access
-//! - Setup endpoints are protected after admin creation (403)
 //! - Permission-based authorization is enforced
 //!
 //! Related documentation:
@@ -21,7 +20,7 @@ use http_body_util::BodyExt;
 use tower::util::ServiceExt; // for `oneshot`
 
 mod common;
-use common::{create_test_db_with_seed, create_test_user_with_role};
+use common::create_test_db_with_seed;
 
 use kubarr::endpoints::create_router;
 use kubarr::services::audit::AuditService;
@@ -51,19 +50,6 @@ async fn create_test_state() -> AppState {
     )
 }
 
-/// Helper to create a test AppState with an admin user (setup complete)
-async fn create_test_state_with_admin() -> (AppState, String) {
-    let state = create_test_state().await;
-
-    // Create an admin user to simulate completed setup
-    let db = state.get_db().await.unwrap();
-    let admin_user =
-        create_test_user_with_role(&db, "admin", "admin@example.com", "admin_password", "admin")
-            .await;
-
-    (state, admin_user.username)
-}
-
 /// Helper to make an unauthenticated GET request
 async fn make_unauthenticated_request(state: AppState, uri: &str) -> (StatusCode, String) {
     let app = create_router(state);
@@ -72,30 +58,6 @@ async fn make_unauthenticated_request(state: AppState, uri: &str) -> (StatusCode
         .uri(uri)
         .method("GET")
         .body(Body::empty())
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
-    let status = response.status();
-
-    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes).to_string();
-
-    (status, body)
-}
-
-/// Helper to make an unauthenticated POST request
-async fn make_unauthenticated_post(
-    state: AppState,
-    uri: &str,
-    body_content: &str,
-) -> (StatusCode, String) {
-    let app = create_router(state);
-
-    let request = Request::builder()
-        .uri(uri)
-        .method("POST")
-        .header("content-type", "application/json")
-        .body(Body::from(body_content.to_string()))
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
@@ -388,14 +350,6 @@ async fn test_public_endpoints_accessible() {
         status
     );
 
-    // Setup required check (should always be accessible)
-    let (status, _) = make_unauthenticated_request(state.clone(), "/api/setup/required").await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "Setup required endpoint should be accessible"
-    );
-
     // System health (intentionally public)
     let (status, _) = make_unauthenticated_request(state, "/api/system/health").await;
     assert_eq!(
@@ -465,132 +419,6 @@ async fn test_oauth_public_endpoints_accessible() {
             status
         );
     }
-}
-
-// ============================================================================
-// Setup Endpoint Protection Tests (403 Forbidden after admin creation)
-// ============================================================================
-
-#[tokio::test]
-async fn test_setup_endpoints_accessible_before_admin_creation() {
-    let state = create_test_state().await;
-
-    // Before admin creation, setup endpoints should be accessible (no 403)
-    let endpoints = vec![
-        "/api/setup/generate-credentials",
-        "/api/setup/status",
-        "/api/setup/bootstrap/status",
-    ];
-
-    for endpoint in endpoints {
-        let (status, _) = make_unauthenticated_request(state.clone(), endpoint).await;
-
-        // Should not return 403 (setup not complete yet)
-        assert_ne!(
-            status,
-            StatusCode::FORBIDDEN,
-            "Setup endpoint {} should be accessible before admin creation (got {})",
-            endpoint,
-            status
-        );
-    }
-}
-
-#[tokio::test]
-async fn test_setup_endpoints_protected_after_admin_creation() {
-    let (state, _admin_username) = create_test_state_with_admin().await;
-
-    // After admin creation, setup endpoints should return 403 Forbidden
-    let protected_setup_endpoints = vec![
-        "/api/setup/status",
-        "/api/setup/generate-credentials",
-        "/api/setup/bootstrap/status",
-    ];
-
-    for endpoint in protected_setup_endpoints {
-        let (status, body) = make_unauthenticated_request(state.clone(), endpoint).await;
-
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "Setup endpoint {} should return 403 after admin creation (got {}). Body: {}",
-            endpoint,
-            status,
-            body
-        );
-
-        // Verify the error message indicates setup is complete (case-insensitive)
-        let body_lower = body.to_lowercase();
-        assert!(
-            body_lower.contains("setup") || body_lower.contains("forbidden"),
-            "Expected setup complete error message for {}, got: {}",
-            endpoint,
-            body
-        );
-    }
-}
-
-#[tokio::test]
-async fn test_bootstrap_status_protected_after_setup() {
-    let (state, _) = create_test_state_with_admin().await;
-
-    let (status, body) = make_unauthenticated_request(state, "/api/setup/bootstrap/status").await;
-
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "Bootstrap status endpoint should return 403 after setup (got {}). Body: {}",
-        status,
-        body
-    );
-}
-
-#[tokio::test]
-async fn test_generate_credentials_protected_after_setup() {
-    let (state, _) = create_test_state_with_admin().await;
-
-    let (status, body) =
-        make_unauthenticated_request(state, "/api/setup/generate-credentials").await;
-
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "Generate credentials endpoint should return 403 after setup (got {}). Body: {}",
-        status,
-        body
-    );
-}
-
-#[tokio::test]
-async fn test_bootstrap_retry_protected_after_setup() {
-    let (state, _) = create_test_state_with_admin().await;
-
-    // This is the HIGH priority security finding from the audit
-    let (status, body) =
-        make_unauthenticated_post(state, "/api/setup/bootstrap/retry/admin", "{}").await;
-
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "Bootstrap retry endpoint should return 403 after setup (got {}). Body: {}",
-        status,
-        body
-    );
-}
-
-#[tokio::test]
-async fn test_setup_required_always_accessible() {
-    let (state, _) = create_test_state_with_admin().await;
-
-    // /api/setup/required should ALWAYS be accessible, even after setup
-    // This is documented as intentional in FINDINGS.md
-    let (status, _) = make_unauthenticated_request(state, "/api/setup/required").await;
-
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "Setup required endpoint must remain accessible after setup"
-    );
 }
 
 // ============================================================================
@@ -678,8 +506,8 @@ async fn test_frontend_fallback_spa_routes_accessible() {
     let state = create_test_state().await;
 
     // Frontend SPA routes should be accessible without auth
-    // These serve the login page, setup page, etc.
-    let spa_routes = vec!["/", "/login", "/setup"];
+    // These serve public frontend routes such as the login page.
+    let spa_routes = vec!["/", "/login"];
 
     for route in spa_routes {
         let (status, _) = make_unauthenticated_request(state.clone(), route).await;
@@ -770,17 +598,16 @@ async fn test_oauth_link_endpoint_requires_session() {
 async fn test_auth_architecture_summary() {
     // This test serves as documentation of the auth architecture
 
-    // 1. PUBLIC ROUTES (24 total):
+    // 1. PUBLIC ROUTES:
     //    - /api/health (health check)
-    //    - /api/setup/* (11 routes, self-disabling after admin creation)
     //    - /auth/* (6 routes for session management)
     //    - /auth/oauth/authorize/:provider (OAuth initiation)
     //    - /auth/oauth/callback/:provider (OAuth callback)
     //    - /auth/oauth/link/:provider (requires inline session check)
     //    - /*path (frontend fallback - optional auth for app routes)
 
-    // 2. PROTECTED ROUTES (113 total):
-    //    - All /api/* routes (except health and setup)
+    // 2. PROTECTED ROUTES:
+    //    - All /api/* routes except public health/version endpoints
     //    - Protected by require_auth middleware
     //    - Enforced via tower middleware layer
 
@@ -793,11 +620,6 @@ async fn test_auth_architecture_summary() {
     //    - Cookie-based sessions (kubarr_session)
     //    - HttpOnly, SameSite=Lax, Secure (in production)
     //    - Multi-session support with session switching
-
-    // 5. SETUP ENDPOINT SELF-DISABLING:
-    //    - Most setup endpoints check admin_exists
-    //    - Return 403 after admin user creation
-    //    - Prevents post-setup abuse
 
     assert!(true, "Auth architecture verified by test suite");
 }

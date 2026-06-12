@@ -2,7 +2,7 @@
 //!
 //! Covers:
 //! - `GET /api/health` — always returns HTTP 200 "OK"
-//! - `GET /api/system/health` — returns JSON with `status`, `ready`, `setup_required`
+//! - `GET /api/system/health` — returns JSON with `status`, `ready`, `database_connected`
 //! - `GET /api/system/version` — returns version metadata
 
 use axum::{
@@ -14,8 +14,8 @@ use tower::util::ServiceExt;
 
 mod common;
 use common::{
-    build_test_app_state, build_test_app_state_no_db, build_test_app_state_with_db,
-    create_test_db_with_seed, create_test_user_with_role,
+    build_test_app_state, build_test_app_state_with_db, create_test_db_with_seed,
+    create_test_user_with_role,
 };
 
 use kubarr::endpoints::create_router;
@@ -109,8 +109,7 @@ async fn test_system_health_returns_status_ok() {
 }
 
 #[tokio::test]
-async fn test_system_health_setup_required_when_no_admin() {
-    // Fresh seeded DB has no admin user — setup is required
+async fn test_system_health_ready_when_database_connected_without_admin() {
     let state = build_test_app_state().await;
     let app = create_router(state);
 
@@ -128,21 +127,15 @@ async fn test_system_health_setup_required_when_no_admin() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(
-        json["setup_required"], true,
-        "setup_required must be true when no admin user exists"
-    );
-    assert_eq!(
-        json["ready"], false,
-        "ready must be false when setup is required"
-    );
+    assert_eq!(json["database_connected"], true);
+    assert_eq!(json["ready"], true);
 }
 
 #[tokio::test]
-async fn test_system_health_not_setup_required_when_admin_exists() {
+async fn test_system_health_ready_when_admin_exists() {
     let db = create_test_db_with_seed().await;
 
-    // Create an admin user to mark setup as complete
+    // Create an admin user; health readiness is based on DB connectivity.
     create_test_user_with_role(&db, "admin", "admin@example.com", "password", "admin").await;
 
     let state = build_test_app_state_with_db(db).await;
@@ -162,14 +155,8 @@ async fn test_system_health_not_setup_required_when_admin_exists() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(
-        json["setup_required"], false,
-        "setup_required must be false when admin user exists"
-    );
-    assert_eq!(
-        json["ready"], true,
-        "ready must be true when admin user exists"
-    );
+    assert_eq!(json["database_connected"], true);
+    assert_eq!(json["ready"], true);
 }
 
 // ============================================================================
@@ -323,12 +310,12 @@ async fn test_swagger_ui_returns_html() {
 }
 
 // ============================================================================
-// GET /api/system/health — Err(_) branch when db is unavailable (mod.rs line 292)
+// GET /api/system/health without a DB handle.
 // ============================================================================
 
 #[tokio::test]
-async fn test_system_health_no_db_returns_setup_required() {
-    let state = build_test_app_state_no_db().await;
+async fn test_system_health_no_db_reports_not_ready() {
+    let state = common::build_test_app_state_no_db().await;
     let app = create_router(state);
 
     let response = app
@@ -345,19 +332,13 @@ async fn test_system_health_no_db_returns_setup_required() {
     assert_eq!(
         response.status(),
         StatusCode::OK,
-        "GET /api/system/health must return 200 even without DB"
+        "GET /api/system/health must return 200 even without DB handle"
     );
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&body)).unwrap();
 
-    assert_eq!(json["status"], "ok", "status must be 'ok' even without DB");
-    assert_eq!(
-        json["ready"], false,
-        "ready must be false when no DB (no admin)"
-    );
-    assert_eq!(
-        json["setup_required"], true,
-        "setup_required must be true when no DB"
-    );
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["ready"], false);
+    assert_eq!(json["database_connected"], false);
 }

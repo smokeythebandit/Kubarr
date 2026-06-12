@@ -16,11 +16,6 @@ use kubarr::endpoints::roles::{
     UpdateRoleRequest,
 };
 
-use kubarr::endpoints::setup::{
-    BootstrapStartResponse, GeneratedCredentialsResponse, ServerConfigRequest,
-    ServerConfigResponse, SetupRequest, SetupRequiredResponse, SetupStatusResponse,
-};
-
 use kubarr::endpoints::apps::NamespaceQuery;
 
 use kubarr::endpoints::audit::{ClearLogsRequest, ClearLogsResponse};
@@ -261,81 +256,6 @@ fn role_with_apps_response_ser() {
     let json = serde_json::to_string(&r).expect("ser");
     assert!(json.contains("\"name\":\"admin\""));
     assert!(json.contains("sonarr"));
-}
-
-// ============================================================================
-// setup.rs structs
-// ============================================================================
-
-#[test]
-fn setup_required_response_ser() {
-    let r = SetupRequiredResponse {
-        setup_required: true,
-        database_pending: false,
-    };
-    let json = serde_json::to_string(&r).expect("ser");
-    assert!(json.contains("\"setup_required\":true"));
-}
-
-#[test]
-fn setup_status_response_ser() {
-    let r = SetupStatusResponse {
-        setup_required: false,
-        bootstrap_complete: true,
-        server_configured: true,
-        admin_user_exists: true,
-        storage_configured: false,
-    };
-    let json = serde_json::to_string(&r).expect("ser");
-    assert!(json.contains("\"bootstrap_complete\":true"));
-}
-
-#[test]
-fn setup_request_deser() {
-    let json =
-        r#"{"admin_username":"admin","admin_email":"admin@example.com","admin_password":"pass"}"#;
-    let r: SetupRequest = serde_json::from_str(json).expect("deser");
-    assert_eq!(r.admin_username, "admin");
-}
-
-#[test]
-fn generated_credentials_response_ser() {
-    let r = GeneratedCredentialsResponse {
-        admin_username: "admin".to_string(),
-        admin_email: "admin@example.com".to_string(),
-        admin_password: "random_pass".to_string(),
-    };
-    let json = serde_json::to_string(&r).expect("ser");
-    assert!(json.contains("\"admin_username\":\"admin\""));
-}
-
-#[test]
-fn bootstrap_start_response_ser() {
-    let r = BootstrapStartResponse {
-        message: "Bootstrap started".to_string(),
-        started: true,
-    };
-    let json = serde_json::to_string(&r).expect("ser");
-    assert!(json.contains("\"started\":true"));
-}
-
-#[test]
-fn server_config_request_deser() {
-    let r: ServerConfigRequest =
-        serde_json::from_str(r#"{"name":"myserver","storage_path":"/data"}"#).expect("deser");
-    assert_eq!(r.name, "myserver");
-    assert_eq!(r.storage_path.as_deref(), Some("/data"));
-}
-
-#[test]
-fn server_config_response_ser() {
-    let r = ServerConfigResponse {
-        name: "myserver".to_string(),
-        storage_path: "/data".to_string(),
-        nfs_server: None,
-    };
-    let json = serde_json::to_string(&r).expect("ser");
-    assert!(json.contains("\"name\":\"myserver\""));
 }
 
 // ============================================================================

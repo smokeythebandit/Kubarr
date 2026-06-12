@@ -49,7 +49,7 @@ opts.max_connections(10)
 | Auth & Users | `user`, `session`, `role`, `user_role`, `role_permission`, `role_app_permission`, `invite`, `pending_2fa_challenge`, `user_preferences` |
 | OAuth | `oauth_account`, `oauth_provider` |
 | Notifications | `notification_channel`, `notification_event`, `notification_log`, `user_notification`, `user_notification_pref` |
-| System | `system_setting`, `server_config`, `bootstrap_status`, `audit_log` |
+| System | `system_setting`, `server_config`, `audit_log` |
 | VPN | `vpn_provider`, `app_vpn_config` |
 
 All models use standard SeaORM patterns: `DeriveEntityModel` with `Serialize`/`Deserialize`, `i64` primary keys (PostgreSQL `bigint`), and `DateTimeUtc` timestamps.
@@ -194,7 +194,7 @@ Used for dynamic configuration (storage path, OAuth2 settings, JWT keys) without
 
 ### Operational Complexity
 
-1. **CNPG dependency** - Requires installing and managing the CNPG operator in the cluster before Kubarr can be deployed. This adds a prerequisite step that complicates initial setup for homelab users.
+1. **CNPG dependency** - Requires installing and managing the CNPG operator in the cluster before Kubarr can be deployed. This adds a prerequisite step that complicates installation for homelab users.
 2. **Backup configuration** - CNPG backups require separate configuration (S3-compatible storage, scheduled backups, retention policies). Without this, there is no automated backup - a risk for homelab users who may not configure it.
 3. **Resource footprint** - CNPG operator pod + PostgreSQL pod(s) consume memory (~256MB+ for PostgreSQL, ~128MB for the operator) and CPU beyond what the application itself needs. On constrained homelab hardware (e.g., Raspberry Pi, mini PC), this overhead is significant.
 4. **Port forwarding fragility** - Development workflow requires manual port-forward restart after every deployment, adding friction to the development cycle.

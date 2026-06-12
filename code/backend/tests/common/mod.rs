@@ -23,8 +23,7 @@ use kubarr::state::{AppState, SharedCatalog, SharedK8sClient};
 /// Use this when you need direct control over the database (e.g., to seed
 /// specific users before constructing the state). Also initialises the
 /// `NotificationService` and `AuditService` internal DB connections so that
-/// their methods (e.g. `get_unread_count`, `log`) work in integration tests —
-/// mirroring what the production bootstrapper does.
+/// their methods (e.g. `get_unread_count`, `log`) work in integration tests.
 pub async fn build_test_app_state_with_db(db: DatabaseConnection) -> AppState {
     let k8s_client: SharedK8sClient = Arc::new(RwLock::new(None));
     let catalog: SharedCatalog = Arc::new(RwLock::new(AppCatalog::default()));
@@ -32,7 +31,7 @@ pub async fn build_test_app_state_with_db(db: DatabaseConnection) -> AppState {
     let audit = AuditService::new();
     let notification = NotificationService::new();
 
-    // Mirror what the bootstrapper does: give both services their own DB handle.
+    // Give both services their own DB handle, matching production runtime setup.
     audit.set_db(db.clone()).await;
     notification.set_db(db.clone()).await;
 
@@ -54,8 +53,7 @@ pub async fn build_test_app_state() -> AppState {
 
 /// Build a test AppState with NO database connection (db = None).
 ///
-/// Use this to test code paths that execute when the database is unavailable,
-/// such as `admin_user_exists` returning `Ok(false)` on line 85 of setup.rs.
+/// Use this to test code paths that execute when the database handle is unavailable.
 pub async fn build_test_app_state_no_db() -> AppState {
     let k8s_client: SharedK8sClient = Arc::new(RwLock::new(None));
     let catalog: SharedCatalog = Arc::new(RwLock::new(AppCatalog::default()));

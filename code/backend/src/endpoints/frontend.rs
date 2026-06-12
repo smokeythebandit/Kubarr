@@ -37,7 +37,6 @@ const RESERVED_PATHS: &[&str] = &[
     "assets",
     "favicon.svg",
     "login",
-    "setup",
     "app-error",
 ];
 
@@ -633,11 +632,6 @@ mod tests {
     #[test]
     fn test_extract_app_name_login_is_reserved() {
         assert_eq!(extract_app_name("/login"), None);
-    }
-
-    #[test]
-    fn test_extract_app_name_setup_is_reserved() {
-        assert_eq!(extract_app_name("/setup"), None);
     }
 
     #[test]

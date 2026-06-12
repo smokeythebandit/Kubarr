@@ -316,7 +316,6 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
     let expected_tables = [
         "app_vpn_configs",
         "audit_logs",
-        "bootstrap_status",
         "invites",
         "notification_channels",
         "notification_events",

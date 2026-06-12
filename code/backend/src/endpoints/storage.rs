@@ -106,9 +106,7 @@ async fn get_storage_path(db: &DbConn) -> Result<PathBuf> {
     }
 
     // Storage not configured at all
-    Err(AppError::Internal(
-        "Storage not configured. Please complete initial setup.".to_string(),
-    ))
+    Err(AppError::Internal("Storage is not configured.".to_string()))
 }
 
 /// Validate and resolve a requested path to prevent directory traversal

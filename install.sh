@@ -260,8 +260,7 @@ get_credentials() {
     # Wait for backend pod to be ready
     kubectl wait --for=condition=ready pod -l app=kubarr-backend -n "$KUBARR_NAMESPACE" --timeout=60s &>/dev/null || true
 
-    # Note: This depends on how Kubarr handles initial setup
-    print_info "Default credentials will be shown on first login"
+    print_info "Credentials are configured by the bootstrap component"
     print_warning "Make sure to change the default password after first login!"
 }
 
