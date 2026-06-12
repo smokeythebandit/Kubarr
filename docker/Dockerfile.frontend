@@ -4,10 +4,10 @@ FROM public.ecr.aws/docker/library/node:25-alpine AS builder
 WORKDIR /app
 
 # Copy package files
-COPY code/frontend/package*.json ./
+COPY code/frontend/package.json code/frontend/pnpm-lock.yaml code/frontend/.npmrc ./
 
 # Install dependencies
-RUN npm ci
+RUN npm install -g pnpm@10.34.3 --ignore-scripts && pnpm install --frozen-lockfile --ignore-scripts
 
 # Copy source code
 COPY code/frontend/ ./
@@ -29,7 +29,7 @@ FROM builder AS test
 
 # Build the app
 FROM builder AS built
-RUN npm run build
+RUN pnpm run build
 
 # Production stage - minimal BusyBox httpd (~1MB total)
 FROM public.ecr.aws/docker/library/busybox:1.37

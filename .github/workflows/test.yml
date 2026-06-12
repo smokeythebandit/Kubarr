@@ -34,10 +34,10 @@ jobs:
         run: docker load < kubarr-frontend-test.tar
 
       - name: Unit tests
-        run: docker run --rm "kubarr-frontend-test:${{ inputs.image-tag }}" npm test
+        run: docker run --rm "kubarr-frontend-test:${{ inputs.image-tag }}" pnpm test
 
       - name: Build
-        run: docker run --rm "kubarr-frontend-test:${{ inputs.image-tag }}" npm run build
+        run: docker run --rm "kubarr-frontend-test:${{ inputs.image-tag }}" pnpm run build
 
   coverage:
     name: backend / coverage
@@ -96,17 +96,19 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: code/frontend/package-lock.json
+          node-version: '25'
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.34.3
 
       - name: Install dependencies
         working-directory: code/frontend
-        run: npm ci
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Install Playwright
         working-directory: code/frontend
-        run: npx playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium
 
       - name: Download backend image
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -282,7 +284,7 @@ jobs:
 
       - name: Playwright
         working-directory: code/frontend
-        run: npx playwright test
+        run: pnpm exec playwright test
         env:
           BASE_URL: http://localhost:18000
           CI: true

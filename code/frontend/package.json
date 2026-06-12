@@ -2,6 +2,11 @@
   "name": "kubarr",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@10.34.3",
+  "engines": {
+    "node": ">=22.12.0",
+    "pnpm": ">=10.34.3"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -53,8 +58,10 @@
     "vite": "^8.0.16",
     "vitest": "^4.1.8"
   },
-  "overrides": {
-    "flatted": "^3.4.2",
-    "lodash": "^4.18.1"
+  "pnpm": {
+    "overrides": {
+      "flatted": "^3.4.2",
+      "lodash": "^4.18.1"
+    }
   }
 }
