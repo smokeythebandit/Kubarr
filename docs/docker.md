@@ -10,7 +10,7 @@ A multi-stage build that produces a statically-linked Rust binary on Alpine Linu
 
 | Stage | Base | Purpose |
 |---|---|---|
-| `rust-builder` | `rust:alpine` | Installs musl/OpenSSL and compiles Rust dependencies (cached separately from application code) |
+| `rust-builder` | `rust:1.92-alpine` | Installs musl/OpenSSL and compiles Rust dependencies (cached separately from application code) |
 | `test` | extends `rust-builder` | Adds clippy and rustfmt, compiles in dev profile for CI lint and test jobs |
 | `builder` | extends `rust-builder` | Builds the final `kubarr` binary with the chosen profile |
 | `asset-builder` | `alpine:3.23` | Downloads the Helm CLI |
@@ -48,7 +48,7 @@ A two-stage build that compiles the Vite/React SPA and serves it with BusyBox ht
 
 | Stage | Base | Purpose |
 |---|---|---|
-| `builder` | `node:25-alpine` | Installs npm dependencies and holds the source |
+| `builder` | `node:26-alpine` | Installs pnpm dependencies and holds the source |
 | `test` | extends `builder` | Used by CI for lint and build checks |
 | `built` | extends `builder` | Runs `npm run build` to produce the static bundle |
 | *(final)* | `busybox:1.37` | Serves `/var/www` with BusyBox httpd (~1 MB) |
