@@ -5,7 +5,7 @@ This guide covers the development workflow for contributing to Kubarr.
 ## Prerequisites
 
 - **Backend**: Rust 1.83+, Cargo
-- **Frontend**: Node.js 20+, npm
+- **Frontend**: Node.js 26+, pnpm
 - **Tools**: Docker, kubectl, Kind (for local testing)
 - **Git**: For version control
 
@@ -18,21 +18,7 @@ git clone https://github.com/smokeythebandit/Kubarr.git
 cd Kubarr
 ```
 
-### 2. Install Git Hooks
-
-**IMPORTANT**: Run this after cloning to set up pre-commit checks:
-
-```bash
-./scripts/install-hooks.sh
-```
-
-This installs a pre-commit hook that automatically runs:
-- Rust formatting checks (`cargo fmt`)
-- Clippy lint checks
-- TypeScript compilation
-- ESLint on changed files
-
-### 3. Set Up Development Environment
+### 2. Set Up Development Environment
 
 ```bash
 # Backend setup
@@ -42,8 +28,8 @@ cargo test
 
 # Frontend setup
 cd ../frontend
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 ## Development Workflow
@@ -63,11 +49,7 @@ npm run dev
    git add .
    git commit -m "feat: add your feature"
 
-   # Pre-commit hooks will run automatically:
-   # ✅ Checks Rust formatting
-   # ✅ Runs clippy
-   # ✅ Checks TypeScript
-   # ✅ Runs ESLint
+    # CI will run formatting, linting, type checks, and tests.
    ```
 
 3. **Push and create PR:**
@@ -81,47 +63,6 @@ npm run dev
    # After CI passes:
    gh pr merge <PR#> --squash --delete-branch
    ```
-
-## Pre-Commit Hooks
-
-### What Gets Checked
-
-The pre-commit hook runs different checks based on which files changed:
-
-**Backend files** (`code/backend/**`):
-- `cargo fmt --check` - Ensures code is formatted
-- `cargo clippy -- -D warnings` - Catches common mistakes and style issues
-
-**Frontend files** (`code/frontend/**`):
-- `tsc --noEmit` - Checks TypeScript compilation
-- `eslint` - Lints changed files (with `--max-warnings 0`)
-
-### If Checks Fail
-
-The commit will be blocked with helpful error messages:
-
-```bash
-❌ Pre-commit checks failed!
-
-📦 Backend files changed, running checks...
-  ❌ Rust formatting check failed!
-  💡 Run: cd code/backend && cargo fmt
-
-To skip these checks (not recommended), use:
-  git commit --no-verify
-```
-
-**Fix the issues** shown in the output, then try committing again.
-
-### Skipping Hooks (Not Recommended)
-
-Only skip hooks if absolutely necessary (e.g., WIP commits):
-
-```bash
-git commit --no-verify -m "WIP: work in progress"
-```
-
-**Note**: CI will still run these checks, so you'll need to fix them eventually.
 
 ## Code Style
 
@@ -181,9 +122,9 @@ cargo test --test integration_tests
 
 ```bash
 cd code/frontend
-npm test                # Run unit tests
-npm run test:watch      # Watch mode
-npm run test:coverage   # With coverage
+pnpm test                # Run unit tests
+pnpm test:watch          # Watch mode
+pnpm test:coverage       # With coverage
 ```
 
 ### E2E Tests (Playwright)
@@ -209,7 +150,7 @@ cargo clippy        # Run linter
 **Frontend:**
 ```bash
 cd code/frontend
-npm run lint        # Run ESLint
+pnpm lint           # Run ESLint
 npx tsc --noEmit    # Check TypeScript
 ```
 
@@ -227,21 +168,11 @@ See [versioning.md](versioning.md) for details on version management and release
 
 Quick version bump:
 ```bash
-./scripts/version-bump.sh patch --tag
+git tag -a v0.1.1 -m "Release 0.1.1"
 git push && git push origin v0.1.1
 ```
 
 ## Troubleshooting
-
-### Pre-commit Hook Not Running
-
-```bash
-# Reinstall hooks
-./scripts/install-hooks.sh
-
-# Verify hook is executable
-ls -la .git/hooks/pre-commit
-```
 
 ### Clippy Warnings
 
@@ -255,7 +186,7 @@ cargo clippy --fix --allow-dirty
 
 ```bash
 cd code/frontend
-npm run lint -- --fix  # Auto-fix what's possible
+pnpm lint -- --fix  # Auto-fix what's possible
 ```
 
 ### TypeScript Errors

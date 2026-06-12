@@ -67,33 +67,7 @@ Kubarr is built specifically for managing media server infrastructure on Kuberne
 
 ## Quick Start
 
-### Automated Installation (Recommended)
-
-Install Kubarr with k3s (lightweight Kubernetes) in one command:
-
-```bash
-curl -sfL https://raw.githubusercontent.com/smokeythebandit/Kubarr/main/install.sh | sh -
-```
-
-This will:
-- Install k3s if not already present (skipped if `KUBECONFIG` points to an existing cluster)
-- Deploy Kubarr via Helm with NodePort access
-- Print the URL where Kubarr is accessible — no extra steps required
-
-Kubarr will be available at `http://<node-ip>:30080` immediately after the script completes.
-
-**System Requirements:** Linux with 2GB+ RAM recommended. macOS users must set `KUBECONFIG` to an existing cluster first (k3s is Linux-only).
-
-**Existing cluster:** If you already have a Kubernetes cluster, set `KUBECONFIG` before running and k3s installation will be skipped automatically:
-
-```bash
-export KUBECONFIG=/path/to/your/kubeconfig
-curl -sfL https://raw.githubusercontent.com/smokeythebandit/Kubarr/main/install.sh | sh -
-```
-
-### Manual Installation
-
-**Option 1: Existing Kubernetes Cluster**
+### Existing Kubernetes Cluster
 
 If you already have a Kubernetes cluster:
 
@@ -117,20 +91,23 @@ kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP
 
 Open `http://<node-ip>:30080` in your browser.
 
-**Option 2: Local Development**
+### Local Development
 
 ```bash
 # Clone the repository
 git clone https://github.com/smokeythebandit/Kubarr.git
 cd Kubarr
 
-# Create Kind cluster
-./scripts/local-k8s-setup.sh
+# Build and run the backend
+cd code/backend
+cargo run
 
-# Deploy Kubarr
-./scripts/deploy.sh
+# In another shell, build and run the frontend
+cd code/frontend
+pnpm install
+pnpm dev
 
-# Access at http://localhost:8080
+# Access the frontend at the Vite dev server URL
 ```
 
 See [Installation Guide](./docs/installation.md) for detailed setup instructions and advanced configuration.
