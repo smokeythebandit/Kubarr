@@ -34,6 +34,7 @@ const MANAGED_NFS_NAMESPACE: &str = "kubarr-storage";
 const MANAGED_NFS_NAME: &str = "kubarr-managed-nfs";
 const MANAGED_NFS_EXPORT_PATH: &str = "/";
 const MANAGED_NFS_RELEASE: &str = "managed-nfs";
+const BOOTSTRAP_RELEASE_NAMESPACE: &str = "default";
 const MANAGED_NFS_CHART_PATH: &str = "/app/charts/managed-nfs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -554,9 +555,11 @@ async fn ensure_static_media_pvc(
     Ok(())
 }
 
-async fn ensure_managed_nfs_server(k8s: &K8sClient, config: &PersistedStorageConfig) -> Result<()> {
+async fn ensure_managed_nfs_server(
+    _k8s: &K8sClient,
+    config: &PersistedStorageConfig,
+) -> Result<()> {
     let managed: ManagedNfsConfig = serde_json::from_value(config.config_json.clone())?;
-    ensure_namespace(k8s, MANAGED_NFS_NAMESPACE).await?;
 
     let mut args = vec![
         "upgrade".to_string(),
@@ -564,11 +567,14 @@ async fn ensure_managed_nfs_server(k8s: &K8sClient, config: &PersistedStorageCon
         MANAGED_NFS_RELEASE.to_string(),
         MANAGED_NFS_CHART_PATH.to_string(),
         "-n".to_string(),
-        MANAGED_NFS_NAMESPACE.to_string(),
-        "--create-namespace".to_string(),
+        BOOTSTRAP_RELEASE_NAMESPACE.to_string(),
         "--wait".to_string(),
         "--timeout".to_string(),
         "5m".to_string(),
+        "--set".to_string(),
+        format!("namespace.name={}", MANAGED_NFS_NAMESPACE),
+        "--set".to_string(),
+        "namespace.create=true".to_string(),
         "--set".to_string(),
         format!("persistence.size={}", managed.size),
     ];
