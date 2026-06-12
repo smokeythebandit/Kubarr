@@ -26,7 +26,7 @@ No YAML wrangling. No Helm headaches. Just pick the apps you want, click deploy,
 ## Get Started
 
 ```bash
-helm install kubarr oci://ghcr.io/smokeythebandit/charts/kubarr -n kubarr --create-namespace
+helm install kubarr oci://ghcr.io/smokeythebandit/kubarr-charts/kubarr -n kubarr --create-namespace
 ```
 
 That's it. Once the pods are ready, open the dashboard and log in with the credentials from the install output.

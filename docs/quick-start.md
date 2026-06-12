@@ -11,7 +11,7 @@ Get Kubarr running on your cluster in a few minutes.
 ## Install Kubarr
 
 ```bash
-helm install kubarr oci://ghcr.io/smokeythebandit/charts/kubarr \
+helm install kubarr oci://ghcr.io/smokeythebandit/kubarr-charts/kubarr \
   -n kubarr --create-namespace
 ```
 

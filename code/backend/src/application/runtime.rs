@@ -98,7 +98,7 @@ async fn init_database(
     let database_url = {
         let k8s_guard = k8s_client.read().await;
         if let Some(ref k8s) = *k8s_guard {
-            match k8s.get_database_url("postgresql").await {
+            match k8s.get_database_url("kubarr-database").await {
                 Ok(url) => Some(url),
                 Err(_) => {
                     tracing::info!("No database secret found, falling back to configured URL");

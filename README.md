@@ -76,7 +76,7 @@ If you already have a Kubernetes cluster:
 kubectl create namespace kubarr
 
 # Install from OCI registry with NodePort access
-helm install kubarr oci://ghcr.io/smokeythebandit/kubarr/charts/kubarr -n kubarr \
+helm install kubarr oci://ghcr.io/smokeythebandit/kubarr-charts/kubarr -n kubarr \
   --set frontend.service.type=NodePort \
   --set frontend.service.nodePort=30080 \
   --set backend.service.type=NodePort \
