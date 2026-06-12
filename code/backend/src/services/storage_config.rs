@@ -497,27 +497,44 @@ async fn ensure_nfs_media_pvc(
     let capacity = rwx_capacity();
 
     let pvs: Api<PersistentVolume> = Api::all(k8s.client().clone());
-    if pvs.get(&pv_name).await.is_err() {
-        let pv = PersistentVolume {
-            metadata: ObjectMeta {
-                name: Some(pv_name.clone()),
-                ..Default::default()
-            },
-            spec: Some(PersistentVolumeSpec {
-                capacity: Some(capacity.clone()),
-                access_modes: Some(vec!["ReadWriteMany".to_string()]),
-                persistent_volume_reclaim_policy: Some("Retain".to_string()),
-                storage_class_name: Some("".to_string()),
-                nfs: Some(NFSVolumeSource {
-                    server: nfs_server.to_string(),
-                    path: nfs_path.to_string(),
-                    read_only: Some(false),
+    match pvs.get(&pv_name).await {
+        Ok(mut existing) => {
+            if existing
+                .status
+                .as_ref()
+                .and_then(|status| status.phase.as_deref())
+                == Some("Released")
+            {
+                if let Some(spec) = existing.spec.as_mut() {
+                    spec.claim_ref = None;
+                }
+                pvs.replace(&pv_name, &PostParams::default(), &existing)
+                    .await?;
+            }
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            let pv = PersistentVolume {
+                metadata: ObjectMeta {
+                    name: Some(pv_name.clone()),
+                    ..Default::default()
+                },
+                spec: Some(PersistentVolumeSpec {
+                    capacity: Some(capacity.clone()),
+                    access_modes: Some(vec!["ReadWriteMany".to_string()]),
+                    persistent_volume_reclaim_policy: Some("Retain".to_string()),
+                    storage_class_name: Some("".to_string()),
+                    nfs: Some(NFSVolumeSource {
+                        server: nfs_server.to_string(),
+                        path: nfs_path.to_string(),
+                        read_only: Some(false),
+                    }),
+                    ..Default::default()
                 }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        pvs.create(&PostParams::default(), &pv).await?;
+            };
+            pvs.create(&PostParams::default(), &pv).await?;
+        }
+        Err(e) => return Err(AppError::Kubernetes(e)),
     }
 
     ensure_static_media_pvc(k8s, namespace, &pv_name, capacity).await
