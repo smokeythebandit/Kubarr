@@ -119,6 +119,7 @@ impl ChartSyncService {
     fn pull_chart(&self, name: &str) -> anyhow::Result<()> {
         let chart_ref = format!("{}/{}", CONFIG.charts.registry, name);
         let dest = CONFIG.charts.dir.to_str().unwrap_or("/app/charts");
+        std::fs::create_dir_all(dest)?;
 
         let output = Command::new("helm")
             .args(["pull", &chart_ref, "--untar", "--destination", dest])

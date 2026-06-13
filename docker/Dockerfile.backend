@@ -75,24 +75,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --profile "${PROFILE}" && \
     cp "target/${PROFILE_DIR}/kubarr" /kubarr
 
-# Stage 2: Download Helm and prepare assets
+# Stage 2: Copy Helm binary
 FROM alpine/helm:3.21.0 AS helm-source
-
-FROM public.ecr.aws/docker/library/alpine:3.23 AS asset-builder
-
-SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
-COPY --from=helm-source /usr/bin/helm /helm
-
-# Download managed charts from kubarr-charts
-RUN apk add --no-cache curl tar && \
-    mkdir -p /charts /tmp/kubarr-charts && \
-    curl -fsSL --retry 3 --retry-delay 5 -o /tmp/kubarr-charts.tar.gz "https://github.com/smokeythebandit/kubarr-charts/archive/refs/heads/main.tar.gz" && \
-    tar xz -f /tmp/kubarr-charts.tar.gz -C /tmp/kubarr-charts --strip-components=1 && \
-    rm /tmp/kubarr-charts.tar.gz && \
-    mkdir -p /charts/system && \
-    cp -r /tmp/kubarr-charts/system/cloudflared /charts/system/ && \
-    cp -r /tmp/kubarr-charts/system/managed-nfs /charts/system/ && \
-    rm -rf /tmp/kubarr-charts
 
 # Stage 3: Final Alpine image (includes DNS resolution)
 FROM public.ecr.aws/docker/library/alpine:3.23
@@ -111,10 +95,7 @@ WORKDIR /app
 COPY --from=builder /kubarr /app/kubarr
 
 # Copy Helm binary (statically linked)
-COPY --from=asset-builder /helm /usr/local/bin/helm
-
-# Copy managed charts (downloaded from kubarr-charts in asset-builder)
-COPY --from=asset-builder /charts /app/charts
+COPY --from=helm-source /usr/bin/helm /usr/local/bin/helm
 
 # Add non-root user and set ownership
 RUN adduser -D -u 1000 -g kubarr kubarr && \

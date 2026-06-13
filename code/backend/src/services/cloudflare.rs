@@ -33,7 +33,7 @@ use crate::state::DbConn;
 const CLOUDFLARED_NAMESPACE: &str = "cloudflared";
 const CLOUDFLARED_SECRET_NAME: &str = "cloudflared-tunnel-token";
 const CLOUDFLARED_RELEASE_NAME: &str = "cloudflared";
-const CLOUDFLARED_CHART_PATH: &str = "/app/charts/system/cloudflared";
+const CLOUDFLARED_CHART_REF: &str = "oci://ghcr.io/smokeythebandit/kubarr-charts/cloudflared";
 const CF_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 
 // Shared reqwest client for Cloudflare API requests
@@ -515,7 +515,7 @@ pub async fn save_config(
                 "upgrade",
                 "--install",
                 CLOUDFLARED_RELEASE_NAME,
-                CLOUDFLARED_CHART_PATH,
+                CLOUDFLARED_CHART_REF,
                 "-n",
                 CLOUDFLARED_NAMESPACE,
                 "--create-namespace",

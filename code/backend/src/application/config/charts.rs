@@ -14,7 +14,7 @@ impl ChartsConfig {
     pub fn from_env() -> Self {
         Self {
             dir: PathBuf::from(
-                env::var("KUBARR_CHARTS_DIR").unwrap_or_else(|_| "/app/charts".to_string()),
+                env::var("KUBARR_CHARTS_DIR").unwrap_or_else(|_| "/tmp/charts".to_string()),
             ),
             repo: env::var("KUBARR_CHARTS_REPO")
                 .unwrap_or_else(|_| "smokeythebandit/kubarr-charts".to_string()),

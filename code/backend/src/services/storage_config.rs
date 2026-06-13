@@ -35,7 +35,7 @@ const MANAGED_NFS_NAME: &str = "kubarr-managed-nfs";
 const MANAGED_NFS_EXPORT_PATH: &str = "/";
 const MANAGED_NFS_RELEASE: &str = "managed-nfs";
 const BOOTSTRAP_RELEASE_NAMESPACE: &str = "default";
-const MANAGED_NFS_CHART_PATH: &str = "/app/charts/system/managed-nfs";
+const MANAGED_NFS_CHART_REF: &str = "oci://ghcr.io/smokeythebandit/kubarr-charts/managed-nfs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -582,7 +582,7 @@ async fn ensure_managed_nfs_server(
         "upgrade".to_string(),
         "--install".to_string(),
         MANAGED_NFS_RELEASE.to_string(),
-        MANAGED_NFS_CHART_PATH.to_string(),
+        MANAGED_NFS_CHART_REF.to_string(),
         "-n".to_string(),
         BOOTSTRAP_RELEASE_NAMESPACE.to_string(),
         "--wait".to_string(),
