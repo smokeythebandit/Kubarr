@@ -89,7 +89,9 @@ RUN apk add --no-cache curl tar && \
     curl -fsSL --retry 3 --retry-delay 5 -o /tmp/kubarr-charts.tar.gz "https://github.com/smokeythebandit/kubarr-charts/archive/refs/heads/main.tar.gz" && \
     tar xz -f /tmp/kubarr-charts.tar.gz -C /tmp/kubarr-charts --strip-components=1 && \
     rm /tmp/kubarr-charts.tar.gz && \
-    cp -r /tmp/kubarr-charts/cloudflared /charts/ && \
+    mkdir -p /charts/system && \
+    cp -r /tmp/kubarr-charts/system/cloudflared /charts/system/ && \
+    cp -r /tmp/kubarr-charts/system/managed-nfs /charts/system/ && \
     rm -rf /tmp/kubarr-charts
 
 # Stage 3: Final Alpine image (includes DNS resolution)

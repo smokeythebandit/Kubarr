@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use chrono::Utc;
+use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::{
     Container, NFSVolumeSource, Namespace, PersistentVolume, PersistentVolumeClaim,
     PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PersistentVolumeSpec, Pod,
@@ -9,7 +10,6 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use k8s_openapi::ByteString;
 use kube::api::{Api, DeleteParams, ListParams, LogParams, PostParams};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,7 @@ const MANAGED_NFS_NAME: &str = "kubarr-managed-nfs";
 const MANAGED_NFS_EXPORT_PATH: &str = "/";
 const MANAGED_NFS_RELEASE: &str = "managed-nfs";
 const BOOTSTRAP_RELEASE_NAMESPACE: &str = "default";
-const MANAGED_NFS_CHART_PATH: &str = "/app/charts/managed-nfs";
+const MANAGED_NFS_CHART_PATH: &str = "/app/charts/system/managed-nfs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]

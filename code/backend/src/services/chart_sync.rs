@@ -3,6 +3,7 @@
 //! Discovers charts from GitHub and pulls them from an OCI registry
 //! so the catalog always reflects the latest published versions.
 
+use std::collections::VecDeque;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,20 +71,45 @@ impl ChartSyncService {
 
     /// Query the GitHub Contents API to discover which chart directories exist.
     async fn discover_charts(&self) -> anyhow::Result<Vec<String>> {
-        let url = format!(
-            "https://api.github.com/repos/{}/contents/?ref={}",
-            CONFIG.charts.repo, CONFIG.charts.git_ref,
-        );
+        let mut names = Vec::new();
+        let mut dirs = VecDeque::from([String::new()]);
 
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        while let Some(dir) = dirs.pop_front() {
+            let url = if dir.is_empty() {
+                format!(
+                    "https://api.github.com/repos/{}/contents/?ref={}",
+                    CONFIG.charts.repo, CONFIG.charts.git_ref,
+                )
+            } else {
+                format!(
+                    "https://api.github.com/repos/{}/contents/{}?ref={}",
+                    CONFIG.charts.repo, dir, CONFIG.charts.git_ref,
+                )
+            };
 
-        let entries: Vec<GitHubContent> = resp.json().await?;
+            let resp = self.client.get(&url).send().await?.error_for_status()?;
+            let entries: Vec<GitHubContent> = resp.json().await?;
+            let has_chart = entries
+                .iter()
+                .any(|e| e.name == "Chart.yaml" && e.content_type == "file");
 
-        let names: Vec<String> = entries
-            .into_iter()
-            .filter(|e| e.content_type == "dir" && !e.name.starts_with('.'))
-            .map(|e| e.name)
-            .collect();
+            if has_chart {
+                if let Some(name) = dir.rsplit('/').next() {
+                    names.push(name.to_string());
+                }
+                continue;
+            }
+
+            for entry in entries {
+                if entry.content_type == "dir" && !entry.name.starts_with('.') {
+                    dirs.push_back(if dir.is_empty() {
+                        entry.name
+                    } else {
+                        format!("{}/{}", dir, entry.name)
+                    });
+                }
+            }
+        }
 
         tracing::debug!("Chart sync: discovered {} charts from GitHub", names.len());
         Ok(names)

@@ -68,10 +68,20 @@ impl AppCatalog {
             return;
         }
 
-        if let Ok(entries) = std::fs::read_dir(charts_dir) {
+        self.load_apps_from_dir(charts_dir);
+
+        tracing::info!("Loaded {} apps from catalog", self.apps.len());
+    }
+
+    fn load_apps_from_dir(&mut self, dir: &Path) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
+                if !path.is_dir() {
+                    continue;
+                }
+
+                if path.join("Chart.yaml").exists() {
                     if let Some(chart_name) = path.file_name().and_then(|n| n.to_str()) {
                         match self.parse_chart(chart_name, &path) {
                             Ok(Some(app)) => {
@@ -85,11 +95,11 @@ impl AppCatalog {
                             }
                         }
                     }
+                } else {
+                    self.load_apps_from_dir(&path);
                 }
             }
         }
-
-        tracing::info!("Loaded {} apps from catalog", self.apps.len());
     }
 
     /// Parse a Helm chart into an AppConfig
@@ -522,6 +532,30 @@ mod tests {
 
     fn write_file(path: &std::path::Path, content: &str) {
         std::fs::write(path, content).expect("write file");
+    }
+
+    #[test]
+    fn load_apps_from_dir_recurses_into_category_folders() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let chart_dir = tmp.path().join("media-manager").join("sonarr");
+        std::fs::create_dir_all(&chart_dir).expect("mkdir");
+
+        write_file(
+            &chart_dir.join("Chart.yaml"),
+            r#"apiVersion: v2
+name: sonarr
+description: Sonarr PVR
+annotations:
+  kubarr.io/category: "media-manager"
+  kubarr.io/display-name: "Sonarr"
+"#,
+        );
+
+        let mut catalog = AppCatalog::with_apps(HashMap::new());
+        catalog.load_apps_from_dir(tmp.path());
+
+        let app = catalog.get_app("sonarr").expect("nested chart loaded");
+        assert_eq!(app.category, "media-manager");
     }
 
     #[test]
