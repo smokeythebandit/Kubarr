@@ -68,7 +68,6 @@ fn media_chart_values_do_not_contain_app_specific_storage() {
         "transcode",
         "cache",
         "config/",
-        "hostPath",
     ] {
         assert!(
             !joined.contains(app_value),

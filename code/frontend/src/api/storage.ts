@@ -23,6 +23,13 @@ export interface StorageStats {
   usage_percent: number;
 }
 
+export interface TextFile {
+  path: string;
+  content: string;
+  size: number;
+  modified: string;
+}
+
 export const storageApi = {
   // Browse a directory
   browse: async (path: string = ''): Promise<DirectoryListing> => {
@@ -62,10 +69,36 @@ export const storageApi = {
     return response.data;
   },
 
+  // Rename a file or directory
+  renamePath: async (path: string, newName: string): Promise<FileInfo> => {
+    const response = await apiClient.post<FileInfo>('/storage/rename', {
+      path,
+      new_name: newName,
+    });
+    return response.data;
+  },
+
   // Get download URL for a file
   getDownloadUrl: (path: string): string => {
     const baseUrl = apiClient.defaults.baseURL || '/api';
     return `${baseUrl}/storage/download?path=${encodeURIComponent(path)}`;
+  },
+
+  // Read a UTF-8 text file for editing
+  readTextFile: async (path: string): Promise<TextFile> => {
+    const response = await apiClient.get<TextFile>('/storage/text', {
+      params: { path },
+    });
+    return response.data;
+  },
+
+  // Save a UTF-8 text file
+  writeTextFile: async (path: string, content: string): Promise<TextFile> => {
+    const response = await apiClient.put<TextFile>('/storage/text', {
+      path,
+      content,
+    });
+    return response.data;
   },
 };
 

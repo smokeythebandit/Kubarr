@@ -250,46 +250,35 @@ auth:
 
 ## Storage Configuration
 
-Kubarr supports hostPath storage for the file browser feature.
+Kubarr supports NFS-backed shared storage for the file browser feature. The Kubarr backend mounts the `media-data` PVC at `/data`.
 
-### Enable HostPath Storage
+### Shared NFS Storage
 
 ```yaml
 storage:
-  hostPath:
-    enabled: true
-    rootPath: "/mnt/data/kubarr"  # Host path on Kubernetes nodes
-  mountPath: /data/storage         # Mount path inside containers
+  media:
+    existingClaim: media-data
+  mountPath: /data
 ```
 
 ### Storage Examples
 
-#### Local Development (Kind)
+#### Managed NFS
 
 ```yaml
 storage:
-  hostPath:
-    enabled: true
-    rootPath: "/tmp/kubarr-storage"
-  mountPath: /data/storage
+  media:
+    existingClaim: media-data
+  mountPath: /data
 ```
 
-#### Production with NFS-backed Storage
+#### External NFS
 
 ```yaml
 storage:
-  hostPath:
-    enabled: true
-    rootPath: "/mnt/nfs/media"  # NFS mount on nodes
-  mountPath: /data/storage
-```
-
-#### Disable Storage
-
-```yaml
-storage:
-  hostPath:
-    enabled: false
+  media:
+    existingClaim: media-data
+  mountPath: /data
 ```
 
 ## Network Policy Configuration
@@ -535,10 +524,9 @@ oauth2:
     issuerUrl: "https://kubarr.example.com"
 
 storage:
-  hostPath:
-    enabled: true
-    rootPath: "/mnt/nfs/media"
-  mountPath: /data/storage
+  media:
+    existingClaim: media-data
+  mountPath: /data
 
 networkPolicy:
   enabled: true

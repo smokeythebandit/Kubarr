@@ -20,6 +20,7 @@ use crate::state::{AppState, DbConn};
 
 /// Protected top-level folders that cannot be deleted
 const PROTECTED_FOLDERS: &[&str] = &["downloads", "media"];
+const MAX_TEXT_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Create storage routes
 pub fn storage_routes(state: AppState) -> Router {
@@ -30,6 +31,8 @@ pub fn storage_routes(state: AppState) -> Router {
         .route("/mkdir", post(create_directory))
         .route("/delete", delete(delete_path))
         .route("/download", get(download_file))
+        .route("/text", get(read_text_file).put(write_text_file))
+        .route("/rename", post(rename_path))
         .with_state(state)
 }
 
@@ -78,6 +81,26 @@ pub struct StorageStats {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateDirectoryRequest {
     pub path: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TextFileResponse {
+    pub path: String,
+    pub content: String,
+    pub size: u64,
+    pub modified: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct WriteTextFileRequest {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct RenamePathRequest {
+    pub path: String,
+    pub new_name: String,
 }
 
 // ============================================================================
@@ -547,6 +570,60 @@ async fn delete_path(
     })))
 }
 
+/// Rename a file or directory within its current parent directory.
+async fn rename_path(
+    State(state): State<AppState>,
+    _auth: Authorized<StorageWrite>,
+    Json(request): Json<RenamePathRequest>,
+) -> Result<Json<FileInfo>> {
+    let new_name = request.new_name.trim();
+    if new_name.is_empty() || new_name.contains('/') || new_name.contains('\\') || new_name == "." || new_name == ".." {
+        return Err(AppError::BadRequest(
+            "New name must be a single file or folder name".to_string(),
+        ));
+    }
+
+    let db = state.get_db().await?;
+    let storage_path = get_storage_path(&db).await?;
+    let base_path = storage_path
+        .canonicalize()
+        .map_err(|e| AppError::Internal(format!("Failed to resolve storage path: {}", e)))?;
+    let source_path = validate_path(&request.path, &storage_path)?;
+
+    if !source_path.exists() {
+        return Err(AppError::NotFound(format!("Path not found: {}", request.path)));
+    }
+
+    if source_path == base_path {
+        return Err(AppError::Forbidden(
+            "Cannot rename the storage root".to_string(),
+        ));
+    }
+
+    let parent = source_path
+        .parent()
+        .ok_or_else(|| AppError::Internal("Failed to resolve parent path".to_string()))?;
+    let target_path = parent.join(new_name);
+
+    if !target_path.starts_with(&base_path) {
+        return Err(AppError::Forbidden(
+            "Access denied: path traversal attempt detected".to_string(),
+        ));
+    }
+
+    if target_path.exists() {
+        return Err(AppError::BadRequest(format!(
+            "Path already exists: {}",
+            new_name
+        )));
+    }
+
+    std::fs::rename(&source_path, &target_path)
+        .map_err(|e| AppError::Internal(format!("Failed to rename path: {}", e)))?;
+
+    get_file_info_internal(&target_path, &base_path).map(Json)
+}
+
 /// Download a file from storage
 #[utoipa::path(
     get,
@@ -606,6 +683,99 @@ async fn download_file(
         body,
     )
         .into_response())
+}
+
+/// Read a UTF-8 text file from storage for editing.
+async fn read_text_file(
+    State(state): State<AppState>,
+    Query(query): Query<PathQuery>,
+    _auth: Authorized<StorageView>,
+) -> Result<Json<TextFileResponse>> {
+    let db = state.get_db().await?;
+    let storage_path = get_storage_path(&db).await?;
+    let file_path = validate_path(&query.path, &storage_path)?;
+
+    if !file_path.exists() {
+        return Err(AppError::NotFound(format!("File not found: {}", query.path)));
+    }
+
+    if file_path.is_dir() {
+        return Err(AppError::BadRequest(
+            "Cannot edit a directory".to_string(),
+        ));
+    }
+
+    let metadata = std::fs::metadata(&file_path)
+        .map_err(|e| AppError::Internal(format!("Failed to get file metadata: {}", e)))?;
+    if metadata.len() > MAX_TEXT_FILE_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "File is too large to edit in the browser. Maximum size is {} bytes",
+            MAX_TEXT_FILE_BYTES
+        )));
+    }
+
+    let bytes = tokio::fs::read(&file_path)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read file: {}", e)))?;
+    let content = String::from_utf8(bytes)
+        .map_err(|_| AppError::BadRequest("Only UTF-8 text files can be edited".to_string()))?;
+    let base_path = storage_path
+        .canonicalize()
+        .map_err(|e| AppError::Internal(format!("Failed to resolve storage path: {}", e)))?;
+    let info = get_file_info_internal(&file_path, &base_path)?;
+
+    Ok(Json(TextFileResponse {
+        path: info.path,
+        content,
+        size: metadata.len(),
+        modified: info.modified,
+    }))
+}
+
+/// Write a UTF-8 text file in storage.
+async fn write_text_file(
+    State(state): State<AppState>,
+    _auth: Authorized<StorageWrite>,
+    Json(request): Json<WriteTextFileRequest>,
+) -> Result<Json<TextFileResponse>> {
+    if request.content.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "File is too large to edit in the browser. Maximum size is {} bytes",
+            MAX_TEXT_FILE_BYTES
+        )));
+    }
+
+    let db = state.get_db().await?;
+    let storage_path = get_storage_path(&db).await?;
+    let base_path = storage_path
+        .canonicalize()
+        .map_err(|e| AppError::Internal(format!("Failed to resolve storage path: {}", e)))?;
+    let file_path = validate_path(&request.path, &storage_path)?;
+
+    if !file_path.exists() {
+        return Err(AppError::NotFound(format!("File not found: {}", request.path)));
+    }
+
+    if file_path.is_dir() {
+        return Err(AppError::BadRequest(
+            "Cannot edit a directory".to_string(),
+        ));
+    }
+
+    tokio::fs::write(&file_path, request.content.as_bytes())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write file: {}", e)))?;
+
+    let metadata = std::fs::metadata(&file_path)
+        .map_err(|e| AppError::Internal(format!("Failed to get file metadata: {}", e)))?;
+    let info = get_file_info_internal(&file_path, &base_path)?;
+
+    Ok(Json(TextFileResponse {
+        path: info.path,
+        content: request.content,
+        size: metadata.len(),
+        modified: info.modified,
+    }))
 }
 
 #[cfg(test)]

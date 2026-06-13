@@ -116,7 +116,7 @@ pub struct NetworkMetricsCache {
 File browsing and download endpoints serve media from a configurable storage path.
 
 - **Configuration:** Storage root from `system_settings` table or `KUBARR_STORAGE_PATH` env var (default: `/data`)
-- **Volume type:** hostPath volumes in Kubernetes (no CSI, no PVC abstraction)
+- **Volume type:** NFS-backed `media-data` PVC mounted into the backend pod
 - **Security:** Path traversal prevention via canonicalization and base-path containment checks
 - **Protected folders:** `downloads`, `media` directories cannot be deleted
 - **File operations:** Browse, get info, create directory, delete (empty dirs/files only), stream download
@@ -188,9 +188,7 @@ Used for dynamic configuration (storage path, OAuth2 settings, JWT keys) without
 
 3. **No connection retry logic** - If PostgreSQL becomes temporarily unavailable after the initial connection is established (e.g., during a CNPG switchover, brief network partition, or pod reschedule), there is no reconnection logic. The `try_connect()` function provides graceful degradation during bootstrap but does not handle mid-operation disconnects. SeaORM's underlying connection pool (sqlx) does handle some reconnection, but the application has no explicit retry-with-backoff strategy for transient failures.
 
-4. **hostPath coupling** - File storage is tied to the node's filesystem with no portability across nodes. If the pod is rescheduled to a different node, storage is lost. No PVC abstraction or CSI driver integration exists.
-
-5. **SQLite already compiled** - Both `sqlx-postgres` and `sqlx-sqlite` feature flags are enabled in `Cargo.toml`, but only PostgreSQL is used at runtime. This means the binary already includes SQLite support, making a potential migration to SQLite a smaller lift than it might otherwise be.
+4. **SQLite already compiled** - Both `sqlx-postgres` and `sqlx-sqlite` feature flags are enabled in `Cargo.toml`, but only PostgreSQL is used at runtime. This means the binary already includes SQLite support, making a potential migration to SQLite a smaller lift than it might otherwise be.
 
 ### Operational Complexity
 

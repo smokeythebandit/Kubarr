@@ -114,8 +114,7 @@ impl<'a> DeploymentManager<'a> {
         let mut set_args: Vec<String> = Vec::new();
         let mut set_string_args: Vec<String> = Vec::new();
 
-        // Add storage configuration. Normal installs use the storage_config
-        // contract; hostPath values remain chart-side dev/legacy knobs only.
+        // Add storage configuration using the shared NFS-backed media PVC.
         if let Some(storage) = storage_config {
             if !storage.validated() {
                 return Err(AppError::BadRequest(
