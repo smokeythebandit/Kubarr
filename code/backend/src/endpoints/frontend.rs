@@ -77,7 +77,7 @@ fn rewrite_app_response(
     mut response: Response<Body>,
     app_name: &str,
     internal_base_url: &str,
-    has_base_path: bool,
+    base_path: Option<&str>,
 ) -> Response<Body> {
     if !response.status().is_redirection() {
         return response;
@@ -91,6 +91,9 @@ fn rewrite_app_response(
         None => return response,
     };
 
+    let base_path = base_path.filter(|path| !path.is_empty());
+    let has_base_path = base_path.is_some();
+
     let rewritten = if let Some(path) = location.strip_prefix(internal_base_url) {
         // Absolute internal URL: http://app.ns.svc.cluster.local:PORT/path → /app_name/path
         let path = path.trim_start_matches('/');
@@ -101,7 +104,17 @@ fn rewrite_app_response(
         } else {
             format!("/{}/{}", app_name, path)
         }
-    } else if !has_base_path && location.starts_with('/') {
+    } else if base_path.is_some() {
+        // Apps with a declared base path are expected to emit redirects that
+        // already include that path. Leave them untouched.
+        location
+    } else if location.starts_with(&format!("/{app_name}/")) {
+        // Preserve already-prefixed redirects for charts that have not yet been
+        // upgraded to publish kubarr.io/base-path metadata.
+        location
+    } else if location == format!("/{app_name}") {
+        location
+    } else if location.starts_with('/') {
         // Absolute path without base_path: prepend the app prefix
         // (apps with base_path already have the correct prefix in their redirects)
         format!("/{}{}", app_name, location)
@@ -325,7 +338,8 @@ pub async fn proxy_frontend(
                     if has_permission {
                         // Try to proxy to the app
                         match get_app_target_url(&state, app_name, &path, &query).await {
-                            Ok((base_url, has_base_path, target_url)) => {
+                            Ok((base_url, base_path, target_url)) => {
+                                let has_base_path = base_path.is_some();
                                 tracing::info!(
                                     "Proxying to app {}: {} (base_path: {})",
                                     app_name,
@@ -341,7 +355,7 @@ pub async fn proxy_frontend(
                                             response,
                                             app_name,
                                             &base_url,
-                                            has_base_path,
+                                            base_path.as_deref(),
                                         );
                                         // For apps without base_path, rewrite HTML body
                                         // to prefix absolute paths with /{app_name}
@@ -697,7 +711,7 @@ mod tests {
             response,
             "sonarr",
             "http://sonarr.sonarr.svc.cluster.local:8989",
-            false,
+            None,
         );
         assert_eq!(result.status(), StatusCode::OK);
     }
@@ -709,7 +723,7 @@ mod tests {
         let internal_base = "http://sonarr.sonarr.svc.cluster.local:8989";
         let location = format!("{}/ui/page", internal_base);
         let response = make_response(StatusCode::FOUND, Some(&location));
-        let result = rewrite_app_response(response, "sonarr", internal_base, false);
+        let result = rewrite_app_response(response, "sonarr", internal_base, None);
         let loc = result
             .headers()
             .get(header::LOCATION)
@@ -726,7 +740,7 @@ mod tests {
         let internal_base = "http://jackett.jackett.svc.cluster.local:9117";
         let location = format!("{}/jackett/UI/Login", internal_base);
         let response = make_response(StatusCode::FOUND, Some(&location));
-        let result = rewrite_app_response(response, "jackett", internal_base, true);
+        let result = rewrite_app_response(response, "jackett", internal_base, Some("/jackett"));
         let loc = result
             .headers()
             .get(header::LOCATION)
@@ -741,7 +755,7 @@ mod tests {
         // Location: /login → /sonarr/login
         let internal_base = "http://sonarr.sonarr.svc.cluster.local:8989";
         let response = make_response(StatusCode::FOUND, Some("/login"));
-        let result = rewrite_app_response(response, "sonarr", internal_base, false);
+        let result = rewrite_app_response(response, "sonarr", internal_base, None);
         let loc = result
             .headers()
             .get(header::LOCATION)
@@ -752,12 +766,27 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_app_response_already_prefixed_no_base_path_unchanged() {
+        // Sonarr/Radarr may redirect to their configured URL base themselves.
+        let internal_base = "http://sonarr.sonarr.svc.cluster.local:8989";
+        let response = make_response(StatusCode::TEMPORARY_REDIRECT, Some("/sonarr/"));
+        let result = rewrite_app_response(response, "sonarr", internal_base, None);
+        let loc = result
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(loc, "/sonarr/");
+    }
+
+    #[test]
     fn test_rewrite_app_response_absolute_path_with_base_path_unchanged() {
         // With has_base_path=true, absolute paths that don't match the internal base
         // are returned unchanged (they already contain the base path prefix)
         let internal_base = "http://jackett.jackett.svc.cluster.local:9117";
         let response = make_response(StatusCode::FOUND, Some("/jackett/UI/Dashboard"));
-        let result = rewrite_app_response(response, "jackett", internal_base, true);
+        let result = rewrite_app_response(response, "jackett", internal_base, Some("/jackett"));
         let loc = result
             .headers()
             .get(header::LOCATION)
@@ -772,7 +801,7 @@ mod tests {
         // A full external URL should be left untouched
         let internal_base = "http://sonarr.sonarr.svc.cluster.local:8989";
         let response = make_response(StatusCode::FOUND, Some("https://external.example.com/page"));
-        let result = rewrite_app_response(response, "sonarr", internal_base, false);
+        let result = rewrite_app_response(response, "sonarr", internal_base, None);
         let loc = result
             .headers()
             .get(header::LOCATION)
@@ -1058,7 +1087,7 @@ mod tests {
             resp,
             "sonarr",
             "http://sonarr.sonarr.svc.cluster.local:8989",
-            false,
+            None,
         );
         assert_eq!(result.status(), StatusCode::FOUND);
         assert!(result.headers().get(header::LOCATION).is_none());
@@ -1098,13 +1127,13 @@ mod tests {
             .set("sonarr", base.to_string(), None)
             .await;
 
-        let (ret_base, has_base_path, target_url) =
+        let (ret_base, base_path, target_url) =
             get_app_target_url(&state, "sonarr", "/sonarr/movies", "")
                 .await
                 .expect("should succeed from cache");
 
         assert_eq!(ret_base, base);
-        assert!(!has_base_path);
+        assert!(base_path.is_none());
         // Strips the app name prefix → "movies"
         assert_eq!(target_url, format!("{}/movies", base));
     }
@@ -1118,13 +1147,13 @@ mod tests {
             .set("sonarr", base.to_string(), Some("/sonarr".to_string()))
             .await;
 
-        let (ret_base, has_base_path, target_url) =
+        let (ret_base, base_path, target_url) =
             get_app_target_url(&state, "sonarr", "/sonarr/movies", "")
                 .await
                 .expect("should succeed from cache");
 
         assert_eq!(ret_base, base);
-        assert!(has_base_path);
+        assert_eq!(base_path.as_deref(), Some("/sonarr"));
         // With base_path, keeps full path starting from after /
         assert_eq!(target_url, format!("{}/sonarr/movies", base));
     }
@@ -1204,13 +1233,13 @@ mod tests {
     }
 }
 
-/// Get the target URL for an app, returning (base_url, has_base_path, full_target_url)
+/// Get the target URL for an app, returning (base_url, base_path, full_target_url)
 async fn get_app_target_url(
     state: &AppState,
     app_name: &str,
     path: &str,
     query: &str,
-) -> Result<(String, bool, String)> {
+) -> Result<(String, Option<String>, String)> {
     // Check cache first
     let (base_url, base_path) = if let Some(cached) = state.endpoint_cache.get(app_name).await {
         cached
@@ -1281,5 +1310,5 @@ async fn get_app_target_url(
         }
     };
 
-    Ok((base_url, has_base_path, target_url))
+    Ok((base_url, base_path, target_url))
 }

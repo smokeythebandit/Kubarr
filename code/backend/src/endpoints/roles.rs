@@ -360,7 +360,10 @@ async fn set_role_apps(
     tag = "Roles",
     responses((status = 200, body = Vec<PermissionInfo>))
 )]
-async fn list_all_permissions(_auth: Authorized<RolesView>) -> Result<Json<Vec<PermissionInfo>>> {
+async fn list_all_permissions(
+    State(state): State<AppState>,
+    _auth: Authorized<RolesView>,
+) -> Result<Json<Vec<PermissionInfo>>> {
     let mut permissions = vec![
         // Apps permissions
         PermissionInfo {
@@ -462,31 +465,20 @@ async fn list_all_permissions(_auth: Authorized<RolesView>) -> Result<Json<Vec<P
         },
     ];
 
-    // Add app access permissions
-    // These are the apps that the backend can proxy to
-    let app_permissions = vec![
-        ("sonarr", "Access Sonarr TV show manager"),
-        ("radarr", "Access Radarr movie manager"),
-        ("qbittorrent", "Access qBittorrent download client"),
-        ("transmission", "Access Transmission download client"),
-        ("deluge", "Access Deluge download client"),
-        ("rutorrent", "Access ruTorrent web UI"),
-        ("jellyfin", "Access Jellyfin media server"),
-        ("plex", "Access Plex media server"),
-        ("jackett", "Access Jackett indexer proxy"),
-        ("jellyseerr", "Access Jellyseerr request manager"),
-        ("sabnzbd", "Access SABnzbd Usenet client"),
-        ("grafana", "Access Grafana dashboards"),
-        ("victoriametrics", "Access VictoriaMetrics"),
-        ("victorialogs", "Access VictoriaLogs log storage"),
-        ("kubernetes-dashboard", "Access Kubernetes Dashboard"),
-    ];
+    let catalog = state.catalog.read().await;
+    let mut app_permissions: Vec<_> = catalog
+        .get_all_apps()
+        .into_iter()
+        .filter(|app| !app.is_hidden)
+        .map(|app| (app.name.clone(), format!("Access {}", app.display_name)))
+        .collect();
+    app_permissions.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (app_name, description) in app_permissions {
         permissions.push(PermissionInfo {
-            key: format!("app.{}", app_name),
+            key: format!("app.{app_name}"),
             category: "App Access".to_string(),
-            description: description.to_string(),
+            description,
         });
     }
 
