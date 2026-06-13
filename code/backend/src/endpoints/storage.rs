@@ -711,7 +711,12 @@ async fn rename_path(
     Json(request): Json<RenamePathRequest>,
 ) -> Result<Json<FileInfo>> {
     let new_name = request.new_name.trim();
-    if new_name.is_empty() || new_name.contains('/') || new_name.contains('\\') || new_name == "." || new_name == ".." {
+    if new_name.is_empty()
+        || new_name.contains('/')
+        || new_name.contains('\\')
+        || new_name == "."
+        || new_name == ".."
+    {
         return Err(AppError::BadRequest(
             "New name must be a single file or folder name".to_string(),
         ));
@@ -725,7 +730,10 @@ async fn rename_path(
     let source_path = validate_path(&request.path, &storage_path)?;
 
     if !source_path.exists() {
-        return Err(AppError::NotFound(format!("Path not found: {}", request.path)));
+        return Err(AppError::NotFound(format!(
+            "Path not found: {}",
+            request.path
+        )));
     }
 
     if source_path == base_path {
@@ -830,13 +838,14 @@ async fn read_text_file(
     let file_path = validate_path(&query.path, &storage_path)?;
 
     if !file_path.exists() {
-        return Err(AppError::NotFound(format!("File not found: {}", query.path)));
+        return Err(AppError::NotFound(format!(
+            "File not found: {}",
+            query.path
+        )));
     }
 
     if file_path.is_dir() {
-        return Err(AppError::BadRequest(
-            "Cannot edit a directory".to_string(),
-        ));
+        return Err(AppError::BadRequest("Cannot edit a directory".to_string()));
     }
 
     let metadata = std::fs::metadata(&file_path)
@@ -887,13 +896,14 @@ async fn write_text_file(
     let file_path = validate_path(&request.path, &storage_path)?;
 
     if !file_path.exists() {
-        return Err(AppError::NotFound(format!("File not found: {}", request.path)));
+        return Err(AppError::NotFound(format!(
+            "File not found: {}",
+            request.path
+        )));
     }
 
     if file_path.is_dir() {
-        return Err(AppError::BadRequest(
-            "Cannot edit a directory".to_string(),
-        ));
+        return Err(AppError::BadRequest("Cannot edit a directory".to_string()));
     }
 
     tokio::fs::write(&file_path, request.content.as_bytes())

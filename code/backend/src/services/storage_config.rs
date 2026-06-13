@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use chrono::Utc;
-use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::{
     Container, NFSVolumeSource, Namespace, PersistentVolume, PersistentVolumeClaim,
     PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PersistentVolumeSpec, Pod,
@@ -10,6 +9,7 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::ByteString;
 use kube::api::{Api, DeleteParams, ListParams, LogParams, PostParams};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
