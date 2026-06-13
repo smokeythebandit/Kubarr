@@ -1,4 +1,4 @@
-type StorageTab = 'browser' | 'windirstat'
+type StorageTab = 'browser' | 'statistics'
 
 interface StorageTabsProps {
   activeTab: StorageTab
@@ -11,7 +11,7 @@ export function StorageTabs({ activeTab, onChange, compact = false }: StorageTab
     <div className={`flex w-fit border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800 ${compact ? 'rounded-xl p-0.5' : 'rounded-2xl p-1'}`}>
       {[
         ['browser', 'Browser'],
-        ['windirstat', 'Statistics'],
+        ['statistics', 'Statistics'],
       ].map(([value, label]) => (
         <button
           key={value}

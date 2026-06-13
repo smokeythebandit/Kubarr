@@ -89,12 +89,16 @@ export function StorageBrowser({
                   <td className="px-5 py-4" />
                 </tr>
               )}
-              {listing?.items.map((item, index) => (
+              {listing?.items.map((item, index) => {
+                const selected = selectedItem?.path === item.path
+                return (
                 <tr
                   key={item.path}
                   onClick={() => onItemClick(item)}
-                  className={`group cursor-pointer transition-all hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
-                    selectedItem?.path === item.path ? 'bg-blue-50 dark:bg-blue-900/30 ring-1 ring-inset ring-blue-300 dark:ring-blue-500/40' : ''
+                  className={`group cursor-pointer transition-all ${
+                    selected
+                      ? 'bg-blue-50 ring-1 ring-inset ring-blue-300 hover:bg-blue-50 dark:bg-blue-900/30 dark:ring-blue-500/40 dark:hover:bg-blue-900/30'
+                      : 'hover:bg-blue-50/80 dark:hover:bg-blue-950/40'
                   }`}
                 >
                   <td className="px-5 py-4">
@@ -171,7 +175,8 @@ export function StorageBrowser({
                     </div>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
               {listing?.items.length === 0 && (
                 <tr>
                   <td colSpan={5} className="px-5 py-16 text-center text-gray-500 dark:text-gray-400">
@@ -214,8 +219,10 @@ function ThumbnailView({ listing, items, isAdmin, selectedItem, onNavigate, onIt
             <p className="text-xs text-gray-500 dark:text-gray-400">Parent directory</p>
           </button>
         )}
-        {items.map((item, index) => (
-          <div key={item.path} className={`group rounded-3xl border p-3 transition hover:-translate-y-0.5 hover:shadow-lg ${selectedItem?.path === item.path ? 'border-blue-300 bg-blue-50 dark:border-blue-500/40 dark:bg-blue-950/30' : 'border-gray-100 bg-white dark:border-gray-700 dark:bg-gray-800'}`}>
+        {items.map((item, index) => {
+          const selected = selectedItem?.path === item.path
+          return (
+          <div key={item.path} className={`group rounded-3xl border p-3 transition ${selected ? 'border-blue-300 bg-blue-50 shadow-none dark:border-blue-500/40 dark:bg-blue-950/30' : 'border-gray-100 bg-white hover:-translate-y-0.5 hover:border-blue-300 hover:bg-blue-50/70 hover:shadow-lg hover:shadow-blue-900/10 dark:border-gray-700 dark:bg-gray-800 dark:hover:border-blue-500/50 dark:hover:bg-blue-950/35'}`}>
             <button type="button" onClick={() => onItemClick(item)} className="w-full text-left">
               <div className={`flex h-28 items-center justify-center rounded-2xl ${item.type === 'directory' ? `bg-gradient-to-br ${folderGradients[index % folderGradients.length]} text-white` : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'}`}>
                 {item.type === 'directory' ? <Folder size={42} /> : <File size={42} />}
@@ -225,7 +232,8 @@ function ThumbnailView({ listing, items, isAdmin, selectedItem, onNavigate, onIt
             </button>
             <ItemActions item={item} isAdmin={isAdmin} onDownload={onDownload} onRename={onRename} onDelete={onDelete} compact />
           </div>
-        ))}
+          )
+        })}
       </div>
       {items.length === 0 && <EmptyFolder />}
     </div>
@@ -242,20 +250,20 @@ function ItemActions({ item, isAdmin, onDownload, onRename, onDelete, compact = 
 }) {
   return (
     <div className={`flex ${compact ? 'mt-3 justify-end' : 'justify-end'} gap-2 opacity-100 transition md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100`}>
-      {item.type === 'file' && <IconAction label="Download" color="emerald" icon={<Download size={16} />} onClick={() => onDownload(item)} />}
-      {isAdmin && <IconAction label="Rename" color="indigo" icon={<Pencil size={16} />} onClick={() => onRename(item)} />}
-      {isAdmin && <IconAction label="Delete" color="red" icon={<Trash2 size={16} />} onClick={() => onDelete(item)} />}
+      {item.type === 'file' && <IconAction label="Download" color="emerald" icon={<Download size={compact ? 14 : 16} />} onClick={() => onDownload(item)} compact={compact} />}
+      {isAdmin && <IconAction label="Rename" color="indigo" icon={<Pencil size={compact ? 14 : 16} />} onClick={() => onRename(item)} compact={compact} />}
+      {isAdmin && <IconAction label="Delete" color="red" icon={<Trash2 size={compact ? 14 : 16} />} onClick={() => onDelete(item)} compact={compact} />}
     </div>
   )
 }
 
-function IconAction({ label, color, icon, onClick }: { label: string; color: 'emerald' | 'indigo' | 'red'; icon: ReactNode; onClick: () => void }) {
+function IconAction({ label, color, icon, onClick, compact = false }: { label: string; color: 'emerald' | 'indigo' | 'red'; icon: ReactNode; onClick: () => void; compact?: boolean }) {
   const classes = {
     emerald: 'bg-emerald-100 text-emerald-700 hover:bg-emerald-600 dark:bg-emerald-900/40 dark:text-emerald-300',
     indigo: 'bg-indigo-100 text-indigo-700 hover:bg-indigo-600 dark:bg-indigo-900/40 dark:text-indigo-300',
     red: 'bg-red-100 text-red-700 hover:bg-red-600 dark:bg-red-900/40 dark:text-red-300',
   }
-  return <button type="button" onClick={(event) => { event.stopPropagation(); onClick() }} className={`flex items-center gap-1.5 rounded-xl p-2 transition hover:text-white lg:px-3 ${classes[color]}`} title={label} aria-label={label}>{icon}<span className="hidden text-xs font-bold lg:inline">{label}</span></button>
+  return <button type="button" onClick={(event) => { event.stopPropagation(); onClick() }} className={`flex items-center justify-center rounded-xl transition hover:text-white ${compact ? 'h-8 w-8 p-0' : 'gap-1.5 p-2 lg:px-3'} ${classes[color]}`} title={label} aria-label={label}>{icon}{!compact && <span className="hidden text-xs font-bold lg:inline">{label}</span>}</button>
 }
 
 function EmptyFolder() {

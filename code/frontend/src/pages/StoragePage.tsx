@@ -8,11 +8,11 @@ import { StorageBrowser } from '../components/storage/StorageBrowser'
 import type { BrowserViewMode } from '../components/storage/StorageBrowser'
 import { StorageEditorPane } from '../components/storage/StorageEditorPane'
 import { StorageTabs } from '../components/storage/StorageTabs'
-import { WinDirStatView } from '../components/storage/WinDirStatView'
+import { StatisticsView } from '../components/storage/StatisticsView'
 import { isEditableFile } from '../components/storage/storageUtils'
 import { useAuth } from '../contexts/AuthContext'
 
-type StorageTab = 'browser' | 'windirstat'
+type StorageTab = 'browser' | 'statistics'
 
 export default function StoragePage() {
   const [activeTab, setActiveTab] = useState<StorageTab>('browser')
@@ -48,7 +48,7 @@ export default function StoragePage() {
   } = useQuery({
     queryKey: ['storage', 'usage'],
     queryFn: storageApi.getUsage,
-    enabled: activeTab === 'windirstat',
+    enabled: activeTab === 'statistics',
     staleTime: 30000,
   })
 
@@ -160,7 +160,7 @@ export default function StoragePage() {
     deleteMutation.mutate(selectedItem.path)
   }
 
-  const openWinDirStatDirectory = (path: string) => {
+  const openStatisticsDirectory = (path: string) => {
     setCurrentPath(path)
     setActiveTab('browser')
   }
@@ -250,12 +250,12 @@ export default function StoragePage() {
         </>
       )}
 
-      {activeTab === 'windirstat' && (
-        <WinDirStatView
+      {activeTab === 'statistics' && (
+        <StatisticsView
           usage={usage}
           isLoading={usageLoading}
           error={usageError}
-          onOpenDirectory={openWinDirStatDirectory}
+          onOpenDirectory={openStatisticsDirectory}
         />
       )}
 
