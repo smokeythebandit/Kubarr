@@ -1027,7 +1027,7 @@ export default function AppsPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-4rem-2.5rem)] -mt-8 -mx-4 sm:-mx-6 lg:-mx-8 xl:-mx-12 2xl:-mx-16">
+    <div className="flex h-[calc(100dvh-4rem-2.5rem-1px)] -my-8 -mx-4 sm:-mx-6 lg:-mx-8 xl:-mx-12 2xl:-mx-16">
       {/* Toast Notification */}
       {toast && (
         <div className={`fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-lg border backdrop-blur-sm ${
