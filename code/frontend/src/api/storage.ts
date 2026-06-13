@@ -30,6 +30,22 @@ export interface TextFile {
   modified: string;
 }
 
+export interface StorageUsageNode {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+  size: number;
+  children: StorageUsageNode[];
+}
+
+export interface StorageUsage {
+  root: StorageUsageNode;
+  total_size: number;
+  total_files: number;
+  total_directories: number;
+  warnings: string[];
+}
+
 export const storageApi = {
   // Browse a directory
   browse: async (path: string = ''): Promise<DirectoryListing> => {
@@ -42,6 +58,12 @@ export const storageApi = {
   // Get storage statistics
   getStats: async (): Promise<StorageStats> => {
     const response = await apiClient.get<StorageStats>('/storage/stats');
+    return response.data;
+  },
+
+  // Get recursive storage usage tree
+  getUsage: async (): Promise<StorageUsage> => {
+    const response = await apiClient.get<StorageUsage>('/storage/usage');
     return response.data;
   },
 

@@ -33,6 +33,7 @@ pub fn storage_routes(state: AppState) -> Router {
         .route("/download", get(download_file))
         .route("/text", get(read_text_file).put(write_text_file))
         .route("/rename", post(rename_path))
+        .route("/usage", get(get_storage_usage))
         .with_state(state)
 }
 
@@ -76,6 +77,25 @@ pub struct StorageStats {
     pub used_bytes: u64,
     pub free_bytes: u64,
     pub usage_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct StorageUsageNode {
+    pub name: String,
+    pub path: String,
+    #[serde(rename = "type")]
+    pub node_type: String,
+    pub size: u64,
+    pub children: Vec<StorageUsageNode>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct StorageUsageResponse {
+    pub root: StorageUsageNode,
+    pub total_size: u64,
+    pub total_files: u64,
+    pub total_directories: u64,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -211,6 +231,92 @@ fn get_file_info_internal(file_path: &PathBuf, base_path: &PathBuf) -> Result<Fi
         modified,
         permissions,
     })
+}
+
+fn build_usage_tree(
+    path: &Path,
+    base_path: &Path,
+    totals: &mut (u64, u64),
+    warnings: &mut Vec<String>,
+) -> StorageUsageNode {
+    let relative_path = path
+        .strip_prefix(base_path)
+        .map(|p| p.to_string_lossy().to_string().replace('\\', "/"))
+        .unwrap_or_default();
+    let name = if relative_path.is_empty() {
+        "Root".to_string()
+    } else {
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| relative_path.clone())
+    };
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            warnings.push(format!("Could not read {}: {}", relative_path, err));
+            return StorageUsageNode {
+                name,
+                path: relative_path,
+                node_type: "file".to_string(),
+                size: 0,
+                children: Vec::new(),
+            };
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        warnings.push(format!("Skipped symlink: {}", relative_path));
+        return StorageUsageNode {
+            name,
+            path: relative_path,
+            node_type: "file".to_string(),
+            size: 0,
+            children: Vec::new(),
+        };
+    }
+
+    if metadata.is_dir() {
+        totals.1 += 1;
+        let mut children = Vec::new();
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(err) => {
+                warnings.push(format!("Could not list {}: {}", relative_path, err));
+                return StorageUsageNode {
+                    name,
+                    path: relative_path,
+                    node_type: "directory".to_string(),
+                    size: 0,
+                    children,
+                };
+            }
+        };
+
+        for entry in entries.flatten() {
+            children.push(build_usage_tree(&entry.path(), base_path, totals, warnings));
+        }
+
+        children.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
+        let size = children.iter().map(|child| child.size).sum();
+
+        StorageUsageNode {
+            name,
+            path: relative_path,
+            node_type: "directory".to_string(),
+            size,
+            children,
+        }
+    } else {
+        totals.0 += 1;
+        StorageUsageNode {
+            name,
+            path: relative_path,
+            node_type: "file".to_string(),
+            size: metadata.len(),
+            children: Vec::new(),
+        }
+    }
 }
 
 // ============================================================================
@@ -395,6 +501,34 @@ async fn get_storage_stats(
     };
 
     Ok(Json(stats))
+}
+
+/// Build a full recursive usage tree for the shared storage mount.
+async fn get_storage_usage(
+    State(state): State<AppState>,
+    _auth: Authorized<StorageView>,
+) -> Result<Json<StorageUsageResponse>> {
+    let db = state.get_db().await?;
+    let storage_path = get_storage_path(&db).await?;
+    let base_path = storage_path
+        .canonicalize()
+        .map_err(|e| AppError::Internal(format!("Failed to resolve storage path: {}", e)))?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut totals = (0_u64, 0_u64);
+        let mut warnings = Vec::new();
+        let root = build_usage_tree(&base_path, &base_path, &mut totals, &mut warnings);
+
+        Ok(Json(StorageUsageResponse {
+            total_size: root.size,
+            root,
+            total_files: totals.0,
+            total_directories: totals.1,
+            warnings,
+        }))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to scan storage usage: {}", e)))?
 }
 
 /// Get detailed information about a specific file or directory
