@@ -19,6 +19,64 @@ interface OperationStatus {
   message?: string
 }
 
+interface StorageMountInfo {
+  containerPath: string
+  storagePath: string
+  access: 'read/write' | 'read-only'
+}
+
+const storageMountsByApp: Record<string, StorageMountInfo[]> = {
+  kubarr: [{ containerPath: '/data', storagePath: 'media-data root', access: 'read/write' }],
+  plex: [
+    { containerPath: '/config', storagePath: 'config/plex', access: 'read/write' },
+    { containerPath: '/data', storagePath: 'media', access: 'read-only' },
+    { containerPath: '/transcode', storagePath: 'transcode/plex', access: 'read/write' },
+  ],
+  jellyfin: [
+    { containerPath: '/config', storagePath: 'config/jellyfin', access: 'read/write' },
+    { containerPath: '/data', storagePath: 'media', access: 'read-only' },
+    { containerPath: '/cache', storagePath: 'cache/jellyfin', access: 'read/write' },
+  ],
+  sonarr: [
+    { containerPath: '/config', storagePath: 'config/sonarr', access: 'read/write' },
+    { containerPath: '/media', storagePath: 'media', access: 'read/write' },
+    { containerPath: '/downloads', storagePath: 'downloads', access: 'read/write' },
+  ],
+  radarr: [
+    { containerPath: '/config', storagePath: 'config/radarr', access: 'read/write' },
+    { containerPath: '/media', storagePath: 'media', access: 'read/write' },
+    { containerPath: '/downloads', storagePath: 'downloads', access: 'read/write' },
+  ],
+  jellyseerr: [
+    { containerPath: '/app/config', storagePath: 'config/jellyseerr', access: 'read/write' },
+    { containerPath: '/data', storagePath: 'media', access: 'read/write' },
+  ],
+  qbittorrent: [
+    { containerPath: '/config', storagePath: 'config/qbittorrent', access: 'read/write' },
+    { containerPath: '/downloads', storagePath: 'downloads/qbittorrent', access: 'read/write' },
+  ],
+  sabnzbd: [
+    { containerPath: '/config', storagePath: 'config/sabnzbd', access: 'read/write' },
+    { containerPath: '/downloads', storagePath: 'downloads/sabnzbd', access: 'read/write' },
+  ],
+  deluge: [
+    { containerPath: '/config', storagePath: 'config/deluge', access: 'read/write' },
+    { containerPath: '/downloads', storagePath: 'downloads/deluge', access: 'read/write' },
+  ],
+  transmission: [
+    { containerPath: '/config', storagePath: 'config/transmission', access: 'read/write' },
+    { containerPath: '/downloads', storagePath: 'downloads/transmission', access: 'read/write' },
+  ],
+  rutorrent: [
+    { containerPath: '/config', storagePath: 'config/rutorrent', access: 'read/write' },
+    { containerPath: '/downloads', storagePath: 'downloads/rutorrent', access: 'read/write' },
+  ],
+  jackett: [{ containerPath: '/config', storagePath: 'config/jackett', access: 'read/write' }],
+  victoriametrics: [{ containerPath: '/victoria-metrics-data', storagePath: 'system/victoriametrics', access: 'read/write' }],
+  victorialogs: [{ containerPath: 'configured storage path', storagePath: 'system/victorialogs', access: 'read/write' }],
+  postgresql: [{ containerPath: '/var/lib/postgresql/data', storagePath: 'system/postgresql', access: 'read/write' }],
+}
+
 // Helper to convert rgb to rgba
 function toRgba(rgb: string, alpha: number): string {
   return rgb.replace('rgb', 'rgba').replace(')', `, ${alpha})`)
@@ -349,6 +407,48 @@ function AppCardComponent({
   )
 }
 
+function AppStorageInfo({ appName }: { appName: string }) {
+  const mounts = storageMountsByApp[appName] || []
+
+  return (
+    <div className="mt-6">
+      <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+        <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7a8 3 0 1116 0v10a8 3 0 11-16 0V7zm16 5a8 3 0 01-16 0m16 5a8 3 0 01-16 0" />
+        </svg>
+        Storage
+      </h3>
+
+      {mounts.length === 0 ? (
+        <div className="rounded-lg bg-gray-50 p-4 text-sm text-gray-500 dark:bg-gray-800/50 dark:text-gray-400">
+          No shared media storage mount.
+        </div>
+      ) : (
+        <div className="rounded-lg bg-gray-50 p-4 dark:bg-gray-800/50">
+          <div className="mb-3 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+            <span className="font-medium">Shared NFS claim</span>
+            <code className="rounded-md bg-white px-2 py-1 font-mono text-gray-700 dark:bg-gray-900 dark:text-gray-200">media-data</code>
+          </div>
+          <div className="space-y-2">
+          {mounts.map((mount) => (
+            <div key={`${mount.containerPath}-${mount.storagePath}`} className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-900/60">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <code className="min-w-0 truncate font-mono text-sm font-semibold text-gray-900 dark:text-white" title={mount.containerPath}>{mount.containerPath}</code>
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${mount.access === 'read-only' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'}`}>{mount.access}</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                <span className="shrink-0 uppercase tracking-wide">NFS</span>
+                <code className="min-w-0 truncate rounded-md bg-gray-100 px-2 py-1 font-mono text-gray-700 dark:bg-gray-800 dark:text-gray-200" title={mount.storagePath}>{mount.storagePath}</code>
+              </div>
+            </div>
+          ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // App Detail Panel (right sidebar)
 interface AppDetailPanelProps {
   app: AppConfig | null
@@ -594,6 +694,8 @@ function AppDetailPanel({
               </p>
             </div>
           </div>
+
+          <AppStorageInfo appName={app.name} />
 
           {/* VPN Configuration */}
           {canViewVpn && !app.is_system && isInstalled && (
