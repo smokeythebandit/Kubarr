@@ -42,3 +42,33 @@ export interface DeploymentStatus {
   message: string | null;
   timestamp: string;
 }
+
+export interface AppOperation {
+  id: string;
+  app_name: string;
+  operation: 'install' | 'update' | 'delete' | 'restart' | string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | string;
+  message: string | null;
+  error: string | null;
+  attempts: number;
+  created_by: number | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+}
+
+export interface AppState {
+  app_name: string;
+  namespace: string;
+  desired_state: 'installed' | 'removed' | string;
+  observed_state: 'not_installed' | 'installing' | 'installed' | 'unhealthy' | 'deleting' | 'failed' | string;
+  healthy: boolean;
+  message: string | null;
+  installed_chart_version: string | null;
+  available_chart_version: string | null;
+  update_available: boolean;
+  last_operation_id: string | null;
+  last_checked_at: string | null;
+  updated_at: string;
+}

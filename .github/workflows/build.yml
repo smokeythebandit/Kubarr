@@ -107,15 +107,16 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          python-version: '3.x'
+          node-version: '22'
+          cache: npm
 
-      - run: pip install mkdocs-material
+      - run: npm ci
 
       - name: Build documentation
         env:
           KUBARR_VERSION: ${{ steps.meta.outputs.version }}
           KUBARR_CHANNEL: ${{ steps.meta.outputs.channel }}
           KUBARR_COMMIT: ${{ github.sha }}
-        run: mkdocs build --strict -f docs/mkdocs.yml
+        run: npm run docs:build

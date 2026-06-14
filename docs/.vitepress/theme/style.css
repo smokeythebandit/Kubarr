@@ -1,0 +1,146 @@
+:root {
+  --vp-c-brand-1: #4f46e5;
+  --vp-c-brand-2: #6366f1;
+  --vp-c-brand-3: #818cf8;
+}
+
+.VPDoc:not(.has-sidebar) .content,
+.VPDoc.has-aside .content-container {
+  max-width: 960px;
+}
+
+.vp-doc table {
+  display: table;
+  width: 100%;
+}
+
+.architecture-map {
+  margin: 32px 0;
+  padding: 28px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at top left, rgba(99, 102, 241, 0.18), transparent 34%),
+    radial-gradient(circle at bottom right, rgba(20, 184, 166, 0.14), transparent 34%),
+    var(--vp-c-bg-soft);
+}
+
+.arch-row,
+.arch-split,
+.arch-core {
+  display: grid;
+  gap: 16px;
+}
+
+.arch-edge {
+  justify-items: center;
+}
+
+.arch-split {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 8px;
+}
+
+.arch-core {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 28px;
+}
+
+.arch-lane {
+  display: grid;
+  gap: 12px;
+}
+
+.arch-node {
+  position: relative;
+  min-height: 132px;
+  padding: 18px;
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+}
+
+.dark .arch-node {
+  background: rgba(15, 23, 42, 0.72);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+}
+
+.arch-node::after {
+  position: absolute;
+  inset: auto 18px 18px auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  content: "";
+  opacity: 0.18;
+}
+
+.arch-node strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--vp-c-text-1);
+  font-size: 1.05rem;
+}
+
+.arch-node small {
+  display: block;
+  margin-top: 8px;
+  color: var(--vp-c-text-2);
+  line-height: 1.45;
+}
+
+.arch-kicker {
+  color: var(--vp-c-brand-1);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.arch-arrow {
+  display: grid;
+  place-items: center;
+  min-height: 34px;
+  color: var(--vp-c-text-2);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.arch-arrow::before,
+.arch-arrow::after {
+  color: var(--vp-c-brand-2);
+}
+
+.arch-arrow::before {
+  content: "↓ ";
+}
+
+.arch-user,
+.arch-gateway {
+  max-width: 520px;
+  width: 100%;
+}
+
+.arch-user::after { background: #14b8a6; }
+.arch-gateway::after { background: #4f46e5; }
+.arch-frontend::after { background: #06b6d4; }
+.arch-api::after { background: #f97316; }
+.arch-apps::after { background: #22c55e; }
+.arch-worker::after { background: #a855f7; }
+.arch-db::after { background: #ef4444; }
+.arch-storage::after { background: #0ea5e9; }
+.arch-k8s::after { background: #64748b; }
+
+@media (max-width: 900px) {
+  .architecture-map {
+    padding: 18px;
+  }
+
+  .arch-split,
+  .arch-core {
+    grid-template-columns: 1fr;
+  }
+}

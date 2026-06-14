@@ -22,10 +22,12 @@ export interface ServiceEndpoint {
   name: string;
   namespace: string;
   port: number;
-  target_port: number;
+  target_port: string | null;
   port_forward_command: string;
   url: string | null;
-  type: string;
+  service_type: string;
+  base_path: string | null;
+  landing_path: string | null;
 }
 
 export interface AppHealth {

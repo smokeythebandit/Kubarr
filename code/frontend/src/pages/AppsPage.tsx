@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, type JSX } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { appsApi } from '../api/apps'
+import { monitoringApi } from '../api/monitoring'
 import { vpnApi, appVpnApi } from '../api/vpn'
 import type { VpnProvider } from '../api/vpn'
 import { VpnProviderForm } from '../components/vpn/VpnProviderForm'
@@ -9,6 +10,7 @@ import { AppIcon, useIconColors } from '../components/AppIcon'
 import { useAuth } from '../contexts/AuthContext'
 import { useMonitoring } from '../contexts/MonitoringContext'
 import type { AppConfig } from '../types'
+import type { ServiceEndpoint } from '../types/monitoring'
 
 type FilterType = 'all' | 'installed' | 'healthy' | 'unhealthy' | 'available'
 
@@ -17,64 +19,6 @@ type OperationState = 'installing' | 'deleting' | 'error'
 interface OperationStatus {
   state: OperationState
   message?: string
-}
-
-interface StorageMountInfo {
-  containerPath: string
-  storagePath: string
-  access: 'read/write' | 'read-only'
-}
-
-const storageMountsByApp: Record<string, StorageMountInfo[]> = {
-  kubarr: [{ containerPath: '/data', storagePath: 'media-data root', access: 'read/write' }],
-  plex: [
-    { containerPath: '/config', storagePath: 'config/plex', access: 'read/write' },
-    { containerPath: '/data', storagePath: 'media', access: 'read-only' },
-    { containerPath: '/transcode', storagePath: 'transcode/plex', access: 'read/write' },
-  ],
-  jellyfin: [
-    { containerPath: '/config', storagePath: 'config/jellyfin', access: 'read/write' },
-    { containerPath: '/data', storagePath: 'media', access: 'read-only' },
-    { containerPath: '/cache', storagePath: 'cache/jellyfin', access: 'read/write' },
-  ],
-  sonarr: [
-    { containerPath: '/config', storagePath: 'config/sonarr', access: 'read/write' },
-    { containerPath: '/media', storagePath: 'media', access: 'read/write' },
-    { containerPath: '/downloads', storagePath: 'downloads', access: 'read/write' },
-  ],
-  radarr: [
-    { containerPath: '/config', storagePath: 'config/radarr', access: 'read/write' },
-    { containerPath: '/media', storagePath: 'media', access: 'read/write' },
-    { containerPath: '/downloads', storagePath: 'downloads', access: 'read/write' },
-  ],
-  jellyseerr: [
-    { containerPath: '/app/config', storagePath: 'config/jellyseerr', access: 'read/write' },
-    { containerPath: '/data', storagePath: 'media', access: 'read/write' },
-  ],
-  qbittorrent: [
-    { containerPath: '/config', storagePath: 'config/qbittorrent', access: 'read/write' },
-    { containerPath: '/downloads', storagePath: 'downloads/qbittorrent', access: 'read/write' },
-  ],
-  sabnzbd: [
-    { containerPath: '/config', storagePath: 'config/sabnzbd', access: 'read/write' },
-    { containerPath: '/downloads', storagePath: 'downloads/sabnzbd', access: 'read/write' },
-  ],
-  deluge: [
-    { containerPath: '/config', storagePath: 'config/deluge', access: 'read/write' },
-    { containerPath: '/downloads', storagePath: 'downloads/deluge', access: 'read/write' },
-  ],
-  transmission: [
-    { containerPath: '/config', storagePath: 'config/transmission', access: 'read/write' },
-    { containerPath: '/downloads', storagePath: 'downloads/transmission', access: 'read/write' },
-  ],
-  rutorrent: [
-    { containerPath: '/config', storagePath: 'config/rutorrent', access: 'read/write' },
-    { containerPath: '/downloads', storagePath: 'downloads/rutorrent', access: 'read/write' },
-  ],
-  jackett: [{ containerPath: '/config', storagePath: 'config/jackett', access: 'read/write' }],
-  victoriametrics: [{ containerPath: '/victoria-metrics-data', storagePath: 'system/victoriametrics', access: 'read/write' }],
-  victorialogs: [{ containerPath: 'configured storage path', storagePath: 'system/victorialogs', access: 'read/write' }],
-  postgresql: [{ containerPath: '/var/lib/postgresql/data', storagePath: 'system/postgresql', access: 'read/write' }],
 }
 
 // Helper to convert rgb to rgba
@@ -340,9 +284,9 @@ function AppCardComponent({
 
         {/* Action buttons */}
         <div className="flex gap-2 mt-4" onClick={(e) => e.stopPropagation()}>
-          {app.is_system && app.is_hidden ? (
+          {app.is_system && (app.is_hidden || !app.is_browseable) ? (
             <div className="w-full bg-gray-100 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 text-sm font-medium py-2.5 px-4 rounded-lg text-center">
-              Background Service
+              System Component
             </div>
           ) : app.is_system ? (
             <button
@@ -407,8 +351,8 @@ function AppCardComponent({
   )
 }
 
-function AppStorageInfo({ appName }: { appName: string }) {
-  const mounts = storageMountsByApp[appName] || []
+function AppStorageInfo({ app }: { app: AppConfig }) {
+  const volumes = app.volumes || []
 
   return (
     <div className="mt-6">
@@ -419,32 +363,80 @@ function AppStorageInfo({ appName }: { appName: string }) {
         Storage
       </h3>
 
-      {mounts.length === 0 ? (
-        <div className="rounded-lg bg-gray-50 p-4 text-sm text-gray-500 dark:bg-gray-800/50 dark:text-gray-400">
-          No shared media storage mount.
-        </div>
-      ) : (
-        <div className="rounded-lg bg-gray-50 p-4 dark:bg-gray-800/50">
-          <div className="mb-3 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-            <span className="font-medium">Shared NFS claim</span>
-            <code className="rounded-md bg-white px-2 py-1 font-mono text-gray-700 dark:bg-gray-900 dark:text-gray-200">media-data</code>
-          </div>
-          <div className="space-y-2">
-          {mounts.map((mount) => (
-            <div key={`${mount.containerPath}-${mount.storagePath}`} className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-900/60">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <code className="min-w-0 truncate font-mono text-sm font-semibold text-gray-900 dark:text-white" title={mount.containerPath}>{mount.containerPath}</code>
-                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${mount.access === 'read-only' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'}`}>{mount.access}</span>
-              </div>
-              <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                <span className="shrink-0 uppercase tracking-wide">NFS</span>
-                <code className="min-w-0 truncate rounded-md bg-gray-100 px-2 py-1 font-mono text-gray-700 dark:bg-gray-800 dark:text-gray-200" title={mount.storagePath}>{mount.storagePath}</code>
-              </div>
+      <div className="rounded-lg bg-gray-50 p-4 dark:bg-gray-800/50">
+        {volumes.length > 0 ? (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+              <span className="font-medium">Shared NFS claim</span>
+              <code className="rounded-md bg-white px-2 py-1 font-mono text-gray-700 dark:bg-gray-900 dark:text-gray-200">media-data</code>
             </div>
-          ))}
+            <div className="space-y-2">
+              {volumes.map((volume) => (
+                <div key={`${volume.name}-${volume.mount_path}`} className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2 text-sm dark:bg-gray-900/70">
+                  <div className="min-w-0">
+                    <div className="font-medium capitalize text-gray-900 dark:text-white">{volume.name}</div>
+                    <code className="block truncate text-xs text-gray-500 dark:text-gray-400">{volume.mount_path}</code>
+                  </div>
+                  <span className="shrink-0 text-xs font-medium text-gray-500 dark:text-gray-400">{volume.size}</span>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        ) : (
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            This component does not define shared storage mounts.
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function internalEndpointUrl(endpoint: ServiceEndpoint) {
+  const host = `${endpoint.name}.${endpoint.namespace}.svc.cluster.local`
+  const path = endpoint.base_path || endpoint.landing_path || ''
+  if (endpoint.port === 5432) return `postgresql://${host}:${endpoint.port}`
+  return `http://${host}:${endpoint.port}${path}`
+}
+
+function AppInternalEndpoints({ app, namespace, enabled }: { app: AppConfig; namespace: string; enabled: boolean }) {
+  const { data: endpoints, isLoading } = useQuery({
+    queryKey: ['app-internal-endpoints', app.name, namespace],
+    queryFn: () => monitoringApi.getEndpoints(app.name, namespace),
+    enabled,
+    staleTime: 15000,
+  })
+
+  return (
+    <div className="mt-6">
+      <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+        <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 010 5.656l-3 3a4 4 0 01-5.656-5.656l1.5-1.5m10.656.656l1.5-1.5a4 4 0 00-5.656-5.656l-3 3" />
+        </svg>
+        Internal Endpoint
+      </h3>
+
+      <div className="rounded-lg bg-gray-50 p-4 dark:bg-gray-800/50">
+        {isLoading ? (
+          <div className="h-10 rounded-md bg-white dark:bg-gray-900/70 animate-pulse" />
+        ) : endpoints && endpoints.length > 0 ? (
+          <div className="space-y-2">
+            {endpoints.map((endpoint) => (
+              <div key={`${endpoint.name}-${endpoint.port}`} className="rounded-md bg-white px-3 py-2 dark:bg-gray-900/70">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-medium text-gray-900 dark:text-white">{endpoint.name}</span>
+                  <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                    {endpoint.service_type}:{endpoint.port}
+                  </span>
+                </div>
+                <code className="mt-1 block break-all text-xs text-gray-500 dark:text-gray-400">{internalEndpointUrl(endpoint)}</code>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-gray-500 dark:text-gray-400">No internal service endpoint exposed.</p>
+        )}
+      </div>
     </div>
   )
 }
@@ -452,6 +444,7 @@ function AppStorageInfo({ appName }: { appName: string }) {
 // App Detail Panel (right sidebar)
 interface AppDetailPanelProps {
   app: AppConfig | null
+  namespace: string
   isInstalled: boolean
   isHealthy: boolean
   effectiveState: string
@@ -463,6 +456,7 @@ interface AppDetailPanelProps {
 
 function AppDetailPanel({
   app,
+  namespace,
   isInstalled,
   isHealthy,
   effectiveState,
@@ -695,7 +689,9 @@ function AppDetailPanel({
             </div>
           </div>
 
-          <AppStorageInfo appName={app.name} />
+          <AppStorageInfo app={app} />
+
+          <AppInternalEndpoints app={app} namespace={namespace} enabled={isInstalled || app.is_system} />
 
           {/* VPN Configuration */}
           {canViewVpn && !app.is_system && isInstalled && (
@@ -892,7 +888,7 @@ function AppDetailPanel({
 }
 
 export default function AppsPage() {
-  const { catalog, installedApps: installed, appStatuses: globalAppStatuses, refreshAppStatuses } = useMonitoring()
+  const { catalog, installedApps: installed, appStates, appStatuses: globalAppStatuses, refreshAppStatuses } = useMonitoring()
   const [searchParams, setSearchParams] = useSearchParams()
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
   const [operationStatuses, setOperationStatuses] = useState<Record<string, OperationStatus>>({})
@@ -989,91 +985,15 @@ export default function AppsPage() {
     }
   }
 
-  const pollHealth = async (appName: string) => {
-    const maxAttempts = 60
-    let attempts = 0
-
-    const checkHealth = async (): Promise<boolean> => {
-      try {
-        const health = await appsApi.checkHealth(appName)
-
-        if (health.healthy && health.status === 'healthy') {
-          setOperationState(appName, null)
-          refreshAppStatuses()
-          showToast(`${appName} installed successfully`, 'success')
-          return true
-        }
-
-        attempts++
-        if (attempts >= maxAttempts) {
-          setOperationState(appName, 'error', 'Installation timeout - deployments not healthy')
-          showToast(`${appName} installation timed out`, 'error')
-          return true
-        }
-
-        setTimeout(() => checkHealth(), 2000)
-        return false
-      } catch {
-        attempts++
-        if (attempts >= maxAttempts) {
-          setOperationState(appName, 'error', 'Health check failed')
-          showToast(`${appName} health check failed`, 'error')
-          return true
-        }
-        setTimeout(() => checkHealth(), 2000)
-        return false
-      }
-    }
-
-    checkHealth()
-  }
-
-  const pollDeletion = async (appName: string) => {
-    const maxAttempts = 60
-    let attempts = 0
-
-    const checkDeletion = async (): Promise<boolean> => {
-      try {
-        const { exists } = await appsApi.checkExists(appName)
-
-        if (!exists) {
-          setOperationState(appName, null)
-          refreshAppStatuses()
-          showToast(`${appName} uninstalled successfully`, 'success')
-          return true
-        }
-
-        attempts++
-        if (attempts >= maxAttempts) {
-          setOperationState(appName, 'error', 'Deletion timeout')
-          showToast(`${appName} deletion timed out`, 'error')
-          return true
-        }
-
-        setTimeout(() => checkDeletion(), 2000)
-        return false
-      } catch {
-        attempts++
-        if (attempts >= maxAttempts) {
-          setOperationState(appName, 'error', 'Deletion check failed')
-          showToast(`${appName} deletion check failed`, 'error')
-          return true
-        }
-        setTimeout(() => checkDeletion(), 2000)
-        return false
-      }
-    }
-
-    checkDeletion()
-  }
-
   const installMutation = useMutation({
     mutationFn: (appName: string) => {
       setOperationState(appName, 'installing')
       return appsApi.install({ app_name: appName, namespace: appName })
     },
-    onSuccess: (_data, appName) => {
-      pollHealth(appName)
+    onSuccess: (operation, appName) => {
+      setOperationState(appName, 'installing', operation.message || 'Install queued')
+      refreshAppStatuses()
+      showToast(`${appName} install queued`, 'success')
     },
     onError: (error: any, appName) => {
       setOperationState(appName, 'error', error.response?.data?.detail || error.message)
@@ -1086,8 +1006,10 @@ export default function AppsPage() {
       setOperationState(appName, 'deleting')
       return appsApi.delete(appName)
     },
-    onSuccess: (_data, appName) => {
-      pollDeletion(appName)
+    onSuccess: (operation, appName) => {
+      setOperationState(appName, 'deleting', operation.message || 'Uninstall queued')
+      refreshAppStatuses()
+      showToast(`${appName} uninstall queued`, 'success')
     },
     onError: (error: any, appName) => {
       setOperationState(appName, 'error', error.response?.data?.detail || error.message)
@@ -1098,12 +1020,23 @@ export default function AppsPage() {
   const getAppState = (app: AppConfig) => {
     const isInstalled = installed?.includes(app.name)
     const operationStatus = operationStatuses[app.name]
+    const appState = appStates[app.name]
     const globalStatus = globalAppStatuses[app.name]
-    const isHealthy = globalStatus?.healthy === true
+    const isHealthy = appState?.healthy === true || globalStatus?.healthy === true
 
     let effectiveState: string
     if (app.is_system) {
       effectiveState = 'installed'
+    } else if (appState?.observed_state === 'installing') {
+      effectiveState = 'installing'
+    } else if (appState?.observed_state === 'deleting') {
+      effectiveState = 'deleting'
+    } else if (appState?.observed_state === 'failed') {
+      effectiveState = 'error'
+    } else if (appState?.observed_state === 'installed' || appState?.observed_state === 'unhealthy') {
+      effectiveState = 'installed'
+    } else if (appState?.observed_state === 'not_installed') {
+      effectiveState = 'idle'
     } else if (operationStatus) {
       effectiveState = operationStatus.state
     } else if (isInstalled) {
@@ -1112,7 +1045,8 @@ export default function AppsPage() {
       effectiveState = 'idle'
     }
 
-    return { isInstalled: isInstalled || app.is_system, isHealthy, effectiveState }
+    const serverInstalled = appState?.observed_state === 'installed' || appState?.observed_state === 'unhealthy' || appState?.observed_state === 'installing'
+    return { isInstalled: isInstalled || serverInstalled || app.is_system, isHealthy, effectiveState }
   }
 
   const handleOpen = (app: AppConfig) => {
@@ -1273,9 +1207,11 @@ export default function AppsPage() {
       {/* App Detail Panel (right sidebar) */}
       {selectedApp && (() => {
         const { isInstalled, isHealthy, effectiveState } = getAppState(selectedApp)
+        const namespace = appStates[selectedApp.name]?.namespace || selectedApp.name
         return (
           <AppDetailPanel
             app={selectedApp}
+            namespace={namespace}
             isInstalled={isInstalled}
             isHealthy={isHealthy}
             effectiveState={effectiveState}

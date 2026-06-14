@@ -1,5 +1,5 @@
 import apiClient from './client';
-import type { AppConfig, DeploymentRequest, DeploymentStatus } from '../types';
+import type { AppConfig, AppOperation, AppState, DeploymentRequest } from '../types';
 
 // Export type for convenience
 export type App = AppConfig;
@@ -30,14 +30,38 @@ export const appsApi = {
   },
 
   // Install app
-  install: async (request: DeploymentRequest): Promise<DeploymentStatus> => {
-    const response = await apiClient.post<DeploymentStatus>('/apps/install', request);
+  install: async (request: DeploymentRequest): Promise<AppOperation> => {
+    const response = await apiClient.post<AppOperation>('/apps/install', request);
     return response.data;
   },
 
   // Delete app
-  delete: async (appName: string): Promise<{success: boolean, message: string, status: string}> => {
-    const response = await apiClient.delete(`/apps/${appName}`);
+  delete: async (appName: string): Promise<AppOperation> => {
+    const response = await apiClient.delete<AppOperation>(`/apps/${appName}`);
+    return response.data;
+  },
+
+  // Update app
+  update: async (appName: string): Promise<AppOperation> => {
+    const response = await apiClient.post<AppOperation>(`/apps/${appName}/update`);
+    return response.data;
+  },
+
+  // Get app operations
+  getOperations: async (): Promise<AppOperation[]> => {
+    const response = await apiClient.get<AppOperation[]>('/apps/operations');
+    return response.data;
+  },
+
+  // Get app states
+  getStates: async (): Promise<AppState[]> => {
+    const response = await apiClient.get<AppState[]>('/apps/states');
+    return response.data;
+  },
+
+  // Get app state
+  getState: async (appName: string): Promise<AppState> => {
+    const response = await apiClient.get<AppState>(`/apps/${appName}/state`);
     return response.data;
   },
 
@@ -60,10 +84,11 @@ export const appsApi = {
   },
 
   // Restart app
-  restart: async (appName: string, namespace: string = 'media'): Promise<void> => {
-    await apiClient.post(`/apps/${appName}/restart`, null, {
+  restart: async (appName: string, namespace: string = 'media'): Promise<AppOperation> => {
+    const response = await apiClient.post<AppOperation>(`/apps/${appName}/restart`, null, {
       params: { namespace },
     });
+    return response.data;
   },
 
   // Get categories

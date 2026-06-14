@@ -30,8 +30,9 @@ kubectl port-forward -n kubarr svc/kubarr-frontend 8080:80
 
 Visit [http://localhost:8080](http://localhost:8080). The setup wizard will walk you through creating your admin account.
 
-!!! tip
-    If you have an ingress controller, you can skip port-forwarding and set up a proper hostname instead. See the [Configuration Reference](configuration.md) for ingress options.
+::: tip
+If you have an ingress controller, you can skip port-forwarding and set up a proper hostname instead. See the [Configuration Reference](configuration.md) for ingress options.
+:::
 
 ## Deploy Your First App
 

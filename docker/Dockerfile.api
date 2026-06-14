@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1.4
+FROM public.ecr.aws/docker/library/rust:1.92-alpine AS builder
+
+RUN apk add --no-cache musl-dev pkgconf openssl-dev openssl-libs-static
+
+WORKDIR /app/code/api
+
+ARG PROFILE=release
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+ENV CARGO_INCREMENTAL=1
+
+COPY code/api/Cargo.toml code/api/Cargo.lock* ./
+RUN mkdir src && echo '' > src/lib.rs && echo 'fn main() {}' > src/main.rs
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/code/api/target \
+    cargo build --profile ${PROFILE} && rm -rf src
+
+COPY code/api/src ./src
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/code/api/target \
+    PROFILE_DIR=$(if [ "$PROFILE" = "release" ]; then echo "release"; else echo "$PROFILE"; fi) && \
+    rm -f "target/${PROFILE_DIR}/kubarr-api" "target/${PROFILE_DIR}/libkubarr"* 2>/dev/null || true && \
+    find "target/${PROFILE_DIR}/deps" -maxdepth 1 \( -name 'kubarr_api*' -o -name 'kubarr*' -o -name 'libkubarr*' \) -delete 2>/dev/null || true && \
+    touch src/lib.rs src/main.rs && \
+    cargo build --profile "${PROFILE}" --bin kubarr-api && \
+    cp "target/${PROFILE_DIR}/kubarr-api" /kubarr-api
+
+FROM alpine/helm:3.21.0 AS helm-source
+
+FROM public.ecr.aws/docker/library/alpine:3.23
+ARG COMMIT_HASH=unknown
+ARG BUILD_TIME=unknown
+ARG CHANNEL=dev
+
+RUN apk add --no-cache ca-certificates tzdata
+WORKDIR /app
+COPY --from=builder /kubarr-api /app/kubarr-api
+COPY --from=helm-source /usr/bin/helm /usr/local/bin/helm
+RUN adduser -D -u 1000 -g kubarr kubarr && chown -R kubarr:kubarr /app
+
+ENV COMMIT_HASH=${COMMIT_HASH}
+ENV BUILD_TIME=${BUILD_TIME}
+ENV CHANNEL=${CHANNEL}
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+EXPOSE 8000
+USER kubarr
+ENTRYPOINT ["/app/kubarr-api"]

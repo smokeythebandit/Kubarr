@@ -21,11 +21,11 @@ Kubarr is a Kubernetes-native homelab management platform designed for single-po
 
 ## Current Architecture
 
-### 1. PostgreSQL Database (CloudNativePG 1.28)
+### 1. PostgreSQL Database
 
-**Setup:** PostgreSQL is managed by the CloudNativePG (CNPG) operator v1.28 running in Kubernetes. The backend connects via SeaORM 1.1 with both `sqlx-postgres` and `sqlx-sqlite` feature flags compiled in `Cargo.toml`.
+**Setup:** PostgreSQL runs as a single-replica Kubernetes StatefulSet from the `system/postgresql` Helm chart. The backend connects via SeaORM 1.1 with both `sqlx-postgres` and `sqlx-sqlite` feature flags compiled in `Cargo.toml`.
 
-**Connection Management** (`code/backend/src/application/database.rs`):
+**Connection Management** (`code/api/src/application/database.rs`):
 
 ```rust
 let mut opts = ConnectOptions::new(database_url);
@@ -42,7 +42,7 @@ opts.max_connections(10)
 - **Retry logic:** None on initial connection failure; `try_connect()` provides graceful degradation with a 5s timeout during bootstrap
 - **Migrations:** Run automatically on connect via `Migrator::up(&db, None)`
 
-**Entity Models** (`code/backend/src/models/`): 22 entities covering:
+**Entity Models** (`code/api/src/models/`): 22 entities covering:
 
 | Category | Models |
 |----------|--------|
@@ -54,17 +54,9 @@ opts.max_connections(10)
 
 All models use standard SeaORM patterns: `DeriveEntityModel` with `Serialize`/`Deserialize`, `i64` primary keys (PostgreSQL `bigint`), and `DateTimeUtc` timestamps.
 
-**Migrations** (`code/backend/src/migrations/`): 22 ordered migrations (including a seed-defaults migration) covering schema creation from `m20260127_000001` through `m20260130_000002`.
+**Migrations** (`code/api/src/migrations/`): ordered migrations run automatically on API startup.
 
-**CNPG RBAC** (`charts/kubarr/values.yaml`):
-
-```yaml
-- apiGroups: ["postgresql.cnpg.io"]
-  resources: ["clusters", "backups", "scheduledbackups", "poolers"]
-  verbs: ["get", "list", "watch", "create", "update", "delete", "patch"]
-```
-
-The backend has full CRUD access to CNPG resources, enabling programmatic database cluster management from within the application.
+**Chart storage:** The PostgreSQL StatefulSet mounts the shared `media-data` claim at `/var/lib/postgresql/data` with subpath `system/postgresql`. `PGDATA` is set to `/var/lib/postgresql/data/pgdata`.
 
 ### 2. In-Memory Caching (`code/backend/src/application/state.rs`)
 
@@ -111,7 +103,7 @@ pub struct NetworkMetricsCache {
 - `SharedCatalog` - Application catalog
 - `NetworkMetricsBroadcast` / `BootstrapBroadcast` - Tokio broadcast channels for WebSocket clients
 
-### 3. File-System Storage (`code/backend/src/endpoints/storage.rs`)
+### 3. File-System Storage (`code/api/src/endpoints/storage.rs`)
 
 File browsing and download endpoints serve media from a configurable storage path.
 
@@ -182,26 +174,26 @@ Used for dynamic configuration (storage path, OAuth2 settings, JWT keys) without
 
 ### Architectural Limitations
 
-1. **CNPG operator overhead** - Running the CloudNativePG operator adds significant resource consumption and operational complexity for what is fundamentally a single-pod, single-user embedded database workload. The operator itself runs as a separate deployment with its own CPU/memory allocation, watches CRDs, and manages failover logic that is unnecessary when there is only one database pod. For a homelab, this is a disproportionate amount of infrastructure for the problem being solved.
+1. **Separate database workload overhead** - Running PostgreSQL as its own StatefulSet adds operational and resource overhead for what is fundamentally a small, single-user database workload. For a homelab, a separate database pod can still be more infrastructure than the problem requires.
 
 2. **Cache data lost on pod restart** - All cached data (endpoint lookups, network metrics history, rate calculations) is lost when the backend pod restarts. This causes a cold-start penalty: the first requests after restart must re-populate caches via K8s API calls and metric collection. Network rate calculations need multiple samples before producing accurate sliding-window averages, meaning the dashboard shows incomplete data for several polling intervals after restart.
 
-3. **No connection retry logic** - If PostgreSQL becomes temporarily unavailable after the initial connection is established (e.g., during a CNPG switchover, brief network partition, or pod reschedule), there is no reconnection logic. The `try_connect()` function provides graceful degradation during bootstrap but does not handle mid-operation disconnects. SeaORM's underlying connection pool (sqlx) does handle some reconnection, but the application has no explicit retry-with-backoff strategy for transient failures.
+3. **No connection retry logic** - If PostgreSQL becomes temporarily unavailable after the initial connection is established (for example during pod restart, brief network partition, or reschedule), there is no explicit application-level reconnection logic. The `try_connect()` function provides graceful degradation during bootstrap but does not handle mid-operation disconnects. SeaORM's underlying connection pool (sqlx) does handle some reconnection, but the application has no explicit retry-with-backoff strategy for transient failures.
 
 4. **SQLite already compiled** - Both `sqlx-postgres` and `sqlx-sqlite` feature flags are enabled in `Cargo.toml`, but only PostgreSQL is used at runtime. This means the binary already includes SQLite support, making a potential migration to SQLite a smaller lift than it might otherwise be.
 
 ### Operational Complexity
 
-1. **CNPG dependency** - Requires installing and managing the CNPG operator in the cluster before Kubarr can be deployed. This adds a prerequisite step that complicates installation for homelab users.
-2. **Backup configuration** - CNPG backups require separate configuration (S3-compatible storage, scheduled backups, retention policies). Without this, there is no automated backup - a risk for homelab users who may not configure it.
-3. **Resource footprint** - CNPG operator pod + PostgreSQL pod(s) consume memory (~256MB+ for PostgreSQL, ~128MB for the operator) and CPU beyond what the application itself needs. On constrained homelab hardware (e.g., Raspberry Pi, mini PC), this overhead is significant.
+1. **Separate database deployment** - PostgreSQL is a separate StatefulSet and Service that must be installed, monitored, and recovered independently from the API and worker.
+2. **Backup configuration** - Backups require a separate strategy for the `system/postgresql` subpath or the full NFS backing volume. Without this, there is no automated database backup.
+3. **Resource footprint** - PostgreSQL consumes memory and CPU beyond what the application itself needs. On constrained homelab hardware (e.g., Raspberry Pi, mini PC), this overhead is significant.
 4. **Port forwarding fragility** - Development workflow requires manual port-forward restart after every deployment, adding friction to the development cycle.
 
 ---
 
 ## Option A: Optimized PostgreSQL
 
-**Summary:** Keep the current PostgreSQL/CloudNativePG stack but address all identified performance issues, tune CNPG configuration, and improve operational reliability. This is the lowest-risk path that delivers meaningful improvements without architectural changes.
+**Summary:** Keep the current PostgreSQL StatefulSet but address all identified performance issues, tune PostgreSQL configuration, and improve operational reliability. This is the lowest-risk path that delivers meaningful improvements without architectural changes.
 
 ### Quick Wins (Application-Level)
 
@@ -315,23 +307,21 @@ tokio::spawn(async move {
 
 **Impact:** Prevents indefinite table growth. With 90-day retention and typical homelab activity (~100-500 events/day), the audit_log table stays under 50K rows (~5MB), keeping the GROUP BY query fast and PostgreSQL VACUUM efficient.
 
-### CNPG Tuning (Infrastructure-Level)
+### PostgreSQL StatefulSet Tuning (Infrastructure-Level)
 
-These improvements optimize the CloudNativePG cluster configuration for homelab workloads.
+These improvements optimize the plain PostgreSQL StatefulSet configuration for homelab workloads.
 
 #### 1. Separate WAL Volume
 
 PostgreSQL Write-Ahead Logging (WAL) benefits significantly from dedicated I/O:
 
 ```yaml
-# CNPG Cluster spec
-spec:
-  storage:
-    size: 5Gi
-    storageClass: local-path
-  walStorage:
-    size: 2Gi
-    storageClass: local-path
+env:
+  - name: POSTGRES_INITDB_WALDIR
+    value: /var/lib/postgresql/wal
+volumeMounts:
+  - name: wal
+    mountPath: /var/lib/postgresql/wal
 ```
 
 **Impact:** Separating WAL from data storage can improve write IOPS by up to 2x on spinning disks and reduce I/O contention on SSDs. For homelab NVMe/SSD setups, the benefit is moderate but still measurable (~20-30% write throughput improvement) due to reduced fsync contention.
@@ -341,29 +331,28 @@ spec:
 Allocate ~75% of available resources to PostgreSQL for optimal buffer pool sizing:
 
 ```yaml
-spec:
-  resources:
-    requests:
-      memory: 256Mi
-      cpu: 100m
-    limits:
-      memory: 512Mi
-      cpu: 500m
-  postgresql:
-    parameters:
-      shared_buffers: "128MB"        # ~25% of memory limit
-      effective_cache_size: "384MB"  # ~75% of memory limit
-      work_mem: "4MB"               # Per-operation sort memory
-      maintenance_work_mem: "64MB"  # For VACUUM, CREATE INDEX
-      wal_buffers: "4MB"
-      max_connections: "20"         # Match app pool + headroom
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+    cpu: 500m
+postgresql:
+  parameters:
+    shared_buffers: "128MB"        # ~25% of memory limit
+    effective_cache_size: "384MB"  # ~75% of memory limit
+    work_mem: "4MB"                # Per-operation sort memory
+    maintenance_work_mem: "64MB"   # For VACUUM, CREATE INDEX
+    wal_buffers: "4MB"
+    max_connections: "20"          # Match app pool + headroom
 ```
 
 **Impact:** Proper `shared_buffers` and `effective_cache_size` settings allow PostgreSQL to cache hot data (user sessions, roles, permissions) in memory, reducing disk reads for the auth-layer's 4+ queries per request. For Kubarr's 22-table schema with typical homelab data sizes (<100MB total), most of the working set fits in shared buffers.
 
 #### 3. Dynamic PVC Provisioning
 
-Use StorageClass with `allowVolumeExpansion: true` to enable online volume resizing:
+If PostgreSQL is moved off the shared NFS claim, use a StorageClass with `allowVolumeExpansion: true` to enable online volume resizing:
 
 ```yaml
 spec:
@@ -392,35 +381,23 @@ spec:
     persistentVolumeClaimName: kubarr-db-pvc
 ```
 
-Alternatively, CNPG's built-in backup to S3-compatible storage (MinIO, Backblaze B2):
+For the current chart, backup the `system/postgresql` subpath on the shared media claim or back up the entire NFS export:
 
 ```yaml
-spec:
-  backup:
-    barmanObjectStore:
-      destinationPath: "s3://kubarr-backups/"
-      endpointURL: "https://s3.us-west-000.backblazeb2.com"
-      s3Credentials:
-        accessKeyId:
-          name: backup-creds
-          key: ACCESS_KEY_ID
-        secretAccessKey:
-          name: backup-creds
-          key: SECRET_ACCESS_KEY
-    retentionPolicy: "30d"
+storage:
+  media:
+    existingClaim: media-data
+    dataSubPath: system/postgresql
 ```
 
-**Impact:** Provides automated, consistent backups without manual intervention. CNPG's Barman integration handles WAL archiving and point-in-time recovery (PITR). Backblaze B2 free tier (10GB) is sufficient for typical homelab database sizes.
+**Impact:** Provides a clear database backup target without requiring a database operator. For consistency, prefer a PostgreSQL-aware dump or stop the StatefulSet briefly before copying raw files.
 
 ### High Availability Considerations
 
-CNPG supports primary + replica configurations with automatic failover:
+Plain PostgreSQL can run with streaming replicas, but the current chart intentionally deploys a single replica:
 
 ```yaml
-spec:
-  instances: 2  # Primary + 1 streaming replica
-  enableSuperuserAccess: false
-  primaryUpdateStrategy: unsupervised
+replicas: 1
 ```
 
 **Assessment for homelab:** HA is generally **overkill** for a single-user homelab deployment. The added resource cost (2x PostgreSQL memory/CPU, WAL streaming overhead) outweighs the benefit when:
@@ -440,16 +417,15 @@ spec:
 | **Pros** | |
 | Minimal migration effort | No schema changes, no data migration, no deployment model changes |
 | Low risk | Each quick win can be deployed independently and rolled back |
-| Preserves CNPG features | Automated failover, backup, WAL archiving remain available |
 | Full SQL capabilities | All PostgreSQL features (LISTEN/NOTIFY, advanced indexing, JSON operators, full-text search) remain available |
 | SeaORM compatibility | No ORM changes needed; existing migrations continue to work |
-| Incremental improvement | Quick wins can be shipped immediately while CNPG tuning follows |
+| Incremental improvement | Quick wins can be shipped immediately while PostgreSQL tuning follows |
 | **Cons** | |
-| CNPG operator overhead remains | Operator pod (~128MB RAM) continues running for a single database instance |
-| Operational complexity persists | Homelab users still need to install and manage the CNPG operator |
-| Resource floor unchanged | PostgreSQL pod + operator pod baseline remains ~384MB+ RAM |
-| Does not simplify deployment | Still requires CNPG CRDs, operator deployment, and cluster resource creation |
-| Limited portability | CNPG is Kubernetes-specific; no path to running Kubarr outside K8s |
+| PostgreSQL pod overhead remains | Separate database pod continues running for a small database workload |
+| Operational complexity persists | Homelab users still need to understand and back up a separate database workload |
+| Resource floor unchanged | PostgreSQL pod baseline remains part of the deployment |
+| Does not simplify deployment | Still requires a separate StatefulSet and Service |
+| Limited portability | The current deployment model is Kubernetes-specific |
 
 ### Migration Effort
 
@@ -461,24 +437,23 @@ spec:
 | Audit stats GROUP BY | ~2 hours | Low - query change with same output format |
 | Background cache cleanup | ~2 hours | Low - additive background task |
 | Scheduled audit retention | ~1 hour | Low - wraps existing `clear_old_logs()` |
-| CNPG tuning (values.yaml) | ~2 hours | Low - configuration changes, rollback via Helm |
+| PostgreSQL tuning (values.yaml) | ~2 hours | Low - configuration changes, rollback via Helm |
 | HA setup (if desired) | ~4 hours | Medium - requires testing failover scenarios |
 
 No data migration is required. No schema changes are needed. All changes are backward-compatible.
 
 ### Resource Impact
 
-| Resource | Current | After Quick Wins | After CNPG Tuning |
+| Resource | Current | After Quick Wins | After PostgreSQL Tuning |
 |----------|---------|------------------|-------------------|
 | PostgreSQL memory | ~256MB (default) | ~256MB (unchanged) | ~512MB (tuned buffers) |
-| CNPG operator | ~128MB | ~128MB (unchanged) | ~128MB (unchanged) |
 | DB connections | 10 max (hardcoded) | 5 max (configurable) | 5 max (configurable) |
 | Connection memory | ~100MB (10 × 10MB) | ~50MB (5 × 10MB) | ~50MB (5 × 10MB) |
 | Audit log table | Unbounded growth | Bounded by retention policy | Bounded by retention policy |
 | Cache memory | Unbounded (lazy eviction) | Bounded (active eviction) | Bounded (active eviction) |
 | **Total DB footprint** | **~484MB** | **~434MB** | **~690MB (with tuning)** |
 
-Note: CNPG tuning increases PostgreSQL memory allocation intentionally to improve cache hit rates, which reduces disk I/O and improves query latency. The trade-off is worthwhile if the host has sufficient RAM (4GB+).
+Note: PostgreSQL tuning increases memory allocation intentionally to improve cache hit rates, which reduces disk I/O and improves query latency. The trade-off is worthwhile if the host has sufficient RAM (4GB+).
 
 ### Risk Assessment
 
@@ -486,17 +461,17 @@ Note: CNPG tuning increases PostgreSQL memory allocation intentionally to improv
 |------|-----------|--------|------------|
 | GROUP BY query returns different format | Low | Low | Unit test comparing old vs new output |
 | Background task panics | Very low | Low | `tokio::spawn` isolates panics; add error logging |
-| CNPG tuning causes instability | Low | Medium | Test in dev cluster first; Helm rollback available |
+| PostgreSQL tuning causes instability | Low | Medium | Test in dev cluster first; Helm rollback available |
 | Connection pool too small | Low | Low | Configurable via env var; adjust without rebuild |
 | Audit retention deletes needed logs | Low | Medium | Default 90 days is conservative; env-configurable |
 
-**Overall risk: Low.** All changes are incremental, independently deployable, and reversible. The quick wins address real issues with proven patterns. CNPG tuning follows well-documented PostgreSQL best practices.
+**Overall risk: Low.** All changes are incremental, independently deployable, and reversible. The quick wins address real issues with proven patterns. PostgreSQL tuning follows well-documented best practices.
 
 ---
 
 ## Option B: SQLite + Litestream
 
-**Summary:** Replace PostgreSQL with an embedded SQLite database running inside the backend process, eliminating the CNPG operator and external database pod entirely. Continuous replication to S3-compatible storage (Backblaze B2) is handled by Litestream running as a sidecar container. The Kubernetes deployment model changes from a Deployment to a StatefulSet with `replicas: 1`.
+**Summary:** Replace PostgreSQL with an embedded SQLite database running inside the backend process, eliminating the external database pod entirely. Continuous replication to S3-compatible storage (Backblaze B2) is handled by Litestream running as a sidecar container. The Kubernetes deployment model changes from a Deployment to a StatefulSet with `replicas: 1`.
 
 ### SeaORM Feature Flag Change
 
@@ -774,7 +749,7 @@ The `Recreate` update strategy means the old pod must fully terminate before the
 - **Impact:** API requests return 503 during the transition. WebSocket connections are dropped and must reconnect.
 - **Mitigation:** Kubernetes `terminationGracePeriodSeconds` allows the backend to complete in-flight requests. Litestream's init container restore is fast for small databases (<1 second for <50MB).
 
-**Assessment:** This downtime window is identical to the current behavior with PostgreSQL when the backend pod restarts. The CNPG database pod also has its own restart/failover time. In practice, SQLite may have *less* total downtime because there is no external database pod to restart or failover.
+**Assessment:** This downtime window is identical to the current behavior with PostgreSQL when the backend pod restarts. The PostgreSQL pod also has its own restart time. In practice, SQLite may have *less* total downtime because there is no external database pod to restart.
 
 #### 3. No LISTEN/NOTIFY
 
@@ -862,7 +837,7 @@ sqlite3 /tmp/kubarr.db "SELECT name, (SELECT COUNT(*) FROM [name]) FROM sqlite_m
 | Litestream ConfigMap and Secret | ~2 hours | Low - standard Kubernetes resources |
 | Data export/import tooling | ~4 hours | Medium - type conversion edge cases |
 | Integration testing | ~8 hours | Medium - verify all 22 entities CRUD on SQLite |
-| Remove CNPG dependency | ~2 hours | Low - delete CRDs, operator, and RBAC rules |
+| Remove PostgreSQL deployment | ~2 hours | Low - delete StatefulSet, Service, and database-specific values |
 | Documentation | ~2 hours | Low - update README and deployment guide |
 | **Total** | **~28 hours (3-4 days)** | **Medium overall** |
 
@@ -871,11 +846,10 @@ sqlite3 /tmp/kubarr.db "SELECT name, (SELECT COUNT(*) FROM [name]) FROM sqlite_m
 | Aspect | Assessment |
 |--------|------------|
 | **Pros** | |
-| Eliminates CNPG operator | No operator pod (~128MB RAM), no CRDs, no operator upgrades to manage |
 | Eliminates PostgreSQL pod | No separate database pod (~256MB+ RAM), no connection pool overhead |
-| Dramatically simpler deployment | One StatefulSet with a sidecar replaces Deployment + CNPG Cluster + operator |
+| Dramatically simpler deployment | One StatefulSet with a sidecar replaces the API Deployment plus separate PostgreSQL StatefulSet |
 | Lower resource footprint | SQLite is embedded in the backend process; total savings ~384MB+ RAM |
-| Automated backup via Litestream | Continuous S3 replication with <1s RPO; simpler than CNPG Barman config |
+| Automated backup via Litestream | Continuous S3 replication with <1s RPO; simpler than filesystem-level PostgreSQL backups |
 | No network database latency | Queries execute in-process via file I/O, not over TCP. ~10x faster for simple queries |
 | SQLite already compiled | Both `sqlx-postgres` and `sqlx-sqlite` feature flags are in `Cargo.toml`; no new dependencies |
 | Ideal for homelab scale | SQLite handles millions of rows; Kubarr's 22 tables with <100K rows total is trivial |
@@ -892,17 +866,16 @@ sqlite3 /tmp/kubarr.db "SELECT name, (SELECT COUNT(*) FROM [name]) FROM sqlite_m
 
 ### Resource Impact
 
-| Resource | Current (PostgreSQL + CNPG) | Option B (SQLite + Litestream) | Savings |
+| Resource | Current PostgreSQL | Option B (SQLite + Litestream) | Savings |
 |----------|---------------------------|-------------------------------|---------|
-| CNPG operator pod | ~128MB RAM, ~50m CPU | Eliminated | 128MB RAM |
 | Database pod | ~256MB RAM, ~100m CPU | Eliminated | 256MB RAM |
 | Litestream sidecar | N/A | ~32-64MB RAM, ~10m CPU | -64MB RAM |
 | Backend memory (DB) | ~10MB (connection pool) | ~5MB (SQLite in-process) | 5MB RAM |
 | Database connections | 10 TCP connections | 1 file handle | Negligible |
-| Storage volumes | CNPG PVC (5Gi) + WAL PVC (2Gi) | Single PVC (1Gi) | 6Gi disk |
-| S3 backup storage | Optional (CNPG Barman) | Required (Litestream) | ~Same cost |
-| **Total RAM savings** | | | **~325MB** |
-| **Total pod count** | 3 (backend + PG + operator) | 1 (backend + sidecar) | 2 fewer pods |
+| Storage volumes | Shared media claim subpath | Single PVC (1Gi) | Depends on deployment |
+| S3 backup storage | Optional external backup | Required (Litestream) | ~Same cost |
+| **Total RAM savings** | | | **~197MB** |
+| **Total pod count** | 2 (backend + PG) | 1 (backend + sidecar) | 1 fewer pod |
 
 ### Risk Assessment
 
@@ -915,7 +888,7 @@ sqlite3 /tmp/kubarr.db "SELECT name, (SELECT COUNT(*) FROM [name]) FROM sqlite_m
 | Write contention under load | Very low | Low | SQLite handles >50K writes/sec; Kubarr does <100 writes/min |
 | Future need for PostgreSQL features | Low | Medium | Both feature flags remain compiled; can switch back via `DATABASE_URL` |
 | PVC data loss on node failure | Low | Medium | Litestream restores from S3 within seconds; RPO <1 second |
-| StatefulSet operational complexity | Low | Low | Standard K8s pattern; well-documented; simpler than CNPG operator |
+| StatefulSet operational complexity | Low | Low | Standard K8s pattern; well-documented; simpler than separate database management |
 
 **Overall risk: Medium.** The migration itself carries moderate risk (data conversion, migration compatibility), but the runtime risk is lower than the current architecture (fewer moving parts, fewer failure modes). The ability to keep both feature flags and switch via `DATABASE_URL` provides a safe rollback path.
 
@@ -925,7 +898,7 @@ sqlite3 /tmp/kubarr.db "SELECT name, (SELECT COUNT(*) FROM [name]) FROM sqlite_m
 
 **Summary:** Use SQLite as the primary relational database (identical to Option B), but add an optional caching layer to address specific performance concerns — particularly auth-layer query overhead, session management, and potential future multi-replica scenarios. The caching layer can be either an external service (Redis/Valkey) or an embedded key-value store (redb, fjall), chosen based on deployment complexity tolerance and scaling ambitions.
 
-This option recognizes that while SQLite eliminates the CNPG/PostgreSQL overhead, certain workloads (session lookups, permission caching, real-time notifications) benefit from a dedicated caching layer that survives beyond individual request lifetimes and offers native TTL expiration.
+This option recognizes that while SQLite eliminates PostgreSQL overhead, certain workloads (session lookups, permission caching, real-time notifications) benefit from a dedicated caching layer that survives beyond individual request lifetimes and offers native TTL expiration.
 
 ### Primary Storage: SQLite (Same as Option B)
 
@@ -960,7 +933,7 @@ Not every deployment benefits from adding a caching layer. The decision depends 
 |----------|------------------------|
 | **Single-pod homelab with 1-5 users** | SQLite queries for auth lookups complete in <1ms from disk (often from OS page cache). The 4+ queries per request are fast enough that the latency is imperceptible to users. Adding a cache adds complexity without measurable user-facing improvement. |
 | **Low write volume** | Kubarr's write workload (<100 writes/minute) means cache invalidation is trivial — but it also means there's little to gain from caching because the database is never under pressure. |
-| **Simple deployment priority** | Homelab operators who chose SQLite to eliminate CNPG complexity may not want to add Redis/Valkey complexity back. The operational burden of another service (even a small one) contradicts the simplicity motivation. |
+| **Simple deployment priority** | Homelab operators who chose SQLite to eliminate separate database complexity may not want to add Redis/Valkey complexity back. The operational burden of another service (even a small one) contradicts the simplicity motivation. |
 
 ### External Caching: Redis / Valkey
 
@@ -1229,7 +1202,7 @@ The quantitative case against adding a caching layer for Kubarr's target deploym
 | Aspect | Assessment |
 |--------|------------|
 | **Pros** | |
-| All Option B benefits | SQLite simplicity, eliminated CNPG, Litestream backup, lower resource footprint |
+| All Option B benefits | SQLite simplicity, eliminated database pod, Litestream backup, lower resource footprint |
 | Auth performance improvement | 4+ DB queries reduced to 1 cache lookup (cache hit) for session/user/permissions |
 | Native TTL expiration | Redis/Valkey or redb-with-expiry replaces manual eviction logic in current `EndpointCache`/`NetworkMetricsCache` |
 | Future-proof for multi-pod | External cache (Valkey) enables shared sessions and pub/sub if horizontal scaling is ever needed |
@@ -1240,7 +1213,7 @@ The quantitative case against adding a caching layer for Kubarr's target deploym
 | Marginal benefit for homelab | 1-5ms latency improvement is imperceptible for 1-5 users; effort-to-value ratio is poor |
 | Cache invalidation complexity | Must invalidate cached auth context when permissions change, sessions are revoked, or users are deactivated |
 | Two storage engines to understand | Developers must understand both SQLite and the cache layer; increases onboarding complexity |
-| Valkey adds ~96MB RAM | Partially offsets the ~325MB saved by removing PostgreSQL/CNPG |
+| Valkey adds ~96MB RAM | Partially offsets the memory saved by removing PostgreSQL |
 | redb adds write contention | Both SQLite and redb are single-writer; two single-writer stores on the same pod increase lock contention risk |
 
 ### Migration Effort
@@ -1574,19 +1547,19 @@ impl EndpointCache {
 
 ### Decision: Option B — SQLite + Litestream
 
-**Kubarr should migrate from PostgreSQL/CloudNativePG to embedded SQLite with Litestream continuous replication.** This is the recommended storage architecture for the following reasons:
+**Kubarr should migrate from PostgreSQL to embedded SQLite with Litestream continuous replication.** This is the recommended storage architecture for the following reasons:
 
 #### Rationale
 
-1. **Operational simplicity is the primary driver.** Kubarr targets homelab operators who manage their own infrastructure. The current architecture requires installing the CloudNativePG operator, creating a CNPG Cluster custom resource, understanding CNPG backup configuration, and managing PostgreSQL pod lifecycle — all for a single-user application with <100MB of relational data. SQLite eliminates this entire layer. The database becomes a file inside the backend pod, managed by SeaORM the same way it manages PostgreSQL today.
+1. **Operational simplicity is the primary driver.** Kubarr targets homelab operators who manage their own infrastructure. The current architecture requires managing PostgreSQL pod lifecycle and backup strategy for a single-user application with <100MB of relational data. SQLite eliminates this separate database layer. The database becomes a file inside the backend pod, managed by SeaORM the same way it manages PostgreSQL today.
 
-2. **Resource savings are significant for constrained hardware.** Eliminating the CNPG operator pod (~128MB RAM) and PostgreSQL pod (~256MB RAM) saves ~325MB of RAM after accounting for the Litestream sidecar (~64MB). On a Raspberry Pi 4 (4GB RAM) or mini PC (8GB RAM), this is a meaningful reduction — roughly 8-10% of total system memory returned to other workloads.
+2. **Resource savings are significant for constrained hardware.** Eliminating the PostgreSQL pod (~256MB RAM) saves ~197MB of RAM after accounting for the Litestream sidecar (~64MB). On a Raspberry Pi 4 (4GB RAM) or mini PC (8GB RAM), this is meaningful memory returned to other workloads.
 
-3. **Fewer failure modes improve reliability.** The current architecture has three distinct failure points for database operations: the backend pod, the PostgreSQL pod, and the network path between them (including connection pool management, TCP timeouts, and CNPG failover logic). SQLite reduces this to one: the backend pod and its local file. There are no network partitions, no connection pool exhaustion, no CNPG operator bugs, and no PostgreSQL process crashes to handle.
+3. **Fewer failure modes improve reliability.** The current architecture has three distinct failure points for database operations: the backend pod, the PostgreSQL pod, and the network path between them. SQLite reduces this to one: the backend pod and its local file. There are no database network partitions, no connection pool exhaustion, and no PostgreSQL process crashes to handle.
 
 4. **The migration is feasible and low-risk.** All 22 entity models use SeaORM-portable types (`i64` primary keys, `String`, `DateTimeUtc`, `bool`, `Option<T>`). No PostgreSQL-specific column types (arrays, enums, JSONB operators) are used in queries. Both `sqlx-postgres` and `sqlx-sqlite` feature flags are already compiled in `Cargo.toml`. SeaORM's `Database::connect()` selects the correct driver based on the URL scheme, meaning the same binary can run against either backend.
 
-5. **Backup is simpler and more reliable.** CNPG backups require configuring Barman, S3 credentials, retention policies, and scheduled backups — all of which most homelab users never set up, leaving them with no backup at all. Litestream replicates every WAL frame to S3 within seconds, automatically, with a single ConfigMap and Secret. The free tier of Backblaze B2 (10GB) is more than sufficient for Kubarr's database size (<50MB).
+5. **Backup is simpler and more reliable.** PostgreSQL backups require a separate database-aware dump or volume backup strategy. Litestream replicates every WAL frame to S3 within seconds, automatically, with a single ConfigMap and Secret. The free tier of Backblaze B2 (10GB) is more than sufficient for Kubarr's database size (<50MB).
 
 6. **Single-pod constraint is a non-issue.** Kubarr is already designed for `replicas: 1`. The single-writer limitation of SQLite perfectly matches the single-pod deployment model. There is no current or planned need for horizontal scaling. If that requirement ever emerges, the dual feature flags allow switching back to PostgreSQL by changing `DATABASE_URL`.
 
@@ -1594,17 +1567,17 @@ impl EndpointCache {
 
 | Criterion | Option A: Optimized PostgreSQL | Option B: SQLite + Litestream | Option C: Hybrid (SQLite + Cache) |
 |-----------|-------------------------------|-------------------------------|-----------------------------------|
-| **Operational complexity** | ⚠️ High — CNPG operator, CRDs, PG pod, backup config | ✅ Low — embedded DB, Litestream sidecar | ❌ Medium-High — SQLite + Valkey/redb |
-| **Resource footprint** | ❌ ~484-690MB RAM (PG + operator + tuning) | ✅ ~82-114MB RAM (backend + Litestream) | ⚠️ ~114-210MB RAM (+ cache layer) |
+| **Operational complexity** | ⚠️ Medium — PG pod and backup config | ✅ Low — embedded DB, Litestream sidecar | ❌ Medium-High — SQLite + Valkey/redb |
+| **Resource footprint** | ❌ ~356-562MB RAM (PG + tuning) | ✅ ~82-114MB RAM (backend + Litestream) | ⚠️ ~114-210MB RAM (+ cache layer) |
 | **Migration effort** | ✅ Minimal (1-2 days, no schema changes) | ⚠️ Moderate (3-4 days, deployment model change) | ❌ Significant (5-6 days, deployment + cache) |
-| **Data durability** | ✅ CNPG WAL archiving, PITR, optional HA | ✅ Litestream S3 replication, <1s RPO | ✅ Same as Option B |
-| **Resilience (pod restart)** | ⚠️ Depends on PG pod + CNPG failover | ✅ PVC data intact; Litestream restore if needed | ✅ Same as Option B + warm cache |
-| **Scalability** | ✅ Can add read replicas via CNPG | ⚠️ Single-pod only (sufficient for homelab) | ⚠️ Single-pod + shared cache possible |
+| **Data durability** | ⚠️ Depends on external PostgreSQL backup strategy | ✅ Litestream S3 replication, <1s RPO | ✅ Same as Option B |
+| **Resilience (pod restart)** | ⚠️ Depends on PG pod availability | ✅ PVC data intact; Litestream restore if needed | ✅ Same as Option B + warm cache |
+| **Scalability** | ⚠️ Read replicas require custom chart work | ⚠️ Single-pod only (sufficient for homelab) | ⚠️ Single-pod + shared cache possible |
 | **Query performance** | ✅ Full PostgreSQL optimizer | ✅ In-process, no network latency (~10x faster for simple queries) | ✅ In-process + cached hot paths |
 | **Advanced SQL features** | ✅ Full PostgreSQL (LISTEN/NOTIFY, GIN, JSONB) | ⚠️ Standard SQL only (sufficient — no PG features used) | ⚠️ Same as Option B |
 | **Backup simplicity** | ⚠️ Requires Barman/S3 config (often skipped) | ✅ Automatic via Litestream sidecar | ✅ Same as Option B |
 | **Development complexity** | ✅ No changes to existing code patterns | ⚠️ SQLite PRAGMAs, StatefulSet, migration tooling | ❌ All Option B + cache invalidation logic |
-| **Pod count** | ❌ 3 pods (backend + PG + operator) | ✅ 1 pod (backend + sidecar) | ⚠️ 1-2 pods (+ Valkey if external) |
+| **Pod count** | ❌ 2 pods (backend + PG) | ✅ 1 pod (backend + sidecar) | ⚠️ 1-2 pods (+ Valkey if external) |
 | **SeaORM 2.0 compatibility** | ✅ Full | ✅ Full (Entity First Workflow supports SQLite) | ✅ Full |
 | **Rollback path** | ✅ Already running | ✅ Change `DATABASE_URL` back to postgres:// | ✅ Same as Option B |
 
@@ -1743,10 +1716,10 @@ Export data from PostgreSQL, import into SQLite, verify row counts, and cut over
 - Data import script with PostgreSQL→SQLite type conversions
 - Row count verification across all 22 tables
 - Litestream initial backup to S3 confirmed
-- CNPG operator and PostgreSQL resources removed from cluster
-- CNPG RBAC rules removed from `values.yaml`
+- PostgreSQL resources removed from cluster
+- Database-specific RBAC and values removed where no longer needed
 
-**Rollback:** PostgreSQL data remains intact during migration. If issues are found, switch `DATABASE_URL` back and redeploy with the Deployment template. CNPG resources can be recreated from Helm.
+**Rollback:** PostgreSQL data remains intact during migration. If issues are found, switch `DATABASE_URL` back and redeploy with the Deployment template. PostgreSQL resources can be recreated from Helm.
 
 #### Migration Timeline Summary
 
@@ -1769,7 +1742,7 @@ Week 4: Data Migration and Cutover (production)
   ├── Export PostgreSQL → Import SQLite
   ├── Verify data integrity
   ├── Cut over to SQLite deployment
-  └── Remove CNPG resources
+  └── Remove PostgreSQL resources
 ```
 
 **Total estimated effort:** ~35 hours (Quick Wins: ~7h + SQLite migration: ~28h)
@@ -1797,10 +1770,10 @@ SeaORM 2.0 (currently in release candidate) introduces the **Entity First Workfl
 | 4 | **If accepted:** Kubernetes deployment changes (Phase 2) | Backend + infra developer | Week 3 |
 | 5 | **If accepted:** Data migration and cutover (Phase 3) | Backend developer | Week 4 |
 | 6 | **If rejected:** Continue with Option A (Optimized PostgreSQL) | Backend developer | Ongoing |
-| 7 | **Post-migration:** Monitor for 2 weeks, then remove PostgreSQL/CNPG | Backend developer | Week 6 |
+| 7 | **Post-migration:** Monitor for 2 weeks, then remove PostgreSQL | Backend developer | Week 6 |
 | 8 | **Future:** Evaluate SeaORM 2.0 upgrade | Backend developer | After migration stabilizes |
 
-**Key decision point:** If the maintainers prefer to avoid the migration effort (~28 hours) and accept the CNPG operational overhead, Option A (Optimized PostgreSQL) is a valid alternative. The Quick Wins from Phase 0 deliver the most impactful improvements with the least effort and should be implemented regardless.
+**Key decision point:** If the maintainers prefer to avoid the migration effort (~28 hours) and accept the PostgreSQL operational overhead, Option A (Optimized PostgreSQL) is a valid alternative. The Quick Wins from Phase 0 deliver the most impactful improvements with the least effort and should be implemented regardless.
 
 **This ADR recommends Option B (SQLite + Litestream) as the best fit for Kubarr's homelab context**, balancing operational simplicity, resource efficiency, and data durability against a manageable one-time migration effort.
 

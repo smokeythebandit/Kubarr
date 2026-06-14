@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1.4
+FROM public.ecr.aws/docker/library/rust:1.92-alpine AS builder
+
+RUN apk add --no-cache musl-dev pkgconf openssl-dev openssl-libs-static
+
+WORKDIR /app
+
+ARG PROFILE=release
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+ENV CARGO_INCREMENTAL=1
+
+COPY code/api ./code/api
+COPY code/worker ./code/worker
+
+WORKDIR /app/code/worker
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/code/worker/target \
+    PROFILE_DIR=$(if [ "$PROFILE" = "release" ]; then echo "release"; else echo "$PROFILE"; fi) && \
+    cargo build --profile "${PROFILE}" && \
+    cp "target/${PROFILE_DIR}/kubarr-worker" /kubarr-worker
+
+FROM alpine/helm:3.21.0 AS helm-source
+
+FROM public.ecr.aws/docker/library/alpine:3.23
+ARG COMMIT_HASH=unknown
+ARG BUILD_TIME=unknown
+ARG CHANNEL=dev
+
+RUN apk add --no-cache ca-certificates tzdata
+WORKDIR /app
+COPY --from=builder /kubarr-worker /app/kubarr-worker
+COPY --from=helm-source /usr/bin/helm /usr/local/bin/helm
+RUN adduser -D -u 1000 -g kubarr kubarr && chown -R kubarr:kubarr /app
+
+ENV COMMIT_HASH=${COMMIT_HASH}
+ENV BUILD_TIME=${BUILD_TIME}
+ENV CHANNEL=${CHANNEL}
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+USER kubarr
+ENTRYPOINT ["/app/kubarr-worker"]

@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { monitoringApi, ClusterMetrics } from '../api/monitoring'
 import { appsApi } from '../api/apps'
 import { preloadIcons } from '../components/AppIcon'
-import type { AppConfig, PodStatus } from '../types'
+import type { AppConfig, AppState, PodStatus } from '../types'
 import { getPrecached, clearPrecache } from '../utils/precache'
 
 interface AppStatusInfo {
@@ -22,6 +22,7 @@ interface MonitoringState {
   catalog: AppConfig[]
   catalogLoading: boolean
   installedApps: string[]
+  appStates: Record<string, AppState>
   appStatuses: Record<string, AppStatusInfo>
 
   // Actions
@@ -48,6 +49,7 @@ export function MonitoringProvider({ children }: { children: ReactNode }) {
   const [catalog, setCatalog] = useState<AppConfig[]>(precachedCatalog || [])
   const [catalogLoading, setCatalogLoading] = useState(!precachedCatalog)
   const [installedApps, setInstalledApps] = useState<string[]>(precachedInstalled || [])
+  const [appStates, setAppStates] = useState<Record<string, AppState>>({})
   const [appStatuses, setAppStatuses] = useState<Record<string, AppStatusInfo>>({})
 
   // Fetch cluster metrics
@@ -75,13 +77,15 @@ export function MonitoringProvider({ children }: { children: ReactNode }) {
   const refreshAppStatuses = useCallback(async () => {
     try {
       // Fetch catalog and installed apps
-      const [catalogData, installedData] = await Promise.all([
+      const [catalogData, installedData, statesData] = await Promise.all([
         appsApi.getCatalog(),
-        appsApi.getInstalled()
+        appsApi.getInstalled(),
+        appsApi.getStates().catch(() => [])
       ])
 
       setCatalog(catalogData)
       setInstalledApps(installedData)
+      setAppStates(Object.fromEntries(statesData.map(state => [state.app_name, state])))
       setCatalogLoading(false)
 
       // Preload all app icons in the background
@@ -90,6 +94,7 @@ export function MonitoringProvider({ children }: { children: ReactNode }) {
       // Update query cache
       queryClient.setQueryData(['apps', 'catalog'], catalogData)
       queryClient.setQueryData(['apps', 'installed'], installedData)
+      queryClient.setQueryData(['apps', 'states'], statesData)
 
       // Fetch pod status for each installed app
       const installedAppConfigs = catalogData.filter(app => installedData.includes(app.name))
@@ -151,6 +156,7 @@ export function MonitoringProvider({ children }: { children: ReactNode }) {
     catalog,
     catalogLoading,
     installedApps,
+    appStates,
     appStatuses,
     refreshMetrics,
     refreshAppStatuses,

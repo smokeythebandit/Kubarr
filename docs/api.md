@@ -11,7 +11,6 @@ The Kubarr backend exposes a REST API on port 8000.
 ### Health Check
 
 ```
-GET /api/health
 GET /api/system/health
 ```
 

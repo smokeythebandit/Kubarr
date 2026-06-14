@@ -43,9 +43,10 @@ dist/
 .security-key
 logs/security/
 
-# MkDocs build artifacts
+# Documentation build artifacts
 site/
-docs/hooks/__pycache__/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 
 # Playwright test results
 test-results/

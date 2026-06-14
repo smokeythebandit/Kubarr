@@ -1,0 +1,23 @@
+[package]
+name = "kubarr-worker"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+anyhow = "1"
+kubarr = { path = "../api" }
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev-release]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true

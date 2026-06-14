@@ -52,11 +52,12 @@ Kubarr comes with a curated catalog of popular homelab apps. Deploy them individ
 
 ---
 
-!!! info "Documentation Version"
-    You are viewing documentation for **Kubarr v{{VERSION}}** ({{CHANNEL}} channel).
+::: info Documentation Version
+You are viewing documentation for **Kubarr v{{VERSION}}** ({{CHANNEL}} channel).
 
-    - **Version**: {{VERSION}}
-    - **Release Channel**: {{CHANNEL}}
-    - **Commit**: {{COMMIT}}
+- **Version**: {{VERSION}}
+- **Release Channel**: {{CHANNEL}}
+- **Commit**: {{COMMIT}}
 
-    See the [Versioning Guide](versioning.md) for release information and how to upgrade.
+See the [Versioning Guide](versioning.md) for release information and how to upgrade.
+:::
