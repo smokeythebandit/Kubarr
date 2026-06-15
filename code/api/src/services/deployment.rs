@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::CONFIG;
 use crate::error::{AppError, Result};
-use crate::services::catalog::{
-    kubarr_system_component, kubarr_system_component_names, AppCatalog, SystemComponentWorkloadKind,
-};
+use crate::services::catalog::{kubarr_system_component, lifecycle_for_app_name, AppCatalog};
 use crate::services::storage_config::{self, PersistedStorageConfig};
 use crate::services::vpn;
 use crate::services::K8sClient;
@@ -23,6 +21,14 @@ pub struct DeploymentRequest {
     pub app_name: String,
     #[serde(default)]
     pub custom_config: HashMap<String, String>,
+    #[serde(default)]
+    pub reuse_values: bool,
+    #[serde(default = "default_wait")]
+    pub wait: bool,
+}
+
+fn default_wait() -> bool {
+    true
 }
 
 /// Deployment status response
@@ -87,6 +93,42 @@ impl<'a> DeploymentManager<'a> {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
+    pub fn installed_chart_version(&self, app_name: &str) -> Option<String> {
+        self.catalog.get_app(app_name)?;
+        let lifecycle = lifecycle_for_app_name(app_name);
+        let output = Command::new("helm")
+            .args([
+                "status",
+                lifecycle.release_name.as_str(),
+                "-n",
+                lifecycle.release_namespace.as_str(),
+                "-o",
+                "json",
+            ])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        if let Some(version) = value
+            .get("chart")
+            .and_then(|chart| chart.as_str())
+            .and_then(|chart| {
+                chart
+                    .rsplit_once('-')
+                    .map(|(_, version)| version.to_string())
+            })
+        {
+            return Some(version);
+        }
+
+        value
+            .get("manifest")
+            .and_then(|manifest| manifest.as_str())
+            .and_then(|manifest| chart_version_from_manifest(manifest, app_name))
+    }
+
     /// Deploy an application using Helm
     pub async fn deploy_app(
         &self,
@@ -99,18 +141,27 @@ impl<'a> DeploymentManager<'a> {
         })?;
 
         let chart_ref = self.get_chart_ref(&request.app_name);
-        let namespace = &request.app_name;
+        let lifecycle = lifecycle_for_app_name(&request.app_name);
+        let release = lifecycle.release_name.as_str();
+        let release_namespace = lifecycle.release_namespace.as_str();
+        let namespace = lifecycle.namespace.as_str();
 
         // Build helm upgrade --install command
         let mut helm_args = vec![
             "upgrade",
             "--install",
-            &request.app_name,
+            release,
             &chart_ref,
             "-n",
-            namespace,
+            release_namespace,
             "--create-namespace",
         ];
+        if request.reuse_values {
+            helm_args.push("--reuse-values");
+        }
+        if request.wait {
+            helm_args.extend(["--wait", "--atomic", "--timeout", "10m"]);
+        }
 
         // Collect --set arguments
         let mut set_args: Vec<String> = Vec::new();
@@ -134,11 +185,13 @@ impl<'a> DeploymentManager<'a> {
         // adjust mounted config directories. The app charts are intentionally
         // user-tunable, but these capabilities are required for the default
         // catalog images to boot on restricted clusters.
-        set_args.push("securityContext.allowPrivilegeEscalation=true".to_string());
-        set_args.push(
-            "securityContext.capabilities.add={CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID}"
-                .to_string(),
-        );
+        if !app_config.is_system {
+            set_args.push("securityContext.allowPrivilegeEscalation=true".to_string());
+            set_args.push(
+                "securityContext.capabilities.add={CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID}"
+                    .to_string(),
+            );
+        }
 
         // Check for VPN configuration
         if let Some(db) = self.db {
@@ -221,10 +274,19 @@ impl<'a> DeploymentManager<'a> {
 
     /// Remove an application
     pub async fn remove_app(&self, app_name: &str) -> Result<bool> {
-        let namespace = app_name;
+        if self.catalog.get_app(app_name).is_none() {
+            return Err(AppError::NotFound(format!(
+                "App '{}' not found in catalog",
+                app_name
+            )));
+        }
+        let lifecycle = lifecycle_for_app_name(app_name);
+        let namespace = lifecycle.namespace.as_str();
+        let release = lifecycle.release_name.as_str();
+        let release_namespace = lifecycle.release_namespace.as_str();
 
         // Try to uninstall with Helm
-        let _ = self.run_helm_command(&["uninstall", app_name, "-n", namespace]);
+        let _ = self.run_helm_command(&["uninstall", release, "-n", release_namespace]);
 
         // Delete the namespace
         let namespaces: Api<Namespace> = Api::all(self.k8s.client().clone());
@@ -239,65 +301,108 @@ impl<'a> DeploymentManager<'a> {
         }
     }
 
-    /// Get list of deployed app names (excludes hidden/system apps like kubarr itself)
+    /// Get list of deployed app names.
     pub async fn get_deployed_apps(&self) -> Vec<String> {
-        let namespaces: Api<Namespace> = Api::all(self.k8s.client().clone());
-
-        // Get all catalog app names (excluding hidden apps)
-        let catalog_apps: std::collections::HashSet<_> = self
+        let mut deployed_apps = Vec::new();
+        for app in self
             .catalog
             .get_all_apps()
-            .iter()
+            .into_iter()
             .filter(|app| !app.is_hidden)
-            .map(|app| app.name.clone())
-            .collect();
-
-        let mut deployed_apps = Vec::new();
-
-        if let Ok(ns_list) = namespaces.list(&ListParams::default()).await {
-            for ns in ns_list {
-                if let Some(name) = ns.metadata.name {
-                    if catalog_apps.contains(&name) {
-                        // Check if there are deployments in this namespace
-                        if let Ok(health) = self.check_namespace_health(&name).await {
-                            if health.get("deployments").is_some() {
-                                deployed_apps.push(name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for app_name in kubarr_system_component_names() {
-            if self.check_kubarr_system_component(app_name).await {
-                deployed_apps.push(app_name.to_string());
+        {
+            if self.check_app_deployed(&app.name).await {
+                deployed_apps.push(app.name.clone());
             }
         }
 
         deployed_apps
     }
 
+    pub async fn check_app_deployed(&self, app_name: &str) -> bool {
+        match self.app_health(app_name).await {
+            Ok(health) => health["status"].as_str() != Some("not_found"),
+            Err(_) => false,
+        }
+    }
+
     pub async fn check_kubarr_system_component(&self, app_name: &str) -> bool {
         match kubarr_system_component(app_name) {
             Some(component) => match component.workload_kind {
-                SystemComponentWorkloadKind::Static => CONFIG.charts.dir.exists(),
-                SystemComponentWorkloadKind::Deployment => match component.workload_name {
-                    Some(workload_name) => self
-                        .check_deployment_ready(component.namespace, workload_name)
-                        .await
-                        .unwrap_or(false),
-                    None => false,
-                },
-                SystemComponentWorkloadKind::StatefulSet => match component.workload_name {
-                    Some(workload_name) => self
-                        .check_statefulset_ready(component.namespace, workload_name)
-                        .await
-                        .unwrap_or(false),
-                    None => false,
-                },
+                crate::services::catalog::SystemComponentWorkloadKind::Static => {
+                    CONFIG.charts.dir.exists()
+                }
+                crate::services::catalog::SystemComponentWorkloadKind::Deployment => {
+                    match component.workload_name {
+                        Some(workload_name) => self
+                            .check_deployment_ready(component.namespace, workload_name)
+                            .await
+                            .unwrap_or(false),
+                        None => false,
+                    }
+                }
+                crate::services::catalog::SystemComponentWorkloadKind::DaemonSet => {
+                    match component.workload_name {
+                        Some(workload_name) => self
+                            .check_daemonset_ready(component.namespace, workload_name)
+                            .await
+                            .unwrap_or(false),
+                        None => false,
+                    }
+                }
+                crate::services::catalog::SystemComponentWorkloadKind::StatefulSet => {
+                    match component.workload_name {
+                        Some(workload_name) => self
+                            .check_statefulset_ready(component.namespace, workload_name)
+                            .await
+                            .unwrap_or(false),
+                        None => false,
+                    }
+                }
             },
             None => false,
+        }
+    }
+
+    pub async fn app_health(&self, app_name: &str) -> Result<serde_json::Value> {
+        if self.catalog.get_app(app_name).is_none() {
+            return Err(AppError::NotFound(format!(
+                "App '{}' not found in catalog",
+                app_name
+            )));
+        }
+        let lifecycle = lifecycle_for_app_name(app_name);
+        let namespace = lifecycle.namespace.as_str();
+
+        if !self.check_namespace_exists(namespace).await {
+            return Ok(serde_json::json!({
+                "status": "not_found",
+                "healthy": false,
+                "message": "Namespace does not exist"
+            }));
+        }
+
+        match (
+            lifecycle.workload_kind.as_deref(),
+            lifecycle.workload_name.as_deref(),
+        ) {
+            (Some("deployment"), Some(name)) => {
+                let healthy = self.check_deployment_ready(namespace, name).await?;
+                Ok(single_workload_health("Deployment", name, healthy))
+            }
+            (Some("daemonset"), Some(name)) => {
+                let healthy = self.check_daemonset_ready(namespace, name).await?;
+                Ok(single_workload_health("DaemonSet", name, healthy))
+            }
+            (Some("statefulset"), Some(name)) => {
+                let healthy = self.check_statefulset_ready(namespace, name).await?;
+                Ok(single_workload_health("StatefulSet", name, healthy))
+            }
+            (Some("static"), _) => Ok(serde_json::json!({
+                "status": "healthy",
+                "healthy": true,
+                "message": "Static component is available"
+            })),
+            _ => self.check_namespace_health(namespace).await,
         }
     }
 
@@ -339,6 +444,31 @@ impl<'a> DeploymentManager<'a> {
             .and_then(|s| s.ready_replicas)
             .unwrap_or(0);
         Ok(ready >= desired && desired > 0)
+    }
+
+    pub async fn check_daemonset_ready(
+        &self,
+        namespace: &str,
+        daemonset_name: &str,
+    ) -> Result<bool> {
+        let daemonsets: Api<DaemonSet> = Api::namespaced(self.k8s.client().clone(), namespace);
+        let daemonset = daemonsets.get(daemonset_name).await?;
+        let desired = daemonset
+            .status
+            .as_ref()
+            .map(|s| s.desired_number_scheduled)
+            .unwrap_or(1);
+        let ready = daemonset
+            .status
+            .as_ref()
+            .map(|s| s.number_ready)
+            .unwrap_or(0);
+        let available = daemonset
+            .status
+            .as_ref()
+            .and_then(|s| s.number_available)
+            .unwrap_or(0);
+        Ok(ready >= desired && available >= desired && desired > 0)
     }
 
     /// Check if a namespace exists
@@ -472,6 +602,28 @@ pub fn media_storage_helm_values(storage: &PersistedStorageConfig) -> Result<Vec
     Ok(values)
 }
 
+fn single_workload_health(kind: &str, name: &str, healthy: bool) -> serde_json::Value {
+    serde_json::json!({
+        "status": if healthy { "healthy" } else { "unhealthy" },
+        "healthy": healthy,
+        "deployments": [{
+            "name": name,
+            "kind": kind,
+            "healthy": healthy
+        }],
+        "message": if healthy { "Workload healthy" } else { "Workload is not ready" }
+    })
+}
+
+fn chart_version_from_manifest(manifest: &str, app_name: &str) -> Option<String> {
+    let prefix = "helm.sh/chart:";
+    manifest.lines().find_map(|line| {
+        let chart = line.trim().strip_prefix(prefix)?.trim();
+        let expected = format!("{}-", app_name);
+        chart.strip_prefix(&expected).map(ToString::to_string)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +716,8 @@ mod tests {
                 m.insert("key".to_string(), "value".to_string());
                 m
             },
+            reuse_values: false,
+            wait: true,
         };
         let cloned = req.clone();
         assert_eq!(cloned.app_name, req.app_name);

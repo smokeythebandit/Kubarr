@@ -10,6 +10,7 @@ use crate::error::Result;
 pub enum SystemComponentWorkloadKind {
     Static,
     Deployment,
+    DaemonSet,
     StatefulSet,
 }
 
@@ -26,6 +27,16 @@ pub struct SystemComponent {
     pub workload_kind: SystemComponentWorkloadKind,
     pub workload_name: Option<&'static str>,
     pub service_name: Option<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppLifecycleConfig {
+    pub release_name: String,
+    pub release_namespace: String,
+    pub namespace: String,
+    pub workload_kind: Option<String>,
+    pub workload_name: Option<String>,
+    pub service_name: Option<String>,
 }
 
 const KUBARR_SYSTEM_COMPONENTS: &[SystemComponent] = &[
@@ -83,6 +94,45 @@ const KUBARR_SYSTEM_COMPONENTS: &[SystemComponent] = &[
         service_name: None,
     },
     SystemComponent {
+        name: "managed-nfs",
+        display_name: "Managed NFS",
+        description: "Managed NFS server for Kubarr shared media storage.",
+        icon: "📁",
+        image: "itsthenetwork/nfs-server-alpine:12",
+        port: 2049,
+        category: "system",
+        namespace: "kubarr-storage",
+        workload_kind: SystemComponentWorkloadKind::Deployment,
+        workload_name: Some("kubarr-managed-nfs"),
+        service_name: Some("kubarr-managed-nfs"),
+    },
+    SystemComponent {
+        name: "fluent-bit",
+        display_name: "Fluent Bit",
+        description: "Fluent Bit log collector agent for VictoriaLogs.",
+        icon: "📥",
+        image: "fluent/fluent-bit:latest",
+        port: 2020,
+        category: "monitoring",
+        namespace: "fluent-bit",
+        workload_kind: SystemComponentWorkloadKind::DaemonSet,
+        workload_name: Some("fluent-bit"),
+        service_name: None,
+    },
+    SystemComponent {
+        name: "victoriametrics",
+        display_name: "VictoriaMetrics",
+        description: "Metrics store used by Kubarr observability.",
+        icon: "victoria",
+        image: "victoriametrics/victoria-metrics:v1.97.2",
+        port: 8428,
+        category: "monitoring",
+        namespace: "victoriametrics",
+        workload_kind: SystemComponentWorkloadKind::Deployment,
+        workload_name: Some("victoriametrics"),
+        service_name: Some("victoriametrics"),
+    },
+    SystemComponent {
         name: "victorialogs",
         display_name: "VictoriaLogs",
         description: "Lightweight log storage used by Kubarr observability.",
@@ -124,6 +174,63 @@ pub fn kubarr_system_component_names() -> impl Iterator<Item = &'static str> {
     KUBARR_SYSTEM_COMPONENTS
         .iter()
         .map(|component| component.name)
+}
+
+pub fn lifecycle_for_app_name(app_name: &str) -> AppLifecycleConfig {
+    kubarr_system_component(app_name)
+        .map(lifecycle_for_component)
+        .unwrap_or_else(|| AppLifecycleConfig {
+            release_name: app_name.to_string(),
+            release_namespace: app_name.to_string(),
+            namespace: app_name.to_string(),
+            workload_kind: None,
+            workload_name: None,
+            service_name: Some(app_name.to_string()),
+        })
+}
+
+fn lifecycle_for_component(component: &SystemComponent) -> AppLifecycleConfig {
+    AppLifecycleConfig {
+        release_name: component.name.to_string(),
+        release_namespace: "default".to_string(),
+        namespace: component.namespace.to_string(),
+        workload_kind: Some(
+            match component.workload_kind {
+                SystemComponentWorkloadKind::Static => "static",
+                SystemComponentWorkloadKind::Deployment => "deployment",
+                SystemComponentWorkloadKind::DaemonSet => "daemonset",
+                SystemComponentWorkloadKind::StatefulSet => "statefulset",
+            }
+            .to_string(),
+        ),
+        workload_name: component.workload_name.map(ToString::to_string),
+        service_name: component.service_name.map(ToString::to_string),
+    }
+}
+
+fn chart_version_from_dir(dir: &Path, app_name: &str) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        if path.file_name().and_then(|name| name.to_str()) == Some(app_name) {
+            let chart_content = std::fs::read_to_string(path.join("Chart.yaml")).ok()?;
+            let chart: serde_yaml::Value = serde_yaml::from_str(&chart_content).ok()?;
+            return chart
+                .get("version")
+                .and_then(|version| version.as_str())
+                .map(ToString::to_string);
+        }
+
+        if let Some(version) = chart_version_from_dir(&path, app_name) {
+            return Some(version);
+        }
+    }
+
+    None
 }
 
 /// App configuration from Helm chart
@@ -196,7 +303,11 @@ impl AppCatalog {
 
     fn load_kubarr_system_components(&mut self) {
         for component in KUBARR_SYSTEM_COMPONENTS {
-            if self.apps.contains_key(component.name) {
+            if self
+                .apps
+                .get(component.name)
+                .is_some_and(|app| !app.is_hidden)
+            {
                 continue;
             }
 
@@ -489,6 +600,10 @@ impl AppCatalog {
             is_hidden,
             is_browseable,
         }))
+    }
+
+    pub fn chart_version(&self, app_name: &str) -> Option<String> {
+        chart_version_from_dir(&CONFIG.charts.dir, app_name)
     }
 
     /// Get all available apps

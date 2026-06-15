@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useMemo, useRef } from 'react'
 import { monitoringApi } from '../api/monitoring'
 import { MiniSparkline } from './MonitoringPage'
-import { Cpu, MemoryStick, Server, Container, HardDrive, Activity, AlertCircle } from 'lucide-react'
+import { Cpu, MemoryStick, Container, HardDrive, Activity, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { appsApi } from '../api/apps'
 
@@ -140,6 +140,7 @@ export default function Dashboard() {
     catalog,
     catalogLoading,
     installedApps: installedAppNames,
+    appStates,
     appStatuses,
   } = useMonitoring()
 
@@ -160,6 +161,17 @@ export default function Dashboard() {
     const status = appStatuses[app.name]
     return status?.healthy ?? false
   }), [installedApps, appStatuses])
+
+  const availableUpdates = useMemo(
+    () => Object.values(appStates).filter((state) => state.update_available),
+    [appStates]
+  )
+  const availableUpdateApps = useMemo(
+    () => availableUpdates
+      .map((state) => catalog.find((app) => app.name === state.app_name))
+      .filter((app): app is NonNullable<typeof app> => Boolean(app)),
+    [availableUpdates, catalog]
+  )
 
   // Fetch cluster network history for sparkline
   const { data: networkHistory } = useQuery({
@@ -396,7 +408,7 @@ export default function Dashboard() {
               )}
             </Link>
 
-            {/* Running Pods */}
+            {/* Running Containers */}
             <Link
               to="/resources"
               className="relative bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 rounded-xl p-5 h-[125px] border border-gray-200/60 dark:border-gray-700/60 shadow-[0_4px_12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.1)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)] hover:shadow-[0_12px_28px_rgba(6,182,212,0.2),0_4px_8px_rgba(0,0,0,0.1)] dark:hover:shadow-[0_12px_28px_rgba(6,182,212,0.25)] hover:-translate-y-1 transition-all duration-200 cursor-pointer group overflow-hidden flex flex-col justify-between"
@@ -404,29 +416,7 @@ export default function Dashboard() {
               <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
               <div className="relative flex items-center gap-3">
                 <div className="p-2.5 bg-gradient-to-br from-cyan-500/20 to-cyan-600/10 rounded-xl shadow-inner group-hover:from-cyan-500/30 group-hover:to-cyan-600/20 transition-colors">
-                  <Server className="w-5 h-5 text-cyan-500 dark:text-cyan-400" />
-                </div>
-                <div className="flex-1">
-                  <div className="text-gray-500 dark:text-gray-400 text-sm font-medium">Running Pods</div>
-                  <div className="text-xl font-bold">{clusterMetrics.pod_count}</div>
-                </div>
-              </div>
-              {metricsHistory?.pod_series && metricsHistory.pod_series.length >= 2 && (
-                <div className="relative -mx-5 -mb-5">
-                  <MiniSparkline data={metricsHistory.pod_series} color="cyan" height={45} interactive formatValue={formatCount} />
-                </div>
-              )}
-            </Link>
-
-            {/* Running Containers */}
-            <Link
-              to="/resources"
-              className="relative bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 rounded-xl p-5 h-[125px] border border-gray-200/60 dark:border-gray-700/60 shadow-[0_4px_12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.1)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)] hover:shadow-[0_12px_28px_rgba(234,179,8,0.2),0_4px_8px_rgba(0,0,0,0.1)] dark:hover:shadow-[0_12px_28px_rgba(234,179,8,0.25)] hover:-translate-y-1 transition-all duration-200 cursor-pointer group overflow-hidden flex flex-col justify-between"
-            >
-              <div className="absolute inset-0 bg-gradient-to-br from-yellow-500/10 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
-              <div className="relative flex items-center gap-3">
-                <div className="p-2.5 bg-gradient-to-br from-yellow-500/20 to-yellow-600/10 rounded-xl shadow-inner group-hover:from-yellow-500/30 group-hover:to-yellow-600/20 transition-colors">
-                  <Container className="w-5 h-5 text-yellow-500 dark:text-yellow-400" />
+                  <Container className="w-5 h-5 text-cyan-500 dark:text-cyan-400" />
                 </div>
                 <div className="flex-1">
                   <div className="text-gray-500 dark:text-gray-400 text-sm font-medium">Running Containers</div>
@@ -435,7 +425,75 @@ export default function Dashboard() {
               </div>
               {metricsHistory?.container_series && metricsHistory.container_series.length >= 2 && (
                 <div className="relative -mx-5 -mb-5">
-                  <MiniSparkline data={metricsHistory.container_series} color="yellow" height={45} interactive formatValue={formatCount} />
+                  <MiniSparkline data={metricsHistory.container_series} color="cyan" height={45} interactive formatValue={formatCount} />
+                </div>
+              )}
+            </Link>
+
+            {/* Available Updates */}
+            <Link
+              to="/apps?filter=updates"
+              className="relative bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 rounded-xl p-5 h-[125px] border border-gray-200/60 dark:border-gray-700/60 shadow-[0_4px_12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.1)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.1),0_2px_6px_rgba(0,0,0,0.08)] dark:hover:shadow-[0_8px_24px_rgba(0,0,0,0.4)] hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group overflow-hidden flex flex-col justify-between"
+            >
+              <div className={`absolute inset-0 rounded-xl pointer-events-none ${availableUpdates.length > 0 ? 'bg-gradient-to-br from-amber-500/8 via-transparent to-orange-500/10' : 'bg-gradient-to-br from-emerald-500/6 via-transparent to-transparent'}`} />
+              <div className={`absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none ${availableUpdates.length > 0 ? 'bg-gradient-to-br from-amber-500/12 via-transparent to-transparent' : 'bg-gradient-to-br from-emerald-500/10 via-transparent to-transparent'}`} />
+              <div className="relative flex items-start justify-between gap-3">
+                {catalogLoading ? (
+                  <div className="animate-pulse">
+                    <div className="h-5 w-28 bg-gray-200 dark:bg-gray-700 rounded mb-2" />
+                    <div className="h-9 w-16 bg-gray-200 dark:bg-gray-700 rounded" />
+                  </div>
+                ) : (
+                  <>
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-gray-500 dark:text-gray-400">Available Updates</div>
+                      {availableUpdates.length > 0 ? (
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="text-2xl font-bold text-gray-900 dark:text-white">{availableUpdates.length}</span>
+                          <span className="text-xs font-medium text-amber-600 dark:text-amber-400">app{availableUpdates.length === 1 ? '' : 's'} ready</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2 mt-1">
+                          <CheckCircle2 className="w-5 h-5 text-emerald-500 dark:text-emerald-400" />
+                          <span className="text-sm font-semibold text-emerald-600 dark:text-emerald-400">All apps current</span>
+                        </div>
+                      )}
+                    </div>
+                    {availableUpdates.length > 0 && (
+                      <span className="flex-shrink-0 px-2 py-1 rounded-full bg-amber-100/80 dark:bg-amber-500/15 text-[10px] font-bold uppercase tracking-wide text-amber-700 dark:text-amber-300 border border-amber-200/70 dark:border-amber-500/20">
+                        Update
+                      </span>
+                    )}
+                  </>
+                )}
+              </div>
+              {!catalogLoading && (
+                <div className="relative flex items-center justify-end min-h-[38px]">
+                  {availableUpdateApps.length > 0 ? (
+                    <div className="flex items-center justify-end gap-3 min-w-0 w-full overflow-hidden">
+                      {availableUpdateApps.slice(0, 3).map((app) => (
+                        <div key={app.name} className="flex items-center gap-1.5 min-w-0 flex-shrink">
+                          <div className="relative flex-shrink-0 rounded-lg shadow-sm">
+                            <AppIcon appName={app.name} size={24} className="rounded-lg" />
+                            <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-amber-500 border border-white dark:border-gray-900 shadow-[0_0_6px_rgba(245,158,11,0.75)]" />
+                          </div>
+                          <span className="truncate text-xs font-medium text-gray-600 dark:text-gray-300 max-w-[72px]">
+                            {app.display_name || app.name}
+                          </span>
+                        </div>
+                      ))}
+                      {availableUpdateApps.length > 3 && (
+                        <span className="flex-shrink-0 text-xs font-bold text-amber-600 dark:text-amber-400">
+                          +{availableUpdateApps.length - 3}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.65)]" />
+                      Up to date
+                    </div>
+                  )}
                 </div>
               )}
             </Link>

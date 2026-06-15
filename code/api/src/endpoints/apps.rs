@@ -5,7 +5,6 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use chrono::Utc;
 use serde::Deserialize;
 
 use crate::config::CONFIG;
@@ -15,7 +14,6 @@ use crate::middleware::permissions::{
 };
 use crate::models::audit_log::AuditAction;
 use crate::services::{
-    catalog::{kubarr_system_component, kubarr_system_component_deployment},
     AppConfig, AppManager, AppOperationResponse, AppStateResponse, DeploymentManager,
     DeploymentRequest, OP_DELETE, OP_INSTALL, OP_RESTART, OP_UPDATE,
 };
@@ -342,22 +340,7 @@ async fn list_app_states(
 ) -> Result<Json<Vec<AppStateResponse>>> {
     let db = state.get_db().await?;
     let manager = AppManager::new(db, state.k8s_client.clone(), state.catalog.clone());
-    let mut states = manager.list_states().await?;
-
-    if let Some(client) = state.k8s_client.read().await.as_ref() {
-        let catalog = state.catalog.read().await;
-        let deployment_manager = DeploymentManager::new(client, &catalog);
-        for app in catalog
-            .get_all_apps()
-            .into_iter()
-            .filter(|app| app.is_system && !app.is_hidden)
-        {
-            if kubarr_system_component_deployment(&app.name).is_some() {
-                states.retain(|state| state.app_name != app.name);
-                states.push(system_component_state(&deployment_manager, &app.name).await);
-            }
-        }
-    }
+    let states = manager.list_states().await?;
 
     Ok(Json(states))
 }
@@ -375,18 +358,6 @@ async fn get_app_state(
     Path(app_name): Path<String>,
     _auth: Authorized<AppsView>,
 ) -> Result<Json<AppStateResponse>> {
-    if kubarr_system_component_deployment(&app_name).is_some() {
-        let k8s = state.k8s_client.read().await;
-        let catalog = state.catalog.read().await;
-        let client = k8s
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("Kubernetes client not available".to_string()))?;
-        let deployment_manager = DeploymentManager::new(client, &catalog);
-        return Ok(Json(
-            system_component_state(&deployment_manager, &app_name).await,
-        ));
-    }
-
     let db = state.get_db().await?;
     let manager = AppManager::new(db, state.k8s_client.clone(), state.catalog.clone());
     Ok(Json(manager.get_state(&app_name).await?))
@@ -450,16 +421,7 @@ async fn check_app_health(
         .ok_or_else(|| AppError::Internal("Kubernetes client not available".to_string()))?;
 
     let manager = DeploymentManager::new(client, &catalog);
-    if kubarr_system_component_deployment(&app_name).is_some() {
-        let healthy = manager.check_kubarr_system_component(&app_name).await;
-        return Ok(Json(serde_json::json!({
-            "status": if healthy { "healthy" } else { "unhealthy" },
-            "healthy": healthy,
-            "message": if healthy { "System component is running" } else { "System component is not ready" }
-        })));
-    }
-
-    let health = manager.check_namespace_health(&app_name).await?;
+    let health = manager.app_health(&app_name).await?;
 
     Ok(Json(health))
 }
@@ -485,13 +447,7 @@ async fn check_app_exists(
         .ok_or_else(|| AppError::Internal("Kubernetes client not available".to_string()))?;
 
     let manager = DeploymentManager::new(client, &catalog);
-    if kubarr_system_component_deployment(&app_name).is_some() {
-        return Ok(Json(serde_json::json!({
-            "exists": manager.check_kubarr_system_component(&app_name).await
-        })));
-    }
-
-    let exists = manager.check_namespace_exists(&app_name).await;
+    let exists = manager.check_app_deployed(&app_name).await;
 
     Ok(Json(serde_json::json!({"exists": exists})))
 }
@@ -523,16 +479,7 @@ async fn get_app_status(
     };
 
     let manager = DeploymentManager::new(client, &catalog);
-    if kubarr_system_component_deployment(&app_name).is_some() {
-        let healthy = manager.check_kubarr_system_component(&app_name).await;
-        return Ok(Json(serde_json::json!({
-            "state": if healthy { "installed" } else { "installing" },
-            "message": if healthy { "Running" } else { "Waiting for component to be ready" }
-        })));
-    }
-
-    // Check if namespace exists
-    if !manager.check_namespace_exists(&app_name).await {
+    if !manager.check_app_deployed(&app_name).await {
         return Ok(Json(serde_json::json!({
             "state": "idle",
             "message": "Not installed"
@@ -540,7 +487,7 @@ async fn get_app_status(
     }
 
     // Check health
-    match manager.check_namespace_health(&app_name).await {
+    match manager.app_health(&app_name).await {
         Ok(health) => {
             let status = health["status"].as_str().unwrap_or("unknown");
             match status {
@@ -562,35 +509,6 @@ async fn get_app_status(
             "state": "error",
             "message": e.to_string()
         }))),
-    }
-}
-
-async fn system_component_state(
-    manager: &DeploymentManager<'_>,
-    app_name: &str,
-) -> AppStateResponse {
-    let healthy = manager.check_kubarr_system_component(app_name).await;
-    let now = Utc::now();
-    AppStateResponse {
-        app_name: app_name.to_string(),
-        namespace: kubarr_system_component(app_name)
-            .map(|component| component.namespace)
-            .unwrap_or("kubarr-system")
-            .to_string(),
-        desired_state: "installed".to_string(),
-        observed_state: if healthy { "installed" } else { "unhealthy" }.to_string(),
-        healthy,
-        message: Some(if healthy {
-            "System component is running".to_string()
-        } else {
-            "System component is not ready".to_string()
-        }),
-        installed_chart_version: None,
-        available_chart_version: None,
-        update_available: false,
-        last_operation_id: None,
-        last_checked_at: Some(now),
-        updated_at: now,
     }
 }
 

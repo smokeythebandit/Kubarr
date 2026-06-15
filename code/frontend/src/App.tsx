@@ -15,7 +15,6 @@ import AppErrorPage from './pages/AppErrorPage'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { MonitoringProvider, useMonitoring } from './contexts/MonitoringContext'
-import { VersionFooter } from './components/VersionFooter'
 import { PageTransition } from './components/PageTransition'
 import { sessionLogout } from './api/auth'
 import { Grid3X3, HardDrive, FileText, Activity, Settings, User, LogOut, Ship, ChevronDown, Sun, Moon, Monitor, Network, Menu, X, Shield, Bell, Check, Trash2, AlertCircle, Info, AlertTriangle } from 'lucide-react'
@@ -928,7 +927,6 @@ function AppContent() {
                 </Routes>
               </div>
             </PageTransition>
-            <VersionFooter />
           </main>
         )}
       </div>

@@ -276,6 +276,8 @@ async fn assign_vpn(
         let deploy_request = DeploymentRequest {
             app_name: app_name.clone(),
             custom_config: std::collections::HashMap::new(),
+            reuse_values: true,
+            wait: true,
         };
         let storage = storage_config::get_storage_config_from_db(&db)
             .await
@@ -330,6 +332,8 @@ async fn remove_vpn(
     let deploy_request = DeploymentRequest {
         app_name: app_name.clone(),
         custom_config: std::collections::HashMap::new(),
+        reuse_values: true,
+        wait: true,
     };
     let storage = storage_config::get_storage_config_from_db(&db)
         .await

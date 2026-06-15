@@ -304,30 +304,43 @@ impl AppManager {
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default();
 
+        let app_config = catalog.get_app(&operation.app_name).ok_or_else(|| {
+            AppError::NotFound(format!("App '{}' not found in catalog", operation.app_name))
+        })?;
+
         let storage = storage_config::get_storage_config_from_db(&self.db)
             .await?
-            .map(|(config, _)| config)
-            .ok_or_else(|| {
+            .map(|(config, _)| config);
+        if !app_config.is_system {
+            let storage = storage.as_ref().ok_or_else(|| {
                 AppError::BadRequest(
                     "Storage must be configured and validated before installing apps".to_string(),
                 )
             })?;
-        if !storage.validated() {
-            return Err(AppError::BadRequest(
-                "Storage must be validated before installing apps".to_string(),
-            ));
+            if !storage.validated() {
+                return Err(AppError::BadRequest(
+                    "Storage must be validated before installing apps".to_string(),
+                ));
+            }
         }
 
         let manager = DeploymentManager::with_db(client, catalog, &self.db);
         let request = DeploymentRequest {
             app_name: operation.app_name.clone(),
             custom_config,
+            reuse_values: operation.operation == OP_UPDATE,
+            wait: !(operation.operation == OP_UPDATE && operation.app_name == "kubarr-worker"),
         };
-        let status = manager.deploy_app(&request, Some(&storage)).await?;
+        let deployment_storage = if app_config.is_system {
+            None
+        } else {
+            storage.as_ref()
+        };
+        let status = manager.deploy_app(&request, deployment_storage).await?;
 
         self.upsert_state(
             &operation.app_name,
-            &operation.app_name,
+            &status.namespace,
             DESIRED_INSTALLED,
             OBS_INSTALLING,
             false,
@@ -387,7 +400,7 @@ impl AppManager {
 
         self.upsert_state(
             app_name,
-            app_name,
+            &crate::services::catalog::lifecycle_for_app_name(app_name).namespace,
             desired_state_for_operation(operation),
             observed,
             false,
@@ -425,10 +438,18 @@ impl AppManager {
         let catalog = self.catalog.read().await;
         let manager = DeploymentManager::new(client, &catalog);
 
-        if !manager.check_namespace_exists(app_name).await {
+        if catalog.get_app(app_name).is_none() {
+            return Err(AppError::NotFound(format!(
+                "App '{}' not found in catalog",
+                app_name
+            )));
+        }
+        let namespace = crate::services::catalog::lifecycle_for_app_name(app_name).namespace;
+
+        if !manager.check_namespace_exists(&namespace).await {
             self.upsert_state(
                 app_name,
-                app_name,
+                &namespace,
                 DESIRED_REMOVED,
                 OBS_NOT_INSTALLED,
                 false,
@@ -439,7 +460,7 @@ impl AppManager {
             return Ok(());
         }
 
-        let health = manager.check_namespace_health(app_name).await?;
+        let health = manager.app_health(app_name).await?;
         let healthy = health["healthy"].as_bool().unwrap_or(false);
         let message = health["message"]
             .as_str()
@@ -453,7 +474,7 @@ impl AppManager {
 
         self.upsert_state(
             app_name,
-            app_name,
+            &namespace,
             DESIRED_INSTALLED,
             observed,
             healthy,
@@ -474,6 +495,20 @@ impl AppManager {
         operation_id: Option<String>,
     ) -> Result<()> {
         let now = Utc::now();
+        let (available_chart_version, installed_chart_version) = {
+            let k8s_guard = self.k8s_client.read().await;
+            let catalog = self.catalog.read().await;
+            let available = catalog.chart_version(app_name);
+            let installed = k8s_guard.as_ref().and_then(|client| {
+                let manager = DeploymentManager::new(client, &catalog);
+                manager.installed_chart_version(app_name)
+            });
+            (available, installed)
+        };
+        let update_available = matches!(
+            (&installed_chart_version, &available_chart_version),
+            (Some(installed), Some(available)) if installed != available
+        );
         if let Some(existing) = app_state::Entity::find_by_id(app_name.to_string())
             .one(&self.db)
             .await?
@@ -487,6 +522,9 @@ impl AppManager {
             if operation_id.is_some() {
                 active.last_operation_id = Set(operation_id);
             }
+            active.installed_chart_version = Set(installed_chart_version);
+            active.available_chart_version = Set(available_chart_version);
+            active.update_available = Set(update_available);
             active.last_checked_at = Set(Some(now));
             active.updated_at = Set(now);
             active.update(&self.db).await?;
@@ -498,9 +536,9 @@ impl AppManager {
                 observed_state: Set(observed_state.to_string()),
                 healthy: Set(healthy),
                 message: Set(message),
-                installed_chart_version: Set(None),
-                available_chart_version: Set(None),
-                update_available: Set(false),
+                installed_chart_version: Set(installed_chart_version),
+                available_chart_version: Set(available_chart_version),
+                update_available: Set(update_available),
                 last_operation_id: Set(operation_id),
                 last_checked_at: Set(Some(now)),
                 updated_at: Set(now),

@@ -12,9 +12,9 @@ import { useMonitoring } from '../contexts/MonitoringContext'
 import type { AppConfig } from '../types'
 import type { ServiceEndpoint } from '../types/monitoring'
 
-type FilterType = 'all' | 'installed' | 'healthy' | 'unhealthy' | 'available'
+type FilterType = 'all' | 'installed' | 'healthy' | 'unhealthy' | 'available' | 'updates'
 
-type OperationState = 'installing' | 'deleting' | 'error'
+type OperationState = 'installing' | 'updating' | 'deleting' | 'error'
 
 interface OperationStatus {
   state: OperationState
@@ -116,9 +116,11 @@ interface AppCardComponentProps {
   effectiveState: string
   isSelected: boolean
   onInstall: () => void
+  onUpdate: () => void
   onDelete: () => void
   onOpen: () => void
   onClick: () => void
+  updateAvailable: boolean
   isOperationPending: boolean
 }
 
@@ -129,9 +131,11 @@ function AppCardComponent({
   effectiveState,
   isSelected,
   onInstall,
+  onUpdate,
   onDelete,
   onOpen,
   onClick,
+  updateAvailable,
   isOperationPending
 }: AppCardComponentProps) {
   const colors = useIconColors(app.name)
@@ -198,7 +202,7 @@ function AppCardComponent({
       {(isInstalled || app.is_system) && (
         <div
           className={`h-1 w-full ${
-            effectiveState === 'installing' || effectiveState === 'deleting'
+            effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting'
               ? 'bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 animate-pulse'
               : effectiveState === 'error'
               ? 'bg-red-500'
@@ -263,6 +267,12 @@ function AppCardComponent({
                     Installing
                   </span>
                 )}
+                {effectiveState === 'updating' && (
+                  <span className="inline-flex items-center gap-1 bg-emerald-500/20 text-emerald-500 dark:text-emerald-400 text-xs px-2 py-0.5 rounded-full animate-pulse">
+                    <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full"></span>
+                    Updating
+                  </span>
+                )}
                 {effectiveState === 'deleting' && (
                   <span className="inline-flex items-center gap-1 bg-red-500/20 text-red-500 dark:text-red-400 text-xs px-2 py-0.5 rounded-full animate-pulse">
                     <span className="w-1.5 h-1.5 bg-red-400 rounded-full"></span>
@@ -284,18 +294,7 @@ function AppCardComponent({
 
         {/* Action buttons */}
         <div className="flex gap-2 mt-4" onClick={(e) => e.stopPropagation()}>
-          {app.is_system && (app.is_hidden || !app.is_browseable) ? (
-            <div className="w-full bg-gray-100 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 text-sm font-medium py-2.5 px-4 rounded-lg text-center">
-              System Component
-            </div>
-          ) : app.is_system ? (
-            <button
-              onClick={onOpen}
-              className="w-full bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors"
-            >
-              Open
-            </button>
-          ) : effectiveState === 'loading' ? (
+          {effectiveState === 'loading' ? (
             <button
               disabled
               className="w-full bg-gray-100 dark:bg-gray-700/50 cursor-not-allowed text-gray-500 dark:text-gray-400 text-sm font-medium py-2.5 px-4 rounded-lg"
@@ -315,17 +314,28 @@ function AppCardComponent({
                   Open
                 </button>
               )}
-              <button
-                onClick={onDelete}
-                disabled={isOperationPending}
-                className={`${!app.is_browseable ? 'w-full' : ''} bg-gray-100 dark:bg-gray-700/50 hover:bg-red-600 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:cursor-not-allowed text-gray-600 dark:text-gray-300 hover:text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2`}
-                title="Uninstall"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                </svg>
-                {!app.is_browseable && 'Uninstall'}
-              </button>
+              {updateAvailable && (
+                <button
+                  onClick={onUpdate}
+                  disabled={isOperationPending}
+                  className={`${!app.is_browseable && app.is_system ? 'w-full' : 'flex-1'} bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:cursor-not-allowed text-white disabled:text-gray-500 text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2`}
+                >
+                  Update
+                </button>
+              )}
+              {!app.is_system && (
+                <button
+                  onClick={onDelete}
+                  disabled={isOperationPending}
+                  className={`${!app.is_browseable ? 'w-full' : ''} bg-gray-100 dark:bg-gray-700/50 hover:bg-red-600 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:cursor-not-allowed text-gray-600 dark:text-gray-300 hover:text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2`}
+                  title="Uninstall"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                  {!app.is_browseable && 'Uninstall'}
+                </button>
+              )}
             </>
           ) : effectiveState === 'idle' || effectiveState === 'error' ? (
             <button
@@ -342,7 +352,7 @@ function AppCardComponent({
               disabled
               className="w-full bg-gray-100 dark:bg-gray-700/50 cursor-not-allowed text-gray-500 dark:text-gray-400 text-sm font-medium py-2.5 px-4 rounded-lg"
             >
-              {effectiveState === 'installing' ? 'Installing...' : 'Removing...'}
+              {effectiveState === 'updating' ? 'Updating...' : effectiveState === 'installing' ? 'Installing...' : 'Removing...'}
             </button>
           )}
         </div>
@@ -449,8 +459,12 @@ interface AppDetailPanelProps {
   isHealthy: boolean
   effectiveState: string
   onInstall: () => void
+  onUpdate: () => void
   onDelete: () => void
   onOpen: () => void
+  updateAvailable: boolean
+  currentVersion?: string | null
+  newVersion?: string | null
   isOperationPending: boolean
 }
 
@@ -461,8 +475,12 @@ function AppDetailPanel({
   isHealthy,
   effectiveState,
   onInstall,
+  onUpdate,
   onDelete,
   onOpen,
+  updateAvailable,
+  currentVersion,
+  newVersion,
   isOperationPending
 }: AppDetailPanelProps) {
   const colors = useIconColors(app?.name || '')
@@ -553,7 +571,7 @@ function AppDetailPanel({
         {(isInstalled || app.is_system) && (
           <div
             className={`h-1.5 w-full ${
-              effectiveState === 'installing' || effectiveState === 'deleting'
+              effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting'
                 ? 'bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 animate-pulse'
                 : effectiveState === 'error'
                 ? 'bg-red-500'
@@ -603,6 +621,15 @@ function AppDetailPanel({
                       Open
                     </button>
                   )}
+                  {isInstalled && effectiveState === 'installed' && updateAvailable && (
+                    <button
+                      onClick={onUpdate}
+                      disabled={isOperationPending}
+                      className="bg-emerald-600 hover:bg-emerald-500 disabled:cursor-not-allowed text-white text-sm font-semibold py-2 px-4 rounded-xl transition-colors flex items-center gap-1.5"
+                    >
+                      Update
+                    </button>
+                  )}
                   {!app.is_system && isInstalled && effectiveState === 'installed' && (
                     <button
                       onClick={onDelete}
@@ -615,7 +642,7 @@ function AppDetailPanel({
                       Uninstall
                     </button>
                   )}
-                  {!app.is_system && !isInstalled && (effectiveState === 'idle' || effectiveState === 'error') && (
+                  {!isInstalled && (effectiveState === 'idle' || effectiveState === 'error') && (
                     <button
                       onClick={onInstall}
                       className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-2 px-4 rounded-xl transition-colors flex items-center gap-1.5"
@@ -626,7 +653,7 @@ function AppDetailPanel({
                       {effectiveState === 'error' ? 'Retry' : 'Install'}
                     </button>
                   )}
-                  {(effectiveState === 'installing' || effectiveState === 'deleting') && (
+                  {(effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting') && (
                     <button
                       disabled
                       className="bg-gray-100 dark:bg-gray-800 cursor-not-allowed text-gray-500 dark:text-gray-400 text-sm font-semibold py-2 px-4 rounded-xl flex items-center gap-1.5"
@@ -634,7 +661,7 @@ function AppDetailPanel({
                       <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                       </svg>
-                      {effectiveState === 'installing' ? 'Installing...' : 'Removing...'}
+                      {effectiveState === 'updating' ? 'Updating...' : effectiveState === 'installing' ? 'Installing...' : 'Removing...'}
                     </button>
                   )}
                 </div>
@@ -650,7 +677,7 @@ function AppDetailPanel({
                     System App
                   </span>
                 )}
-                {!app.is_system && isInstalled && (
+                {isInstalled && (
                   <span className={`inline-flex items-center gap-1.5 text-sm px-3 py-1 rounded-full ${
                     isHealthy
                       ? 'bg-green-500/20 text-green-600 dark:text-green-400'
@@ -660,7 +687,7 @@ function AppDetailPanel({
                     {isHealthy ? 'Running' : 'Not Ready'}
                   </span>
                 )}
-                {!app.is_system && !isInstalled && effectiveState === 'idle' && (
+                {!isInstalled && effectiveState === 'idle' && (
                   <span className="inline-flex items-center gap-1.5 bg-gray-500/20 text-gray-600 dark:text-gray-400 text-sm px-3 py-1 rounded-full">
                     Not Installed
                   </span>
@@ -674,6 +701,31 @@ function AppDetailPanel({
             <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">About</h3>
             <p className="text-gray-600 dark:text-gray-400 leading-relaxed">{app.description}</p>
           </div>
+
+          {updateAvailable && (
+            <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900/60 dark:bg-emerald-950/30">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-emerald-900 dark:text-emerald-100">Update available</h3>
+                  <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-300">Review the version change before updating.</p>
+                </div>
+                <span className="rounded-full bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white">New</span>
+              </div>
+              <div className="mt-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3">
+                <div className="rounded-lg bg-white p-3 dark:bg-gray-900/80">
+                  <span className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Current</span>
+                  <p className="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-white">{currentVersion || 'Unknown'}</p>
+                </div>
+                <svg className="h-5 w-5 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                </svg>
+                <div className="rounded-lg bg-white p-3 dark:bg-gray-900/80">
+                  <span className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">New</span>
+                  <p className="mt-1 font-mono text-sm font-semibold text-emerald-700 dark:text-emerald-300">{newVersion || 'Unknown'}</p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Details */}
           <div className="mt-6 grid grid-cols-2 gap-4">
@@ -908,7 +960,7 @@ export default function AppsPage() {
     if (filter === 'all') return catalog
 
     return catalog.filter(app => {
-      const isInstalled = installed?.includes(app.name) || app.is_system
+      const isInstalled = installed?.includes(app.name) || appStates[app.name]?.observed_state === 'installed' || appStates[app.name]?.observed_state === 'unhealthy'
       const appStatus = globalAppStatuses[app.name]
       const isHealthy = appStatus?.healthy === true
 
@@ -920,12 +972,14 @@ export default function AppsPage() {
         case 'unhealthy':
           return isInstalled && !isHealthy
         case 'available':
-          return !isInstalled && !app.is_system
+          return !isInstalled
+        case 'updates':
+          return appStates[app.name]?.update_available === true
         default:
           return true
       }
     })
-  }, [catalog, installed, globalAppStatuses, filter])
+  }, [catalog, installed, appStates, globalAppStatuses, filter])
 
   // Group apps by category
   const appsByCategory = useMemo(() => {
@@ -1001,6 +1055,22 @@ export default function AppsPage() {
     },
   })
 
+  const updateMutation = useMutation({
+    mutationFn: (appName: string) => {
+      setOperationState(appName, 'updating')
+      return appsApi.update(appName)
+    },
+    onSuccess: (operation, appName) => {
+      setOperationState(appName, 'updating', operation.message || 'Update queued')
+      refreshAppStatuses()
+      showToast(`${appName} update queued`, 'success')
+    },
+    onError: (error: any, appName) => {
+      setOperationState(appName, 'error', error.response?.data?.detail || error.message)
+      showToast(`Failed to update ${appName}: ${error.response?.data?.detail || error.message}`, 'error')
+    },
+  })
+
   const deleteMutation = useMutation({
     mutationFn: (appName: string) => {
       setOperationState(appName, 'deleting')
@@ -1025,8 +1095,8 @@ export default function AppsPage() {
     const isHealthy = appState?.healthy === true || globalStatus?.healthy === true
 
     let effectiveState: string
-    if (app.is_system) {
-      effectiveState = 'installed'
+    if (operationStatus) {
+      effectiveState = operationStatus.state
     } else if (appState?.observed_state === 'installing') {
       effectiveState = 'installing'
     } else if (appState?.observed_state === 'deleting') {
@@ -1037,8 +1107,6 @@ export default function AppsPage() {
       effectiveState = 'installed'
     } else if (appState?.observed_state === 'not_installed') {
       effectiveState = 'idle'
-    } else if (operationStatus) {
-      effectiveState = operationStatus.state
     } else if (isInstalled) {
       effectiveState = globalStatus?.loading ? 'loading' : 'installed'
     } else {
@@ -1046,7 +1114,7 @@ export default function AppsPage() {
     }
 
     const serverInstalled = appState?.observed_state === 'installed' || appState?.observed_state === 'unhealthy' || appState?.observed_state === 'installing'
-    return { isInstalled: isInstalled || serverInstalled || app.is_system, isHealthy, effectiveState }
+    return { isInstalled: isInstalled || serverInstalled, isHealthy, effectiveState }
   }
 
   const handleOpen = (app: AppConfig) => {
@@ -1122,6 +1190,7 @@ export default function AppsPage() {
               <option value="healthy">Healthy</option>
               <option value="unhealthy">Unhealthy</option>
               <option value="available">Available</option>
+              <option value="updates">Updates Ready</option>
             </select>
           </div>
         </div>
@@ -1144,6 +1213,7 @@ export default function AppsPage() {
                 {filter === 'healthy' && "No apps are currently healthy."}
                 {filter === 'unhealthy' && "All your installed apps are healthy!"}
                 {filter === 'available' && "You've installed all available apps!"}
+                {filter === 'updates' && "No apps have updates ready."}
               </p>
               <button
                 onClick={clearFilter}
@@ -1181,6 +1251,7 @@ export default function AppsPage() {
                 <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                   {apps.map(app => {
                     const { isInstalled, isHealthy, effectiveState } = getAppState(app)
+                    const updateAvailable = appStates[app.name]?.update_available === true
                     return (
                       <AppCardComponent
                         key={app.name}
@@ -1190,10 +1261,12 @@ export default function AppsPage() {
                         effectiveState={effectiveState}
                         isSelected={selectedApp?.name === app.name}
                         onInstall={() => installMutation.mutate(app.name)}
+                        onUpdate={() => updateMutation.mutate(app.name)}
                         onDelete={() => deleteMutation.mutate(app.name)}
                         onOpen={() => handleOpen(app)}
                         onClick={() => setSelectedApp(app)}
-                        isOperationPending={installMutation.isPending || deleteMutation.isPending}
+                        updateAvailable={updateAvailable}
+                        isOperationPending={installMutation.isPending || updateMutation.isPending || deleteMutation.isPending}
                       />
                     )
                   })}
@@ -1208,6 +1281,8 @@ export default function AppsPage() {
       {selectedApp && (() => {
         const { isInstalled, isHealthy, effectiveState } = getAppState(selectedApp)
         const namespace = appStates[selectedApp.name]?.namespace || selectedApp.name
+        const selectedAppState = appStates[selectedApp.name]
+        const updateAvailable = selectedAppState?.update_available === true
         return (
           <AppDetailPanel
             app={selectedApp}
@@ -1216,9 +1291,13 @@ export default function AppsPage() {
             isHealthy={isHealthy}
             effectiveState={effectiveState}
             onInstall={() => installMutation.mutate(selectedApp.name)}
+            onUpdate={() => updateMutation.mutate(selectedApp.name)}
             onDelete={() => deleteMutation.mutate(selectedApp.name)}
             onOpen={() => handleOpen(selectedApp)}
-            isOperationPending={installMutation.isPending || deleteMutation.isPending}
+            updateAvailable={updateAvailable}
+            currentVersion={selectedAppState?.installed_chart_version}
+            newVersion={selectedAppState?.available_chart_version}
+            isOperationPending={installMutation.isPending || updateMutation.isPending || deleteMutation.isPending}
           />
         )
       })()}
