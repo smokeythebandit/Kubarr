@@ -144,7 +144,7 @@ jobs:
         run: |
           docker run -d -p 5001:5000 --name kind-registry --restart=always registry:2
           # Wait for registry to be ready
-          for i in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             if curl -sf http://localhost:5001/v2/ 2>/dev/null; then
               echo "Registry is ready"
               exit 0
@@ -230,24 +230,24 @@ jobs:
 
       - name: Deploy Kubarr
         run: |
-          openssl genrsa -out /tmp/jwt-private-${KIND_CLUSTER}.pem 2048
-          openssl rsa -in /tmp/jwt-private-${KIND_CLUSTER}.pem -pubout -out /tmp/jwt-public-${KIND_CLUSTER}.pem
+          openssl genrsa -out "/tmp/jwt-private-${KIND_CLUSTER}.pem" 2048
+          openssl rsa -in "/tmp/jwt-private-${KIND_CLUSTER}.pem" -pubout -out "/tmp/jwt-public-${KIND_CLUSTER}.pem"
 
           kubectl create namespace kubarr --dry-run=client -o yaml | kubectl apply -f -
 
           kubectl create secret generic kubarr-jwt-keys \
-            --from-file=private.pem=/tmp/jwt-private-${KIND_CLUSTER}.pem \
-            --from-file=public.pem=/tmp/jwt-public-${KIND_CLUSTER}.pem \
+            --from-file=private.pem="/tmp/jwt-private-${KIND_CLUSTER}.pem" \
+            --from-file=public.pem="/tmp/jwt-public-${KIND_CLUSTER}.pem" \
             -n kubarr --dry-run=client -o yaml | kubectl apply -f -
 
           helm upgrade --install kubarr ./charts/kubarr \
             --namespace kubarr \
             --set namespace.create=false \
             --set backend.image.repository=localhost:5001/kubarr-backend \
-            --set backend.image.tag=${TAG} \
+            --set "backend.image.tag=${TAG}" \
             --set backend.image.pullPolicy=IfNotPresent \
             --set frontend.image.repository=localhost:5001/kubarr-frontend \
-            --set frontend.image.tag=${TAG} \
+            --set "frontend.image.tag=${TAG}" \
             --set frontend.image.pullPolicy=IfNotPresent \
             --set oauth2.enabled=true \
             --set auth.jwt.existingSecret=kubarr-jwt-keys \
@@ -275,7 +275,7 @@ jobs:
             sleep 2
           done) &
 
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             if curl -s http://localhost:18000/api/system/health 2>/dev/null | grep -q "ok"; then
               echo "Backend is healthy"
               exit 0
@@ -322,6 +322,6 @@ jobs:
         if: always()
         run: |
           pkill -f "kubectl port-forward.*svc/kubarr-backend.*18000" 2>/dev/null || true
-          rm -f /tmp/jwt-*-${KIND_CLUSTER}.pem
+          rm -f "/tmp/jwt-private-${KIND_CLUSTER}.pem" "/tmp/jwt-public-${KIND_CLUSTER}.pem"
           kind delete cluster --name "$KIND_CLUSTER" 2>/dev/null || true
           docker rm -f kind-registry 2>/dev/null || true

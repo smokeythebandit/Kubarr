@@ -43,7 +43,7 @@ jobs:
         run: |
           # Extract version from package.json
           VERSION=$(grep '"version"' code/frontend/package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           # Detect channel from git ref
           if [[ "${{ github.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -53,21 +53,29 @@ jobs:
           else
             CHANNEL="dev"
           fi
-          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 
       - name: Build ${{ matrix.image }}
         env:
           DOCKER_BUILDKIT: '1'
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          IMAGE_NAME: ${{ matrix.image }}:${{ inputs.image-tag }}
+          TARGET: ${{ matrix.target || '' }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          COMMIT_HASH: ${{ github.sha }}
         run: |
           for attempt in 1 2 3; do
             echo "=== Build attempt ${attempt}/3 ==="
-            if docker build -f ${{ matrix.dockerfile }} \
-                ${{ matrix.target && format('--target {0}', matrix.target) || '' }} \
-                -t "${{ matrix.image }}:${{ inputs.image-tag }}" \
-                --build-arg VERSION=${{ steps.meta.outputs.version }} \
-                --build-arg CHANNEL=${{ steps.meta.outputs.channel }} \
-                --build-arg COMMIT_HASH=${{ github.sha }} \
-                --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) .; then
+            build_args=(-f "$DOCKERFILE" -t "$IMAGE_NAME")
+            if [ -n "$TARGET" ]; then
+              build_args+=(--target "$TARGET")
+            fi
+            if docker build "${build_args[@]}" \
+                --build-arg "VERSION=$VERSION" \
+                --build-arg "CHANNEL=$CHANNEL" \
+                --build-arg "COMMIT_HASH=$COMMIT_HASH" \
+                --build-arg "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" .; then
               echo "Build succeeded on attempt ${attempt}"
               exit 0
             fi
@@ -98,7 +106,7 @@ jobs:
         run: |
           # Extract version from package.json
           VERSION=$(grep '"version"' code/frontend/package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           # Detect channel from git ref
           if [[ "${{ github.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -108,7 +116,7 @@ jobs:
           else
             CHANNEL="dev"
           fi
-          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:

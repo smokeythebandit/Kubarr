@@ -94,24 +94,24 @@ jobs:
 
       - name: Deploy Kubarr
         run: |
-          openssl genrsa -out /tmp/jwt-private-${KIND_CLUSTER}.pem 2048
-          openssl rsa -in /tmp/jwt-private-${KIND_CLUSTER}.pem -pubout -out /tmp/jwt-public-${KIND_CLUSTER}.pem
+          openssl genrsa -out "/tmp/jwt-private-${KIND_CLUSTER}.pem" 2048
+          openssl rsa -in "/tmp/jwt-private-${KIND_CLUSTER}.pem" -pubout -out "/tmp/jwt-public-${KIND_CLUSTER}.pem"
 
           kubectl create namespace kubarr --dry-run=client -o yaml | kubectl apply -f -
 
           kubectl create secret generic kubarr-jwt-keys \
-            --from-file=private.pem=/tmp/jwt-private-${KIND_CLUSTER}.pem \
-            --from-file=public.pem=/tmp/jwt-public-${KIND_CLUSTER}.pem \
+            --from-file=private.pem="/tmp/jwt-private-${KIND_CLUSTER}.pem" \
+            --from-file=public.pem="/tmp/jwt-public-${KIND_CLUSTER}.pem" \
             -n kubarr --dry-run=client -o yaml | kubectl apply -f -
 
           helm upgrade --install kubarr ./charts/kubarr \
             --namespace kubarr \
             --set namespace.create=false \
             --set backend.image.repository=kubarr-backend \
-            --set backend.image.tag=${TAG} \
+            --set "backend.image.tag=${TAG}" \
             --set backend.image.pullPolicy=Never \
             --set frontend.image.repository=kubarr-frontend \
-            --set frontend.image.tag=${TAG} \
+            --set "frontend.image.tag=${TAG}" \
             --set frontend.image.pullPolicy=Never \
             --set oauth2.enabled=true \
             --set auth.jwt.existingSecret=kubarr-jwt-keys \
@@ -133,9 +133,9 @@ jobs:
       - name: Port-forward
         run: |
           kubectl port-forward --address 127.0.0.1 svc/kubarr-backend 18000:8000 -n kubarr &
-          echo $! > "/tmp/pf-${KIND_CLUSTER}.pid"
+          echo "$!" > "/tmp/pf-${KIND_CLUSTER}.pid"
 
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             if curl -s http://localhost:18000/api/system/health 2>/dev/null | grep -q "ok"; then
               echo "Backend is healthy"
               exit 0
@@ -184,6 +184,10 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          kill "$(cat /tmp/pf-${KIND_CLUSTER}.pid 2>/dev/null)" 2>/dev/null || true
-          rm -f /tmp/jwt-*-${KIND_CLUSTER}.pem /tmp/pf-${KIND_CLUSTER}.pid
+          pid_file="/tmp/pf-${KIND_CLUSTER}.pid"
+          if [ -f "$pid_file" ]; then
+            read -r port_forward_pid < "$pid_file"
+            kill "$port_forward_pid" 2>/dev/null || true
+          fi
+          rm -f "/tmp/jwt-private-${KIND_CLUSTER}.pem" "/tmp/jwt-public-${KIND_CLUSTER}.pem" "/tmp/pf-${KIND_CLUSTER}.pid"
           kind delete cluster --name "$KIND_CLUSTER" 2>/dev/null || true
