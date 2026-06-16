@@ -1,17 +1,36 @@
 version: 2
 updates:
   - package-ecosystem: cargo
-    directory: /code/backend
+    directory: /code/api
     schedule:
       interval: weekly
     groups:
       cargo:
         patterns: ["*"]
-    ignore:
-      - dependency-name: kube
-        versions: [">=1.0.0"]
-      - dependency-name: k8s-openapi
-        versions: [">=0.24.0"]
+
+  - package-ecosystem: cargo
+    directory: /code/worker
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /code/cli
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /code/dns-webhook
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        patterns: ["*"]
 
   - package-ecosystem: npm
     directory: /code/frontend
