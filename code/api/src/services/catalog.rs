@@ -94,6 +94,19 @@ const KUBARR_SYSTEM_COMPONENTS: &[SystemComponent] = &[
         service_name: None,
     },
     SystemComponent {
+        name: "cert-manager",
+        display_name: "cert-manager",
+        description: "Kubernetes certificate controller used by Kubarr for Let’s Encrypt issuance and renewal.",
+        icon: "🔐",
+        image: "quay.io/jetstack/cert-manager-controller:v1.16.3",
+        port: 0,
+        category: "system",
+        namespace: "default",
+        workload_kind: SystemComponentWorkloadKind::Deployment,
+        workload_name: Some("cert-manager"),
+        service_name: None,
+    },
+    SystemComponent {
         name: "managed-nfs",
         display_name: "Managed NFS",
         description: "Managed NFS server for Kubarr shared media storage.",
@@ -292,6 +305,8 @@ impl AppCatalog {
 
         if !charts_dir.exists() {
             tracing::warn!("Charts directory does not exist: {}", charts_dir.display());
+            self.load_kubarr_system_components();
+            tracing::info!("Loaded {} apps from catalog", self.apps.len());
             return;
         }
 

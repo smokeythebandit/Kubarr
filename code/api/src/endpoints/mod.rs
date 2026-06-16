@@ -1,7 +1,7 @@
 pub mod apps;
 pub mod audit;
 pub mod auth;
-pub mod cloudflare;
+pub mod domains;
 pub mod extractors;
 pub mod logs;
 pub mod monitoring;
@@ -145,6 +145,27 @@ use crate::state::AppState;
         settings::list_settings,
         settings::get_setting,
         settings::update_setting,
+        // Domains
+        domains::list_domains,
+        domains::get_domain,
+        domains::create_domain,
+        domains::update_domain,
+        domains::delete_domain,
+        domains::list_ddns_profiles,
+        domains::get_ddns_profile,
+        domains::create_ddns_profile,
+        domains::update_ddns_profile,
+        domains::delete_ddns_profile,
+        domains::list_letsencrypt_profiles,
+        domains::get_letsencrypt_profile,
+        domains::create_letsencrypt_profile,
+        domains::update_letsencrypt_profile,
+        domains::delete_letsencrypt_profile,
+        domains::list_assignments,
+        domains::get_assignment,
+        domains::create_assignment,
+        domains::update_assignment,
+        domains::delete_assignment,
         // OAuth
         oauth::list_available_providers,
         oauth::list_providers,
@@ -168,12 +189,6 @@ use crate::state::AppState;
         vpn::remove_vpn,
         vpn::get_forwarded_port,
         vpn::list_supported_providers,
-        // Cloudflare
-        cloudflare::get_config,
-        cloudflare::save_config,
-        cloudflare::delete_config,
-        cloudflare::get_status,
-        cloudflare::validate_token,
     ),
     tags(
         (name = "Health", description = "Health check and version endpoints"),
@@ -188,9 +203,9 @@ use crate::state::AppState;
         (name = "Notifications", description = "Notification channels, events, and inbox"),
         (name = "Storage", description = "File storage management"),
         (name = "Settings", description = "System settings"),
+        (name = "Domains", description = "Domains, Dynamic DNS, and Let's Encrypt configuration"),
         (name = "OAuth", description = "OAuth provider configuration and login"),
         (name = "VPN", description = "VPN provider and app VPN configuration"),
-        (name = "Cloudflare", description = "Cloudflare Tunnel configuration"),
     )
 )]
 pub struct ApiDoc;
@@ -225,6 +240,7 @@ fn api_routes(state: AppState) -> Router {
         .nest("/users", users::users_routes(state.clone()))
         .nest("/roles", roles::roles_routes(state.clone()))
         .nest("/settings", settings::settings_routes(state.clone()))
+        .nest("/domains", domains::domains_routes(state.clone()))
         .nest("/monitoring", monitoring::monitoring_routes(state.clone()))
         .nest("/networking", networking::networking_routes(state.clone()))
         .nest("/apps", apps::apps_routes(state.clone()))
@@ -238,7 +254,6 @@ fn api_routes(state: AppState) -> Router {
         .nest("/oauth", oauth::oauth_routes(state.clone()))
         .nest("/vpn", vpn::vpn_routes(state.clone()))
         .nest("/proxy-auth", proxy::proxy_auth_routes(state.clone()))
-        .nest("/cloudflare", cloudflare::cloudflare_routes(state.clone()))
         .route("/system/version", axum::routing::get(get_version))
         .route("/openapi.json", axum::routing::get(openapi_json))
         .route("/docs", axum::routing::get(swagger_ui))

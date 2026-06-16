@@ -1,0 +1,13 @@
+# syntax=docker/dockerfile:1.4
+FROM golang:1.23-alpine AS builder
+WORKDIR /src
+COPY code/dns-webhook ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -mod=mod -o /kubarr-dns-webhook .
+
+FROM alpine:3.23
+RUN apk add --no-cache ca-certificates
+USER 1000:1000
+COPY --from=builder /kubarr-dns-webhook /kubarr-dns-webhook
+ENTRYPOINT ["/kubarr-dns-webhook"]

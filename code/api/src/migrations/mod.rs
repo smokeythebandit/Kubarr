@@ -21,10 +21,11 @@ mod m20260226_000018_seed_defaults;
 mod m20260226_000020_create_vpn_providers;
 mod m20260226_000021_create_app_vpn_configs;
 mod m20260226_000022_create_two_factor_recovery_codes;
-mod m20260226_000023_create_cloudflare_tunnels;
 mod m20260226_000024_create_storage_config;
 mod m20260226_000025_create_app_operations;
 mod m20260226_000026_create_app_states;
+mod m20260226_000027_create_domain_management;
+mod m20260226_000028_remove_obsolete_domain_settings;
 
 pub struct Migrator;
 
@@ -53,10 +54,11 @@ impl MigratorTrait for Migrator {
             Box::new(m20260226_000020_create_vpn_providers::Migration),
             Box::new(m20260226_000021_create_app_vpn_configs::Migration),
             Box::new(m20260226_000022_create_two_factor_recovery_codes::Migration),
-            Box::new(m20260226_000023_create_cloudflare_tunnels::Migration),
             Box::new(m20260226_000024_create_storage_config::Migration),
             Box::new(m20260226_000025_create_app_operations::Migration),
             Box::new(m20260226_000026_create_app_states::Migration),
+            Box::new(m20260226_000027_create_domain_management::Migration),
+            Box::new(m20260226_000028_remove_obsolete_domain_settings::Migration),
         ]
     }
 }

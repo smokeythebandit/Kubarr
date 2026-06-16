@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import UserList from '../components/users/UserList';
 import UserForm from '../components/users/UserForm';
 import InviteLinkModal from '../components/users/InviteLinkModal';
 import {
@@ -28,17 +27,26 @@ import {
 } from '../api/roles';
 import { getCatalog, App } from '../api/apps';
 import { getSettings, updateSetting, Setting } from '../api/settings';
-import { Users, Link, UserPlus, Settings, Sliders, Lock, Menu, X, FileText, CheckCircle, XCircle, AlertTriangle, Trash2, LayoutDashboard, Activity, Shield, Clock, TrendingUp, Bell, Mail, Send, MessageSquare, Network, Cloud } from 'lucide-react';
-import PermissionMatrix from '../components/permissions/PermissionMatrix';
+import { Users, Link, UserPlus, Settings, Sliders, Lock, Menu, X, FileText, CheckCircle, XCircle, LayoutDashboard, Shield, Bell, Mail, Send, MessageSquare, Globe, Network } from 'lucide-react';
 import { auditApi, AuditLog, AuditStats, AuditLogQuery } from '../api/audit';
 import { notificationsApi, NotificationChannel, NotificationEvent, NotificationLog } from '../api/notifications';
 import { oauthApi, OAuthProvider } from '../api/oauth';
 import { VpnTab } from '../components/vpn';
-import { CloudflareTab } from '../components/cloudflare';
+import { AuditTab } from '../components/settings/tabs/AuditTab';
+import { DashboardTab } from '../components/settings/tabs/DashboardTab';
+import { DdnsTab } from '../components/settings/tabs/DdnsTab';
+import { DomainsTab } from '../components/settings/tabs/DomainsTab';
+import { GeneralTab } from '../components/settings/tabs/GeneralTab';
+import { InvitesTab } from '../components/settings/tabs/InvitesTab';
+import { LetsEncryptTab } from '../components/settings/tabs/LetsEncryptTab';
+import { NotificationsTab } from '../components/settings/tabs/NotificationsTab';
+import { PendingUsersTab } from '../components/settings/tabs/PendingUsersTab';
+import { PermissionsTab } from '../components/settings/tabs/PermissionsTab';
+import { UsersTab } from '../components/settings/tabs/UsersTab';
 
 type ViewMode = 'list' | 'create' | 'edit';
 type ApiErr = { response?: { data?: { detail?: string; error?: string } } };
-type SettingsSection = 'dashboard' | 'general' | 'users' | 'pending' | 'invites' | 'permissions' | 'audit' | 'notifications' | 'vpn' | 'ddns' | 'letsencrypt' | 'cloudflare';
+type SettingsSection = 'dashboard' | 'general' | 'users' | 'pending' | 'invites' | 'permissions' | 'audit' | 'notifications' | 'vpn' | 'domains' | 'ddns' | 'letsencrypt';
 
 const SettingsPage: React.FC = () => {
   const { isAdmin, hasPermission } = useAuth();
@@ -47,7 +55,7 @@ const SettingsPage: React.FC = () => {
   const [pendingUsers, setPendingUsers] = useState<User[]>([]);
   const [invites, setInvites] = useState<Invite[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
-  const [_apps, setApps] = useState<App[]>([]);
+  const [apps, setApps] = useState<App[]>([]);
   const [systemSettings, setSystemSettings] = useState<Record<string, Setting>>({});
   const [loading, setLoading] = useState(true);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -643,10 +651,10 @@ const SettingsPage: React.FC = () => {
   ];
 
   const networkingItems = [
-    { id: 'vpn' as SettingsSection, label: 'VPN', icon: Shield },
+    { id: 'domains' as SettingsSection, label: 'Domains', icon: Globe },
     { id: 'ddns' as SettingsSection, label: 'Dynamic DNS', icon: Network },
     { id: 'letsencrypt' as SettingsSection, label: "Let's Encrypt", icon: Lock },
-    { id: 'cloudflare' as SettingsSection, label: 'Cloudflare Tunnel', icon: Cloud },
+    { id: 'vpn' as SettingsSection, label: 'VPN', icon: Shield },
   ];
 
   const accessManagementItems = [
@@ -823,1059 +831,125 @@ const SettingsPage: React.FC = () => {
           </div>
         ) : (
           <>
-            {/* Dashboard Section */}
             {activeSection === 'dashboard' && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-2xl font-bold text-gray-900 dark:text-white">System Dashboard</h3>
-                  <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">
-                    Overview of system activity and health.
-                  </p>
-                </div>
-
-                {/* Quick Stats */}
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-blue-100 dark:bg-blue-900/30 rounded-lg">
-                        <Users className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-                      </div>
-                      <div>
-                        <div className="text-2xl font-bold text-gray-900 dark:text-white">{users.length}</div>
-                        <div className="text-sm text-gray-500 dark:text-gray-400">Total Users</div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-yellow-100 dark:bg-yellow-900/30 rounded-lg">
-                        <Clock className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
-                      </div>
-                      <div>
-                        <div className="text-2xl font-bold text-gray-900 dark:text-white">{pendingUsers.length}</div>
-                        <div className="text-sm text-gray-500 dark:text-gray-400">Pending Approval</div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-green-100 dark:bg-green-900/30 rounded-lg">
-                        <Link className="w-5 h-5 text-green-600 dark:text-green-400" />
-                      </div>
-                      <div>
-                        <div className="text-2xl font-bold text-gray-900 dark:text-white">
-                          {invites.filter(i => !i.is_used && !isExpired(i.expires_at)).length}
-                        </div>
-                        <div className="text-sm text-gray-500 dark:text-gray-400">Active Invites</div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-purple-100 dark:bg-purple-900/30 rounded-lg">
-                        <Shield className="w-5 h-5 text-purple-600 dark:text-purple-400" />
-                      </div>
-                      <div>
-                        <div className="text-2xl font-bold text-gray-900 dark:text-white">{roles.length}</div>
-                        <div className="text-sm text-gray-500 dark:text-gray-400">Roles</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Activity Overview */}
-                {auditStats && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* Activity Stats */}
-                    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                      <div className="flex items-center gap-2 mb-4">
-                        <Activity className="w-5 h-5 text-gray-500" />
-                        <h4 className="text-lg font-medium text-gray-900 dark:text-white">Activity Overview</h4>
-                      </div>
-                      <div className="space-y-4">
-                        <div className="flex justify-between items-center">
-                          <span className="text-gray-600 dark:text-gray-400">Events Today</span>
-                          <span className="text-xl font-semibold text-blue-600 dark:text-blue-400">{auditStats.events_today.toLocaleString()}</span>
-                        </div>
-                        <div className="flex justify-between items-center">
-                          <span className="text-gray-600 dark:text-gray-400">Events This Week</span>
-                          <span className="text-xl font-semibold text-gray-900 dark:text-white">{auditStats.events_this_week.toLocaleString()}</span>
-                        </div>
-                        <div className="flex justify-between items-center">
-                          <span className="text-gray-600 dark:text-gray-400">Total Events</span>
-                          <span className="text-xl font-semibold text-gray-900 dark:text-white">{auditStats.total_events.toLocaleString()}</span>
-                        </div>
-                        <div className="pt-4 border-t border-gray-200 dark:border-gray-700">
-                          <div className="flex justify-between items-center mb-2">
-                            <span className="text-sm text-gray-500 dark:text-gray-400">Success Rate</span>
-                            <span className="text-sm font-medium text-green-600 dark:text-green-400">
-                              {auditStats.total_events > 0
-                                ? ((auditStats.successful_events / auditStats.total_events) * 100).toFixed(1)
-                                : 0}%
-                            </span>
-                          </div>
-                          <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                            <div
-                              className="bg-green-600 h-2 rounded-full transition-all duration-300"
-                              style={{
-                                width: `${auditStats.total_events > 0
-                                  ? (auditStats.successful_events / auditStats.total_events) * 100
-                                  : 0}%`
-                              }}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Top Actions */}
-                    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                      <div className="flex items-center gap-2 mb-4">
-                        <TrendingUp className="w-5 h-5 text-gray-500" />
-                        <h4 className="text-lg font-medium text-gray-900 dark:text-white">Top Actions</h4>
-                      </div>
-                      {auditStats.top_actions.length === 0 ? (
-                        <p className="text-gray-500 dark:text-gray-400 text-sm">No activity recorded yet.</p>
-                      ) : (
-                        <div className="space-y-3">
-                          {auditStats.top_actions.slice(0, 5).map((action, index) => (
-                            <div key={action.action} className="flex items-center gap-3">
-                              <span className="text-sm font-medium text-gray-400 w-4">{index + 1}</span>
-                              <div className="flex-1">
-                                <div className="flex justify-between items-center mb-1">
-                                  <span className="text-sm text-gray-900 dark:text-white">{formatAuditAction(action.action)}</span>
-                                  <span className="text-sm text-gray-500">{action.count.toLocaleString()}</span>
-                                </div>
-                                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5">
-                                  <div
-                                    className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
-                                    style={{
-                                      width: `${(action.count / auditStats.top_actions[0].count) * 100}%`
-                                    }}
-                                  />
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Recent Failures */}
-                {auditStats && auditStats.recent_failures.length > 0 && (
-                  <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                    <div className="flex items-center gap-2 mb-4">
-                      <AlertTriangle className="w-5 h-5 text-red-500" />
-                      <h4 className="text-lg font-medium text-gray-900 dark:text-white">Recent Failed Events</h4>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                        <thead>
-                          <tr>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Time</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">User</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Action</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase hidden md:table-cell">Error</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                          {auditStats.recent_failures.slice(0, 5).map((log) => (
-                            <tr key={log.id}>
-                              <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">
-                                {new Date(log.timestamp).toLocaleString()}
-                              </td>
-                              <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                                {log.username || 'Unknown'}
-                              </td>
-                              <td className="px-4 py-2 whitespace-nowrap">
-                                <span className="inline-flex items-center gap-1 text-sm text-red-600 dark:text-red-400">
-                                  <XCircle className="w-4 h-4" />
-                                  {formatAuditAction(log.action)}
-                                </span>
-                              </td>
-                              <td className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400 hidden md:table-cell max-w-xs truncate" title={log.error_message || ''}>
-                                {log.error_message || '-'}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-                      <button
-                        onClick={() => setActiveSection('audit')}
-                        className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
-                      >
-                        View all audit logs →
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Quick Actions */}
-                <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                  <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Quick Actions</h4>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <button
-                      onClick={() => setActiveSection('users')}
-                      className="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-                    >
-                      <Users className="w-6 h-6 text-blue-600 dark:text-blue-400" />
-                      <span className="text-sm text-gray-700 dark:text-gray-300">Manage Users</span>
-                    </button>
-                    <button
-                      onClick={() => setActiveSection('invites')}
-                      className="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-                    >
-                      <Link className="w-6 h-6 text-green-600 dark:text-green-400" />
-                      <span className="text-sm text-gray-700 dark:text-gray-300">Create Invite</span>
-                    </button>
-                    <button
-                      onClick={() => setActiveSection('permissions')}
-                      className="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-                    >
-                      <Lock className="w-6 h-6 text-purple-600 dark:text-purple-400" />
-                      <span className="text-sm text-gray-700 dark:text-gray-300">Permissions</span>
-                    </button>
-                    <button
-                      onClick={() => setActiveSection('audit')}
-                      className="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-                    >
-                      <FileText className="w-6 h-6 text-orange-600 dark:text-orange-400" />
-                      <span className="text-sm text-gray-700 dark:text-gray-300">Audit Logs</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <DashboardTab
+                usersCount={users.length}
+                pendingUsersCount={pendingUsers.length}
+                invites={invites}
+                roles={roles}
+                auditStats={auditStats}
+                isExpired={isExpired}
+                formatAuditAction={formatAuditAction}
+                onSelectSection={setActiveSection}
+              />
             )}
 
-            {/* General Section */}
             {activeSection === 'general' && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-2xl font-bold text-gray-900 dark:text-white">General Settings</h3>
-                  <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">
-                    Configure general access management settings.
-                  </p>
-                </div>
-
-                <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 space-y-6">
-                  {/* Registration Settings */}
-                  <div>
-                    <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-4">User Registration</h4>
-
-                    {/* Registration Enabled Toggle */}
-                    <div className="flex items-center justify-between py-4 border-b border-gray-200 dark:border-gray-700">
-                      <div className="flex-1">
-                        <div className="font-medium text-gray-900 dark:text-white">Allow Open Registration</div>
-                        <div className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                          When disabled, users can only register using invite links.
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => handleToggleSetting('registration_enabled')}
-                        disabled={savingSettings}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-800 ${
-                          systemSettings.registration_enabled?.value === 'true'
-                            ? 'bg-blue-600'
-                            : 'bg-gray-300 dark:bg-gray-600'
-                        } ${savingSettings ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            systemSettings.registration_enabled?.value === 'true'
-                              ? 'translate-x-6'
-                              : 'translate-x-1'
-                          }`}
-                        />
-                      </button>
-                    </div>
-
-                    {/* Require Approval Toggle */}
-                    <div className="flex items-center justify-between py-4">
-                      <div className="flex-1">
-                        <div className="font-medium text-gray-900 dark:text-white">Require Admin Approval</div>
-                        <div className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                          New registrations require admin approval before users can log in. Users with invite links are auto-approved.
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => handleToggleSetting('registration_require_approval')}
-                        disabled={savingSettings}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-800 ${
-                          systemSettings.registration_require_approval?.value === 'true'
-                            ? 'bg-blue-600'
-                            : 'bg-gray-300 dark:bg-gray-600'
-                        } ${savingSettings ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            systemSettings.registration_require_approval?.value === 'true'
-                              ? 'translate-x-6'
-                              : 'translate-x-1'
-                          }`}
-                        />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* OAuth Providers */}
-                <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 space-y-6">
-                  <div>
-                    <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-2">OAuth Providers</h4>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">
-                      Allow users to sign in with their Google or Microsoft accounts. Configure your OAuth app credentials below.
-                    </p>
-                  </div>
-
-                  <div className="space-y-4">
-                    {oauthProviders.map((provider) => (
-                      <div key={provider.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-                        <div className="flex items-center justify-between mb-4">
-                          <div className="flex items-center gap-3">
-                            <div className={`p-2 rounded-lg ${provider.enabled ? 'bg-blue-100 dark:bg-blue-900/30' : 'bg-gray-100 dark:bg-gray-700'}`}>
-                              {getOAuthProviderIcon(provider.id)}
-                            </div>
-                            <div>
-                              <div className="font-medium text-gray-900 dark:text-white">{provider.name}</div>
-                              <div className="text-sm text-gray-500 dark:text-gray-400">
-                                {provider.enabled ? (
-                                  provider.client_id ? 'Configured' : 'Enabled but not configured'
-                                ) : 'Disabled'}
-                              </div>
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => handleToggleOAuthProvider(provider.id, !provider.enabled)}
-                            disabled={!provider.client_id && !provider.enabled}
-                            title={!provider.client_id && !provider.enabled ? 'Configure credentials first' : ''}
-                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                              provider.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
-                            } ${!provider.client_id && !provider.enabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                          >
-                            <span
-                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                                provider.enabled ? 'translate-x-6' : 'translate-x-1'
-                              }`}
-                            />
-                          </button>
-                        </div>
-
-                        {editingOAuthProvider === provider.id ? (
-                          <div className="mt-4 space-y-3 border-t border-gray-200 dark:border-gray-700 pt-4">
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                                Client ID
-                              </label>
-                              <input
-                                type="text"
-                                value={oauthProviderConfig.client_id}
-                                onChange={(e) => setOauthProviderConfig(prev => ({ ...prev, client_id: e.target.value }))}
-                                placeholder={provider.client_id || 'Enter client ID'}
-                                className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                                Client Secret
-                              </label>
-                              <input
-                                type="password"
-                                value={oauthProviderConfig.client_secret}
-                                onChange={(e) => setOauthProviderConfig(prev => ({ ...prev, client_secret: e.target.value }))}
-                                placeholder={provider.has_secret ? '••••••••' : 'Enter client secret'}
-                                className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              />
-                              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                                Leave blank to keep existing secret
-                              </p>
-                            </div>
-                            <div className="flex gap-2 mt-4">
-                              <button
-                                onClick={() => handleSaveOAuthProvider(provider.id)}
-                                disabled={savingOAuthProvider}
-                                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-md font-medium transition-colors"
-                              >
-                                {savingOAuthProvider ? 'Saving...' : 'Save'}
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setEditingOAuthProvider(null);
-                                  setOauthProviderConfig({ client_id: '', client_secret: '' });
-                                }}
-                                className="px-4 py-2 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-md font-medium transition-colors"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
-                            <button
-                              onClick={() => {
-                                setEditingOAuthProvider(provider.id);
-                                setOauthProviderConfig({
-                                  client_id: provider.client_id || '',
-                                  client_secret: '',
-                                });
-                              }}
-                              className="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-md transition-colors"
-                            >
-                              Configure
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-
-                    {oauthProviders.length === 0 && (
-                      <p className="text-sm text-gray-500 dark:text-gray-400 italic">
-                        Loading OAuth providers...
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
+              <GeneralTab
+                systemSettings={systemSettings}
+                savingSettings={savingSettings}
+                oauthProviders={oauthProviders}
+                editingOAuthProvider={editingOAuthProvider}
+                oauthProviderConfig={oauthProviderConfig}
+                savingOAuthProvider={savingOAuthProvider}
+                onToggleSetting={handleToggleSetting}
+                onToggleOAuthProvider={handleToggleOAuthProvider}
+                onSaveOAuthProvider={handleSaveOAuthProvider}
+                setEditingOAuthProvider={setEditingOAuthProvider}
+                setOauthProviderConfig={setOauthProviderConfig}
+                getOAuthProviderIcon={getOAuthProviderIcon}
+              />
             )}
 
-            {/* Users Section */}
             {activeSection === 'users' && viewMode === 'list' && (
-              <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="text-2xl font-bold text-gray-900 dark:text-white">All Users</h3>
-                  <button
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md font-medium transition-colors"
-                    onClick={() => setViewMode('create')}
-                  >
-                    Create New User
-                  </button>
-                </div>
-                <UserList
-                  users={users}
-                  onEdit={handleEditUser}
-                  onDelete={handleDeleteUser}
-                  onApprove={handleApproveUser}
-                  showActions={true}
-                />
-              </div>
+              <UsersTab
+                users={users}
+                onCreateUser={() => setViewMode('create')}
+                onEditUser={handleEditUser}
+                onDeleteUser={handleDeleteUser}
+                onApproveUser={handleApproveUser}
+              />
             )}
 
-            {/* Pending Users Section */}
             {activeSection === 'pending' && viewMode === 'list' && (
-              <div className="space-y-4">
-                <h3 className="text-2xl font-bold text-gray-900 dark:text-white">Pending Approval</h3>
-                <p className="text-gray-500 dark:text-gray-400">Users waiting for approval to access the system.</p>
-                <UserList
-                  users={pendingUsers}
-                  onApprove={handleApproveUser}
-                  onReject={handleRejectUser}
-                  onDelete={handleDeleteUser}
-                  showActions={true}
-                />
-              </div>
+              <PendingUsersTab
+                pendingUsers={pendingUsers}
+                onApproveUser={handleApproveUser}
+                onRejectUser={handleRejectUser}
+                onDeleteUser={handleDeleteUser}
+              />
             )}
 
-            {/* Invites Section */}
             {activeSection === 'invites' && viewMode === 'list' && (
-              <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <div>
-                    <h3 className="text-2xl font-bold text-gray-900 dark:text-white">Invite Links</h3>
-                    <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">
-                      Create invite links to share with users. Each link can only be used once.
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleCreateInvite}
-                    disabled={creatingInvite}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-md font-medium transition-colors"
-                  >
-                    {creatingInvite ? 'Creating...' : 'Create Invite'}
-                  </button>
-                </div>
-
-                {invites.length === 0 ? (
-                  <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8 text-center">
-                    <p className="text-gray-500 dark:text-gray-400">No invites created yet. Create one to get started.</p>
-                  </div>
-                ) : (
-                  <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                      <thead className="bg-gray-50 dark:bg-gray-700">
-                        <tr>
-                          <th className="px-4 md:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
-                          <th className="px-4 md:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Created By</th>
-                          <th className="px-4 md:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hidden sm:table-cell">Created At</th>
-                          <th className="px-4 md:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hidden sm:table-cell">Expires At</th>
-                          <th className="px-4 md:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hidden md:table-cell">Used By</th>
-                          <th className="px-4 md:px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                        {invites.map((invite) => (
-                          <tr key={invite.id} className={invite.is_used || isExpired(invite.expires_at) ? 'opacity-50' : ''}>
-                            <td className="px-4 md:px-6 py-4 whitespace-nowrap">
-                              {invite.is_used ? (
-                                <span className="px-2 py-1 text-xs bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 rounded">Used</span>
-                              ) : isExpired(invite.expires_at) ? (
-                                <span className="px-2 py-1 text-xs bg-red-600 text-white rounded">Expired</span>
-                              ) : (
-                                <span className="px-2 py-1 text-xs bg-green-600 text-white rounded">Active</span>
-                              )}
-                            </td>
-                            <td className="px-4 md:px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">{invite.created_by_username}</td>
-                            <td className="px-4 md:px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 hidden sm:table-cell">{formatDate(invite.created_at)}</td>
-                            <td className="px-4 md:px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 hidden sm:table-cell">{invite.expires_at ? formatDate(invite.expires_at) : 'Never'}</td>
-                            <td className="px-4 md:px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300 hidden md:table-cell">{invite.used_by_username || '-'}</td>
-                            <td className="px-4 md:px-6 py-4 whitespace-nowrap text-right text-sm space-x-2">
-                              {!invite.is_used && !isExpired(invite.expires_at) && (
-                                <button
-                                  onClick={() => copyInviteLink(invite)}
-                                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-white transition-colors"
-                                >
-                                  {copiedInviteId === invite.id ? 'Copied!' : 'Copy Link'}
-                                </button>
-                              )}
-                              <button
-                                onClick={() => handleDeleteInvite(invite)}
-                                className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-white transition-colors"
-                              >
-                                Delete
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
+              <InvitesTab
+                invites={invites}
+                creatingInvite={creatingInvite}
+                copiedInviteId={copiedInviteId}
+                onCreateInvite={handleCreateInvite}
+                onDeleteInvite={handleDeleteInvite}
+                onCopyInviteLink={copyInviteLink}
+                formatDate={formatDate}
+                isExpired={isExpired}
+              />
             )}
 
-            {/* Permissions Section */}
-            {activeSection === 'permissions' && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-2xl font-bold text-gray-900 dark:text-white">Permissions</h3>
-                  <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">
-                    Configure fine-grained access control for each role, including which applications users can access.
-                  </p>
-                </div>
-                <PermissionMatrix />
-              </div>
-            )}
+            {activeSection === 'permissions' && <PermissionsTab />}
 
-            {/* Audit Logs Section */}
             {activeSection === 'audit' && (
-              <div className="space-y-6">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <h3 className="text-2xl font-bold text-gray-900 dark:text-white">Audit Logs</h3>
-                    <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">
-                      Monitor system activity and security events.
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleClearOldLogs}
-                    disabled={clearingLogs}
-                    className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-md font-medium text-white transition-colors"
-                  >
-                    <Trash2 size={16} />
-                    {clearingLogs ? 'Clearing...' : 'Clear Old Logs'}
-                  </button>
-                </div>
-
-                {/* Stats Cards */}
-                {auditStats && (
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                      <div className="text-sm text-gray-500 dark:text-gray-400">Total Events</div>
-                      <div className="text-2xl font-bold text-gray-900 dark:text-white">{auditStats.total_events.toLocaleString()}</div>
-                    </div>
-                    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                      <div className="text-sm text-gray-500 dark:text-gray-400">Today</div>
-                      <div className="text-2xl font-bold text-blue-600 dark:text-blue-400">{auditStats.events_today.toLocaleString()}</div>
-                    </div>
-                    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                      <div className="text-sm text-gray-500 dark:text-gray-400">Successful</div>
-                      <div className="text-2xl font-bold text-green-600 dark:text-green-400">{auditStats.successful_events.toLocaleString()}</div>
-                    </div>
-                    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                      <div className="text-sm text-gray-500 dark:text-gray-400">Failed</div>
-                      <div className="text-2xl font-bold text-red-600 dark:text-red-400">{auditStats.failed_events.toLocaleString()}</div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Recent Failures Alert */}
-                {auditStats && auditStats.recent_failures.length > 0 && (
-                  <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
-                    <div className="flex items-center gap-2 text-red-800 dark:text-red-200 font-medium mb-2">
-                      <AlertTriangle size={16} />
-                      Recent Failed Events
-                    </div>
-                    <div className="space-y-1 text-sm text-red-700 dark:text-red-300">
-                      {auditStats.recent_failures.slice(0, 3).map((log) => (
-                        <div key={log.id} className="flex items-center gap-2">
-                          <span className="font-mono text-xs">{new Date(log.timestamp).toLocaleString()}</span>
-                          <span>{formatAuditAction(log.action)}</span>
-                          {log.username && <span className="text-red-600 dark:text-red-400">by {log.username}</span>}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Filters */}
-                <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Search</label>
-                      <input
-                        type="text"
-                        value={auditFilter.search || ''}
-                        onChange={(e) => handleAuditFilterChange('search', e.target.value)}
-                        placeholder="Search logs..."
-                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Action</label>
-                      <select
-                        value={auditFilter.action || ''}
-                        onChange={(e) => handleAuditFilterChange('action', e.target.value)}
-                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        <option value="">All Actions</option>
-                        <option value="login">Login</option>
-                        <option value="login_failed">Login Failed</option>
-                        <option value="logout">Logout</option>
-                        <option value="2fa_verified">2FA Verified</option>
-                        <option value="2fa_failed">2FA Failed</option>
-                        <option value="user_created">User Created</option>
-                        <option value="user_updated">User Updated</option>
-                        <option value="user_deleted">User Deleted</option>
-                        <option value="role_assigned">Role Assigned</option>
-                        <option value="app_installed">App Installed</option>
-                        <option value="app_started">App Started</option>
-                        <option value="app_stopped">App Stopped</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Resource Type</label>
-                      <select
-                        value={auditFilter.resource_type || ''}
-                        onChange={(e) => handleAuditFilterChange('resource_type', e.target.value)}
-                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        <option value="">All Types</option>
-                        <option value="user">User</option>
-                        <option value="role">Role</option>
-                        <option value="app">App</option>
-                        <option value="session">Session</option>
-                        <option value="system">System</option>
-                        <option value="invite">Invite</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Status</label>
-                      <select
-                        value={auditFilter.success === undefined ? '' : auditFilter.success.toString()}
-                        onChange={(e) => handleAuditFilterChange('success', e.target.value === '' ? undefined : e.target.value === 'true')}
-                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        <option value="">All</option>
-                        <option value="true">Successful</option>
-                        <option value="false">Failed</option>
-                      </select>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Logs Table */}
-                <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
-                  {auditLoading ? (
-                    <div className="flex justify-center items-center py-12">
-                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-                    </div>
-                  ) : auditLogs.length === 0 ? (
-                    <div className="text-center py-12 text-gray-500 dark:text-gray-400">
-                      No audit logs found.
-                    </div>
-                  ) : (
-                    <>
-                      <div className="overflow-x-auto">
-                        <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                          <thead className="bg-gray-50 dark:bg-gray-700">
-                            <tr>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Time</th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">User</th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Action</th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hidden md:table-cell">Resource</th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                            {auditLogs.map((log) => (
-                              <tr key={log.id} className={!log.success ? 'bg-red-50 dark:bg-red-900/10' : ''}>
-                                <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">
-                                  <div>{new Date(log.timestamp).toLocaleDateString()}</div>
-                                  <div className="text-xs text-gray-500">{new Date(log.timestamp).toLocaleTimeString()}</div>
-                                </td>
-                                <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                                  {log.username || <span className="text-gray-500">System</span>}
-                                </td>
-                                <td className="px-4 py-3 whitespace-nowrap">
-                                  <div className="flex items-center gap-2">
-                                    {getActionIcon(log.action, log.success)}
-                                    <span className="text-sm text-gray-900 dark:text-white">{formatAuditAction(log.action)}</span>
-                                  </div>
-                                </td>
-                                <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300 hidden md:table-cell">
-                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200">
-                                    {log.resource_type}
-                                  </span>
-                                  {log.resource_id && <span className="ml-2 text-gray-500">#{log.resource_id}</span>}
-                                </td>
-                                <td className="px-4 py-3 whitespace-nowrap">
-                                  {log.success ? (
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">
-                                      Success
-                                    </span>
-                                  ) : (
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200" title={log.error_message || ''}>
-                                      Failed
-                                    </span>
-                                  )}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-
-                      {/* Pagination */}
-                      <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 dark:border-gray-700">
-                        <div className="text-sm text-gray-500 dark:text-gray-400">
-                          Showing {((auditPage - 1) * 20) + 1} to {Math.min(auditPage * 20, auditTotal)} of {auditTotal.toLocaleString()} entries
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => setAuditPage(p => Math.max(1, p - 1))}
-                            disabled={auditPage === 1}
-                            className="px-3 py-1 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm text-gray-700 dark:text-gray-300"
-                          >
-                            Previous
-                          </button>
-                          <span className="text-sm text-gray-700 dark:text-gray-300">
-                            Page {auditPage} of {auditTotalPages}
-                          </span>
-                          <button
-                            onClick={() => setAuditPage(p => Math.min(auditTotalPages, p + 1))}
-                            disabled={auditPage === auditTotalPages}
-                            className="px-3 py-1 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm text-gray-700 dark:text-gray-300"
-                          >
-                            Next
-                          </button>
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
+              <AuditTab
+                auditLogs={auditLogs}
+                auditStats={auditStats}
+                auditLoading={auditLoading}
+                auditPage={auditPage}
+                auditTotalPages={auditTotalPages}
+                auditTotal={auditTotal}
+                auditFilter={auditFilter}
+                clearingLogs={clearingLogs}
+                onClearOldLogs={handleClearOldLogs}
+                onAuditFilterChange={handleAuditFilterChange}
+                setAuditPage={setAuditPage}
+                formatAuditAction={formatAuditAction}
+                getActionIcon={getActionIcon}
+              />
             )}
 
-            {/* Notifications Section */}
             {activeSection === 'notifications' && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-2xl font-bold text-gray-900 dark:text-white">Notifications</h3>
-                  <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">
-                    Configure notification channels and event triggers.
-                  </p>
-                </div>
-
-                {notificationLoading ? (
-                  <div className="flex justify-center items-center py-12">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-                  </div>
-                ) : (
-                  <>
-                    {/* Channels */}
-                    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                      <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Notification Channels</h4>
-                      <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-                        Configure and enable notification channels. Users can set their own preferences for each enabled channel.
-                      </p>
-                      <div className="space-y-4">
-                        {notificationChannels.map((channel) => (
-                          <div key={channel.channel_type} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-                            <div className="flex items-center justify-between mb-4">
-                              <div className="flex items-center gap-3">
-                                <div className={`p-2 rounded-lg ${channel.enabled ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400' : 'bg-gray-100 dark:bg-gray-700 text-gray-500'}`}>
-                                  {getChannelIcon(channel.channel_type)}
-                                </div>
-                                <div>
-                                  <div className="font-medium text-gray-900 dark:text-white capitalize">{channel.channel_type}</div>
-                                  <div className="text-sm text-gray-500 dark:text-gray-400">
-                                    {channel.enabled ? 'Enabled' : 'Disabled'}
-                                  </div>
-                                </div>
-                              </div>
-                              <button
-                                onClick={() => handleToggleChannel(channel.channel_type, !channel.enabled)}
-                                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                                  channel.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
-                                }`}
-                              >
-                                <span
-                                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                                    channel.enabled ? 'translate-x-6' : 'translate-x-1'
-                                  }`}
-                                />
-                              </button>
-                            </div>
-
-                            {/* Configuration */}
-                            {editingChannel === channel.channel_type ? (
-                              <div className="mt-4 space-y-3 border-t border-gray-200 dark:border-gray-700 pt-4">
-                                {getChannelConfigFields(channel.channel_type).map((field) => (
-                                  <div key={field.key}>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                                      {field.label}
-                                    </label>
-                                    <input
-                                      type={field.type}
-                                      placeholder={field.placeholder}
-                                      value={channelConfig[channel.channel_type]?.[field.key] || ''}
-                                      onChange={(e) =>
-                                        setChannelConfig((prev) => ({
-                                          ...prev,
-                                          [channel.channel_type]: {
-                                            ...prev[channel.channel_type],
-                                            [field.key]: e.target.value,
-                                          },
-                                        }))
-                                      }
-                                      className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    />
-                                  </div>
-                                ))}
-                                <div className="flex gap-2 mt-4">
-                                  <button
-                                    onClick={() => handleSaveChannelConfig(channel.channel_type)}
-                                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-medium transition-colors"
-                                  >
-                                    Save
-                                  </button>
-                                  <button
-                                    onClick={() => setEditingChannel(null)}
-                                    className="px-4 py-2 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-md font-medium transition-colors"
-                                  >
-                                    Cancel
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="mt-4 flex items-center gap-2 border-t border-gray-200 dark:border-gray-700 pt-4">
-                                <button
-                                  onClick={() => {
-                                    setEditingChannel(channel.channel_type);
-                                    setChannelConfig((prev) => ({
-                                      ...prev,
-                                      [channel.channel_type]: channel.config as Record<string, string> || {},
-                                    }));
-                                  }}
-                                  className="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-md transition-colors"
-                                >
-                                  Configure
-                                </button>
-                                {channel.enabled && (
-                                  <div className="flex items-center gap-2">
-                                    <input
-                                      type="text"
-                                      placeholder={channel.channel_type === 'email' ? 'test@example.com' : channel.channel_type === 'telegram' ? 'Chat ID' : 'Phone number'}
-                                      value={testDestination[channel.channel_type] || ''}
-                                      onChange={(e) =>
-                                        setTestDestination((prev) => ({
-                                          ...prev,
-                                          [channel.channel_type]: e.target.value,
-                                        }))
-                                      }
-                                      className="px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    />
-                                    <button
-                                      onClick={() => handleTestChannel(channel.channel_type)}
-                                      disabled={testingChannel === channel.channel_type}
-                                      className="px-3 py-1.5 text-sm bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white rounded-md transition-colors"
-                                    >
-                                      {testingChannel === channel.channel_type ? 'Testing...' : 'Test'}
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Event Settings */}
-                    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                      <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Event Triggers</h4>
-                      <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-                        Choose which events trigger notifications.
-                      </p>
-                      <div className="overflow-x-auto">
-                        <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                          <thead className="bg-gray-50 dark:bg-gray-700">
-                            <tr>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Event</th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Severity</th>
-                              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Enabled</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                            {notificationEvents.map((event) => (
-                              <tr key={event.event_type}>
-                                <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                                  {formatAuditAction(event.event_type)}
-                                </td>
-                                <td className="px-4 py-3 whitespace-nowrap">
-                                  <select
-                                    value={event.severity}
-                                    onChange={(e) => handleUpdateEventSeverity(event.event_type, e.target.value)}
-                                    className="px-2 py-1 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                  >
-                                    <option value="info">Info</option>
-                                    <option value="warning">Warning</option>
-                                    <option value="critical">Critical</option>
-                                  </select>
-                                </td>
-                                <td className="px-4 py-3 whitespace-nowrap text-right">
-                                  <button
-                                    onClick={() => handleToggleEvent(event.event_type, !event.enabled)}
-                                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                                      event.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
-                                    }`}
-                                  >
-                                    <span
-                                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                                        event.enabled ? 'translate-x-5' : 'translate-x-1'
-                                      }`}
-                                    />
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-
-                    {/* Delivery Logs */}
-                    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                      <div className="flex items-center justify-between mb-4">
-                        <h4 className="text-lg font-medium text-gray-900 dark:text-white">Delivery Logs</h4>
-                        <span className="text-sm text-gray-500 dark:text-gray-400">{notificationLogsTotal} total</span>
-                      </div>
-                      {notificationLogs.length === 0 ? (
-                        <div className="text-center py-8 text-gray-500 dark:text-gray-400">
-                          No notification logs yet.
-                        </div>
-                      ) : (
-                        <div className="overflow-x-auto">
-                          <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                            <thead className="bg-gray-50 dark:bg-gray-700">
-                              <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Time</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Channel</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Event</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                              {notificationLogs.slice(0, 20).map((log) => (
-                                <tr key={log.id} className={log.status === 'failed' ? 'bg-red-50 dark:bg-red-900/10' : ''}>
-                                  <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">
-                                    {new Date(log.created_at).toLocaleString()}
-                                  </td>
-                                  <td className="px-4 py-3 whitespace-nowrap">
-                                    <span className="inline-flex items-center gap-1.5 text-sm text-gray-900 dark:text-white capitalize">
-                                      {getChannelIcon(log.channel_type)}
-                                      {log.channel_type}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">
-                                    {formatAuditAction(log.event_type)}
-                                  </td>
-                                  <td className="px-4 py-3 whitespace-nowrap">
-                                    {log.status === 'sent' ? (
-                                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">
-                                        Sent
-                                      </span>
-                                    ) : (
-                                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200" title={log.error_message || ''}>
-                                        Failed
-                                      </span>
-                                    )}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
+              <NotificationsTab
+                notificationChannels={notificationChannels}
+                notificationEvents={notificationEvents}
+                notificationLogs={notificationLogs}
+                notificationLogsTotal={notificationLogsTotal}
+                notificationLoading={notificationLoading}
+                testingChannel={testingChannel}
+                testDestination={testDestination}
+                editingChannel={editingChannel}
+                channelConfig={channelConfig}
+                setTestDestination={setTestDestination}
+                setEditingChannel={setEditingChannel}
+                setChannelConfig={setChannelConfig}
+                onToggleChannel={handleToggleChannel}
+                onToggleEvent={handleToggleEvent}
+                onUpdateEventSeverity={handleUpdateEventSeverity}
+                onTestChannel={handleTestChannel}
+                onSaveChannelConfig={handleSaveChannelConfig}
+                getChannelIcon={getChannelIcon}
+                getChannelConfigFields={getChannelConfigFields}
+                formatAuditAction={formatAuditAction}
+              />
             )}
 
             {/* VPN Section */}
             {activeSection === 'vpn' && <VpnTab />}
 
-            {/* Dynamic DNS Section */}
-            {activeSection === 'ddns' && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-2xl font-bold text-gray-900 dark:text-white">Dynamic DNS</h3>
-                  <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">
-                    Keep your domain pointed to your dynamic IP address.
-                  </p>
-                </div>
-
-                <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                  <div className="text-gray-500 dark:text-gray-400 text-sm py-8 text-center">
-                    DDNS configuration coming soon.
-                  </div>
-                </div>
-              </div>
+            {activeSection === 'domains' && (
+              <DomainsTab
+                apps={apps}
+              />
             )}
 
-            {/* Cloudflare Tunnel Section */}
-            {activeSection === 'cloudflare' && <CloudflareTab />}
+            {activeSection === 'ddns' && <DdnsTab />}
 
-            {/* Let's Encrypt Section */}
-            {activeSection === 'letsencrypt' && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-2xl font-bold text-gray-900 dark:text-white">Let's Encrypt</h3>
-                  <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">
-                    Automatically provision and renew SSL certificates for your domains.
-                  </p>
-                </div>
-
-                <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                  <div className="text-gray-500 dark:text-gray-400 text-sm py-8 text-center">
-                    Let's Encrypt configuration coming soon.
-                  </div>
-                </div>
-              </div>
-            )}
+            {activeSection === 'letsencrypt' && <LetsEncryptTab />}
 
             {/* Create/Edit User Forms */}
             {viewMode === 'create' && (

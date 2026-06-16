@@ -139,40 +139,43 @@ function AppCardComponent({
   isOperationPending
 }: AppCardComponentProps) {
   const colors = useIconColors(app.name)
+  const displayColors = colors.length > 0
+    ? colors
+    : ['rgb(99, 102, 241)', 'rgb(14, 165, 233)', 'rgb(148, 163, 184)']
 
   // Create iOS-style glass effect with multiple color gradients
   const glassStyle: React.CSSProperties = {}
 
-  if (colors.length >= 3) {
+  if (displayColors.length >= 3) {
     glassStyle.background = `
-      radial-gradient(ellipse at 0% 0%, ${toRgba(colors[0], 0.15)} 0%, transparent 50%),
-      radial-gradient(ellipse at 100% 0%, ${toRgba(colors[1], 0.12)} 0%, transparent 50%),
-      radial-gradient(ellipse at 50% 100%, ${toRgba(colors[2], 0.1)} 0%, transparent 60%)
+      radial-gradient(ellipse at 0% 0%, ${toRgba(displayColors[0], colors.length > 0 ? 0.15 : 0.1)} 0%, transparent 50%),
+      radial-gradient(ellipse at 100% 0%, ${toRgba(displayColors[1], colors.length > 0 ? 0.12 : 0.08)} 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 100%, ${toRgba(displayColors[2], colors.length > 0 ? 0.1 : 0.07)} 0%, transparent 60%)
     `
-  } else if (colors.length === 2) {
+  } else if (displayColors.length === 2) {
     glassStyle.background = `
-      radial-gradient(ellipse at 0% 0%, ${toRgba(colors[0], 0.15)} 0%, transparent 50%),
-      radial-gradient(ellipse at 100% 100%, ${toRgba(colors[1], 0.12)} 0%, transparent 50%)
+      radial-gradient(ellipse at 0% 0%, ${toRgba(displayColors[0], 0.15)} 0%, transparent 50%),
+      radial-gradient(ellipse at 100% 100%, ${toRgba(displayColors[1], 0.12)} 0%, transparent 50%)
     `
-  } else if (colors.length === 1) {
+  } else if (displayColors.length === 1) {
     glassStyle.background = `
-      radial-gradient(ellipse at 0% 0%, ${toRgba(colors[0], 0.12)} 0%, transparent 50%),
-      radial-gradient(ellipse at 100% 100%, ${toRgba(colors[0], 0.08)} 0%, transparent 50%)
+      radial-gradient(ellipse at 0% 0%, ${toRgba(displayColors[0], 0.12)} 0%, transparent 50%),
+      radial-gradient(ellipse at 100% 100%, ${toRgba(displayColors[0], 0.08)} 0%, transparent 50%)
     `
   }
 
-  const primaryColor = colors[0]
+  const primaryColor = displayColors[0]
   const baseShadow = primaryColor
-    ? `0 2px 8px ${toRgba(primaryColor, 0.1)}`
+    ? `0 2px 8px ${toRgba(primaryColor, colors.length > 0 ? 0.1 : 0.07)}`
     : undefined
   const hoverShadow = primaryColor
-    ? `0 8px 24px ${toRgba(primaryColor, 0.2)}, 0 0 0 1px ${toRgba(primaryColor, 0.15)}`
+    ? `0 8px 24px ${toRgba(primaryColor, colors.length > 0 ? 0.2 : 0.14)}, 0 0 0 1px ${toRgba(primaryColor, colors.length > 0 ? 0.15 : 0.1)}`
     : undefined
 
   const categoryLabel = categoryInfo[app.category || 'other']?.label || app.category?.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
 
   const selectedShadow = primaryColor
-    ? `0 8px 24px ${toRgba(primaryColor, 0.25)}, 0 0 0 2px ${toRgba(primaryColor, 0.3)}`
+    ? `0 8px 24px ${toRgba(primaryColor, colors.length > 0 ? 0.25 : 0.16)}, 0 0 0 2px ${toRgba(primaryColor, colors.length > 0 ? 0.3 : 0.16)}`
     : '0 8px 24px rgba(59,130,246,0.15), 0 0 0 2px rgba(59,130,246,0.2)'
 
   return (
@@ -216,12 +219,12 @@ function AppCardComponent({
       <div className="p-5">
         <div className="flex items-start gap-4">
           {/* Icon with glow effect */}
-          <div className="relative flex-shrink-0">
+          <div className="relative flex-shrink-0 drop-shadow-[0_1px_2px_rgba(0,0,0,0.45)] dark:drop-shadow-[0_1px_2px_rgba(0,0,0,0.65)]">
             <AppIcon appName={app.name} size={56} className="rounded-xl shadow-lg" />
             {primaryColor && (
               <div
                 className="absolute inset-0 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity duration-300 -z-10 blur-xl"
-                style={{ background: toRgba(primaryColor, 0.4) }}
+                style={{ background: toRgba(primaryColor, colors.length > 0 ? 0.4 : 0.25) }}
               />
             )}
           </div>

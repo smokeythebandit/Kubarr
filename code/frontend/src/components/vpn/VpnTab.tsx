@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Shield, RefreshCw, AlertCircle } from 'lucide-react';
+import { RefreshCw, AlertCircle } from 'lucide-react';
 import { VpnProvider, AppVpnConfig, vpnApi, appVpnApi } from '../../api/vpn';
 import { VpnProviderList } from './VpnProviderList';
 import { VpnProviderForm } from './VpnProviderForm';
@@ -86,8 +86,7 @@ export function VpnTab() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-semibold flex items-center gap-2 text-gray-900 dark:text-white">
-            <Shield size={20} className="text-blue-500" />
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
             VPN Configuration
           </h2>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">

@@ -42,6 +42,9 @@ function toRgba(rgb: string, alpha: number): string {
 
 function AppCard({ app, isHealthy, showLoading, hasData }: AppCardProps) {
   const colors = useIconColors(app.name)
+  const displayColors = colors.length > 0
+    ? colors
+    : ['rgb(99, 102, 241)', 'rgb(14, 165, 233)', 'rgb(148, 163, 184)']
 
   const handleAppClick = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -54,33 +57,33 @@ function AppCard({ app, isHealthy, showLoading, hasData }: AppCardProps) {
   // Create iOS-style glass effect with multiple color gradients
   const glassStyle: React.CSSProperties = {}
 
-  if (colors.length >= 3) {
+  if (displayColors.length >= 3) {
     // Three colors: top-left, top-right, bottom gradient
     glassStyle.background = `
-      radial-gradient(ellipse at 0% 0%, ${toRgba(colors[0], 0.25)} 0%, transparent 50%),
-      radial-gradient(ellipse at 100% 0%, ${toRgba(colors[1], 0.2)} 0%, transparent 50%),
-      radial-gradient(ellipse at 50% 100%, ${toRgba(colors[2], 0.15)} 0%, transparent 60%)
+      radial-gradient(ellipse at 0% 0%, ${toRgba(displayColors[0], colors.length > 0 ? 0.25 : 0.14)} 0%, transparent 50%),
+      radial-gradient(ellipse at 100% 0%, ${toRgba(displayColors[1], colors.length > 0 ? 0.2 : 0.12)} 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 100%, ${toRgba(displayColors[2], colors.length > 0 ? 0.15 : 0.1)} 0%, transparent 60%)
     `
-  } else if (colors.length === 2) {
+  } else if (displayColors.length === 2) {
     // Two colors: diagonal corners
     glassStyle.background = `
-      radial-gradient(ellipse at 0% 0%, ${toRgba(colors[0], 0.25)} 0%, transparent 50%),
-      radial-gradient(ellipse at 100% 100%, ${toRgba(colors[1], 0.2)} 0%, transparent 50%)
+      radial-gradient(ellipse at 0% 0%, ${toRgba(displayColors[0], 0.25)} 0%, transparent 50%),
+      radial-gradient(ellipse at 100% 100%, ${toRgba(displayColors[1], 0.2)} 0%, transparent 50%)
     `
-  } else if (colors.length === 1) {
+  } else if (displayColors.length === 1) {
     // Single color: top-left gradient
     glassStyle.background = `
-      radial-gradient(ellipse at 0% 0%, ${toRgba(colors[0], 0.2)} 0%, transparent 50%),
-      radial-gradient(ellipse at 100% 100%, ${toRgba(colors[0], 0.1)} 0%, transparent 50%)
+      radial-gradient(ellipse at 0% 0%, ${toRgba(displayColors[0], 0.2)} 0%, transparent 50%),
+      radial-gradient(ellipse at 100% 100%, ${toRgba(displayColors[0], 0.1)} 0%, transparent 50%)
     `
   }
 
-  const primaryColor = colors[0]
+  const primaryColor = displayColors[0]
   const baseShadow = primaryColor
-    ? `0 2px 8px ${toRgba(primaryColor, 0.15)}`
+    ? `0 2px 8px ${toRgba(primaryColor, colors.length > 0 ? 0.15 : 0.1)}`
     : undefined
   const hoverShadow = primaryColor
-    ? `0 12px 28px ${toRgba(primaryColor, 0.3)}, 0 0 0 1px ${toRgba(primaryColor, 0.2)}`
+    ? `0 12px 28px ${toRgba(primaryColor, colors.length > 0 ? 0.3 : 0.18)}, 0 0 0 1px ${toRgba(primaryColor, colors.length > 0 ? 0.2 : 0.14)}`
     : undefined
 
   return (
@@ -102,7 +105,7 @@ function AppCard({ app, isHealthy, showLoading, hasData }: AppCardProps) {
       }}
     >
       {/* Icon Container */}
-      <div className="relative">
+      <div className="relative drop-shadow-[0_1px_2px_rgba(0,0,0,0.45)] dark:drop-shadow-[0_1px_2px_rgba(0,0,0,0.65)]">
         <AppIcon
           appName={app.name}
           size={64}
@@ -158,9 +161,14 @@ export default function Dashboard() {
   }
 
   const healthyApps = useMemo(() => installedApps.filter((app) => {
+    const state = appStates[app.name]
+    if (state) {
+      return state.observed_state === 'installed' && state.healthy
+    }
+
     const status = appStatuses[app.name]
     return status?.healthy ?? false
-  }), [installedApps, appStatuses])
+  }), [installedApps, appStates, appStatuses])
 
   const availableUpdates = useMemo(
     () => Object.values(appStates).filter((state) => state.update_available),
@@ -207,7 +215,7 @@ export default function Dashboard() {
       <h2 className="text-2xl font-bold">Dashboard</h2>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {/* App Overview Card */}
-        <Link to="/apps" className="relative bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 rounded-xl p-5 h-[125px] border border-gray-200/60 dark:border-gray-700/60 shadow-[0_4px_12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.1)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.1),0_2px_6px_rgba(0,0,0,0.08)] dark:hover:shadow-[0_8px_24px_rgba(0,0,0,0.4)] hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group overflow-hidden flex flex-col justify-between">
+        <Link to="/apps" className="relative bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 rounded-xl p-5 h-[125px] border border-gray-200/60 dark:border-gray-700/60 shadow-[0_4px_12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.1)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)] hover:shadow-[0_12px_28px_rgba(99,102,241,0.22),0_4px_8px_rgba(0,0,0,0.1)] dark:hover:shadow-[0_12px_28px_rgba(99,102,241,0.28)] hover:-translate-y-1 transition-all duration-200 cursor-pointer group overflow-hidden flex flex-col justify-between">
           <div className="absolute inset-0 rounded-xl bg-gradient-to-br from-indigo-500/5 via-transparent to-purple-500/5 pointer-events-none" />
           <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/10 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
           <div className="relative">
@@ -433,7 +441,7 @@ export default function Dashboard() {
             {/* Available Updates */}
             <Link
               to="/apps?filter=updates"
-              className="relative bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 rounded-xl p-5 h-[125px] border border-gray-200/60 dark:border-gray-700/60 shadow-[0_4px_12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.1)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.1),0_2px_6px_rgba(0,0,0,0.08)] dark:hover:shadow-[0_8px_24px_rgba(0,0,0,0.4)] hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group overflow-hidden flex flex-col justify-between"
+              className="relative bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 rounded-xl p-5 h-[125px] border border-gray-200/60 dark:border-gray-700/60 shadow-[0_4px_12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.1)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)] hover:shadow-[0_12px_28px_rgba(245,158,11,0.22),0_4px_8px_rgba(0,0,0,0.1)] dark:hover:shadow-[0_12px_28px_rgba(245,158,11,0.28)] hover:-translate-y-1 transition-all duration-200 cursor-pointer group overflow-hidden flex flex-col justify-between"
             >
               <div className={`absolute inset-0 rounded-xl pointer-events-none ${availableUpdates.length > 0 ? 'bg-gradient-to-br from-amber-500/8 via-transparent to-orange-500/10' : 'bg-gradient-to-br from-emerald-500/6 via-transparent to-transparent'}`} />
               <div className={`absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none ${availableUpdates.length > 0 ? 'bg-gradient-to-br from-amber-500/12 via-transparent to-transparent' : 'bg-gradient-to-br from-emerald-500/10 via-transparent to-transparent'}`} />
@@ -547,10 +555,11 @@ export default function Dashboard() {
           <h2 className="text-2xl font-bold mb-4">Installed Apps</h2>
           <div className="grid grid-cols-2 xs:grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-4">
             {openableApps.map((app) => {
+              const state = appStates[app.name]
               const status = appStatuses[app.name]
-              const isHealthy = status?.healthy ?? false
+              const isHealthy = state ? state.observed_state === 'installed' && state.healthy : status?.healthy ?? false
               const showLoading = status?.loading ?? false
-              const hasData = status !== undefined
+              const hasData = state !== undefined || status !== undefined
 
               return (
                 <AppCard

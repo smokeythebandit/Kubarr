@@ -115,11 +115,6 @@ define_permissions! {
     /// Manage VPN providers and assign VPN to apps
     VpnManage => "vpn.manage",
 
-    // Cloudflare Tunnel
-    /// View Cloudflare Tunnel configuration and status
-    CloudflareView => "cloudflare.view",
-    /// Manage Cloudflare Tunnel (deploy/remove)
-    CloudflareManage => "cloudflare.manage",
 }
 
 /// Extractor that requires a specific permission
@@ -260,8 +255,6 @@ mod tests {
         assert_eq!(NetworkingView::NAME, "networking.view");
         assert_eq!(VpnView::NAME, "vpn.view");
         assert_eq!(VpnManage::NAME, "vpn.manage");
-        assert_eq!(CloudflareView::NAME, "cloudflare.view");
-        assert_eq!(CloudflareManage::NAME, "cloudflare.manage");
     }
 
     #[test]

@@ -1,9 +1,12 @@
+pub mod app_domain_assignment;
 pub mod app_operation;
 pub mod app_state;
 pub mod app_vpn_config;
 pub mod audit_log;
-pub mod cloudflare_tunnel;
+pub mod domain;
+pub mod dynamic_dns_profile;
 pub mod invite;
+pub mod letsencrypt_profile;
 pub mod notification_channel;
 pub mod notification_event;
 pub mod notification_log;
@@ -26,12 +29,15 @@ pub mod vpn_provider;
 
 #[allow(unused_imports)]
 pub mod prelude {
+    pub use super::app_domain_assignment::{self, Entity as AppDomainAssignment};
     pub use super::app_operation::{self, Entity as AppOperation};
     pub use super::app_state::{self, Entity as AppState};
     pub use super::app_vpn_config::{self, Entity as AppVpnConfig};
     pub use super::audit_log::{self, Entity as AuditLog};
-    pub use super::cloudflare_tunnel::{self, Entity as CloudflareTunnel};
+    pub use super::domain::{self, Entity as Domain};
+    pub use super::dynamic_dns_profile::{self, Entity as DynamicDnsProfile};
     pub use super::invite::{self, Entity as Invite};
+    pub use super::letsencrypt_profile::{self, Entity as LetsEncryptProfile};
     pub use super::notification_channel::{self, Entity as NotificationChannel};
     pub use super::notification_event::{self, Entity as NotificationEvent};
     pub use super::notification_log::{self, Entity as NotificationLog};

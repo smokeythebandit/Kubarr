@@ -18,7 +18,7 @@ use crate::db;
 use crate::endpoints;
 use crate::services::{
     init_jwt_keys, scheduler, start_network_broadcaster, AppCatalog, AppManager, AuditService,
-    ChartSyncService, K8sClient, NotificationService,
+    ChartSyncService, DomainReconciler, K8sClient, NotificationService,
 };
 use crate::state::AppState;
 
@@ -52,15 +52,19 @@ pub async fn run_worker() -> anyhow::Result<()> {
         tracing::warn!("Initial worker chart sync failed: {}", e);
     }
     let conn = init_database(&k8s_client).await?;
+    let domain_reconciler = Arc::new(DomainReconciler::new(conn.clone(), k8s_client.clone()));
     let manager = Arc::new(AppManager::new(conn, k8s_client, catalog));
 
     let poll_interval = env_duration("KUBARR_WORKER_POLL_INTERVAL_SECONDS", 5);
     let reconcile_interval = env_duration("KUBARR_WORKER_RECONCILE_INTERVAL_SECONDS", 30);
+    let domain_reconcile_interval = env_duration("KUBARR_DOMAIN_RECONCILE_INTERVAL_SECONDS", 60);
     manager.run_worker(poll_interval, reconcile_interval).await;
+    domain_reconciler.run(domain_reconcile_interval);
 
     tracing::info!(
         poll_interval_seconds = poll_interval.as_secs(),
         reconcile_interval_seconds = reconcile_interval.as_secs(),
+        domain_reconcile_interval_seconds = domain_reconcile_interval.as_secs(),
         "Kubarr worker started"
     );
 
@@ -93,11 +97,17 @@ async fn init_services() -> anyhow::Result<AppState> {
     let k8s_client = init_kubernetes().await;
     let catalog = init_catalog();
 
-    // Create chart sync service and run initial sync
+    // Create chart sync service. Run the initial sync in the background so
+    // slow registry/network calls cannot block the health endpoint on startup.
     let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
-    if let Err(e) = chart_sync.sync().await {
-        tracing::warn!("Initial chart sync failed: {}", e);
-    }
+    tokio::spawn({
+        let chart_sync = chart_sync.clone();
+        async move {
+            if let Err(e) = chart_sync.sync_on_blocking_thread().await {
+                tracing::warn!("Initial chart sync failed: {}", e);
+            }
+        }
+    });
 
     let conn = init_database(&k8s_client).await?;
 

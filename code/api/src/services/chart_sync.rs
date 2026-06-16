@@ -79,6 +79,13 @@ impl ChartSyncService {
         Ok(())
     }
 
+    /// Run chart sync away from the async worker threads. Sync executes Helm,
+    /// tar, and filesystem operations, which can otherwise starve HTTP probes.
+    pub async fn sync_on_blocking_thread(self: Arc<Self>) -> anyhow::Result<()> {
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || handle.block_on(self.sync())).await?
+    }
+
     /// Query the GitHub Contents API to discover which chart directories exist.
     async fn discover_charts(&self) -> anyhow::Result<Vec<String>> {
         let mut names = Vec::new();
@@ -220,7 +227,7 @@ impl super::scheduler::PeriodicTask for ChartSyncTask {
     }
 
     async fn run(&self, _db: &DatabaseConnection) -> anyhow::Result<()> {
-        self.service.sync().await
+        self.service.clone().sync_on_blocking_thread().await
     }
 }
 
