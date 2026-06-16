@@ -29,6 +29,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --profile "${PROFILE}" --bin kubarr-api && \
     cp "target/${PROFILE_DIR}/kubarr-api" /kubarr-api
 
+FROM builder AS test
+
 FROM alpine/helm:3.21.0 AS helm-source
 
 FROM public.ecr.aws/docker/library/alpine:3.23

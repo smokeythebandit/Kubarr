@@ -484,6 +484,7 @@ impl AppManager {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn upsert_state(
         &self,
         app_name: &str,

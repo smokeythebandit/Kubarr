@@ -15,13 +15,13 @@ jobs:
       matrix:
         include:
           - image: kubarr-backend-test
-            dockerfile: docker/Dockerfile.backend
+            dockerfile: docker/Dockerfile.api
             target: test
           - image: kubarr-frontend-test
             dockerfile: docker/Dockerfile.frontend
             target: test
           - image: kubarr-backend
-            dockerfile: docker/Dockerfile.backend
+            dockerfile: docker/Dockerfile.api
           - image: kubarr-frontend
             dockerfile: docker/Dockerfile.frontend
 

@@ -20,7 +20,7 @@ jobs:
         run: docker load < kubarr-backend-test.tar
 
       - name: Unit tests
-        run: docker run --rm "kubarr-backend-test:${{ inputs.image-tag }}" cargo nextest run
+        run: docker run --rm "kubarr-backend-test:${{ inputs.image-tag }}" cargo test
 
   frontend:
     runs-on: ubuntu-latest
@@ -50,18 +50,18 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
-          workspaces: code/backend
+          workspaces: code/api
       - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912
         with:
           tool: cargo-tarpaulin
       - run: cargo tarpaulin --no-fail-fast --out Xml --output-dir coverage
-        working-directory: code/backend
+        working-directory: code/api
         continue-on-error: true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: coverage-report
-          path: code/backend/coverage/cobertura.xml
+          path: code/api/coverage/cobertura.xml
           retention-days: 30
 
   e2e:

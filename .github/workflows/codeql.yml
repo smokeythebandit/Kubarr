@@ -24,7 +24,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
-          workspaces: code/backend
+          workspaces: code/api
 
       - uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e
         with:
@@ -33,7 +33,7 @@ jobs:
 
       - name: Build
         run: cargo build
-        working-directory: code/backend
+        working-directory: code/api
 
       - uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e
         with:

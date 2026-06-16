@@ -17,11 +17,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
-          workspaces: code/backend
+          workspaces: code/api
       - run: cargo fmt --check
-        working-directory: code/backend
+        working-directory: code/api
       - run: cargo clippy --no-deps -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
-        working-directory: code/backend
+        working-directory: code/api
 
   backend-docs:
     name: backend / docs
@@ -33,9 +33,9 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
-          workspaces: code/backend
+          workspaces: code/api
       - run: cargo doc --no-deps --document-private-items
-        working-directory: code/backend
+        working-directory: code/api
         env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"
 
@@ -44,14 +44,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-      - uses: dtolnay/rust-toolchain@98e1b82157cd469e843cb7f524c1313b4ad9492c
-        with:
-          toolchain: '1.88'
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
-          workspaces: code/backend
+          workspaces: code/api
       - run: cargo check --locked
-        working-directory: code/backend
+        working-directory: code/api
 
   backend-deny:
     name: backend / deny
@@ -60,7 +58,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe
         with:
-          manifest-path: code/backend/Cargo.toml
+          manifest-path: code/api/Cargo.toml
 
   backend-unused-deps:
     name: backend / unused deps
@@ -72,12 +70,12 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
-          workspaces: code/backend
+          workspaces: code/api
       - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912
         with:
           tool: cargo-machete
       - run: cargo machete
-        working-directory: code/backend
+        working-directory: code/api
 
   backend-toml-fmt:
     name: backend / toml fmt
@@ -88,7 +86,7 @@ jobs:
         with:
           tool: taplo-cli
       - run: taplo fmt --check
-        working-directory: code/backend
+        working-directory: code/api
 
   # ── Frontend ─────────────────────────────────────────────────────────────────
 
@@ -143,9 +141,13 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5
         with:
-          dockerfile: docker/Dockerfile.backend
+          dockerfile: docker/Dockerfile.api
           config: docker/.hadolint.yaml
       - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5
         with:
           dockerfile: docker/Dockerfile.frontend
+          config: docker/.hadolint.yaml
+      - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5
+        with:
+          dockerfile: docker/Dockerfile.dns-webhook
           config: docker/.hadolint.yaml
