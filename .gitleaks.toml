@@ -1,0 +1,7 @@
+[[allowlists]]
+description = "PEM header literals asserted by RSA key-generation tests"
+paths = ['''code/(backend|api)/tests/security_tests\.rs''']
+regexes = [
+  '''-----BEGIN PRIVATE KEY-----''',
+  '''-----END PRIVATE KEY-----''',
+]
