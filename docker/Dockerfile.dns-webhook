@@ -6,7 +6,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build -mod=mod -o /kubarr-dns-webhook .
 
-FROM alpine:3.23
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates
 USER 1000:1000
 COPY --from=builder /kubarr-dns-webhook /kubarr-dns-webhook
