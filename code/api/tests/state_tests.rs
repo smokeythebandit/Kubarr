@@ -219,13 +219,14 @@ async fn test_endpoint_cache_set_and_get() {
     use kubarr::state::EndpointCache;
     let cache = EndpointCache::new(60);
     cache
-        .set("sonarr", "http://sonarr:8989".to_string(), None)
+        .set("sonarr", "http://sonarr:8989".to_string(), None, None)
         .await;
     let result = cache.get("sonarr").await;
     assert!(result.is_some(), "Cache must return set value");
-    let (url, path) = result.unwrap();
+    let (url, path, host) = result.unwrap();
     assert_eq!(url, "http://sonarr:8989");
     assert!(path.is_none());
+    assert!(host.is_none());
 }
 
 #[tokio::test]
@@ -237,13 +238,15 @@ async fn test_endpoint_cache_set_with_base_path() {
             "radarr",
             "http://radarr:7878".to_string(),
             Some("/radarr".to_string()),
+            None,
         )
         .await;
     let result = cache.get("radarr").await;
     assert!(result.is_some());
-    let (url, path) = result.unwrap();
+    let (url, path, host) = result.unwrap();
     assert_eq!(url, "http://radarr:7878");
     assert_eq!(path.as_deref(), Some("/radarr"));
+    assert!(host.is_none());
 }
 
 #[tokio::test]
@@ -251,7 +254,7 @@ async fn test_endpoint_cache_invalidate() {
     use kubarr::state::EndpointCache;
     let cache = EndpointCache::new(60);
     cache
-        .set("sonarr", "http://sonarr:8989".to_string(), None)
+        .set("sonarr", "http://sonarr:8989".to_string(), None, None)
         .await;
     assert!(cache.get("sonarr").await.is_some());
     cache.invalidate("sonarr").await;
@@ -265,17 +268,21 @@ async fn test_endpoint_cache_invalidate() {
 async fn test_endpoint_cache_overwrite() {
     use kubarr::state::EndpointCache;
     let cache = EndpointCache::new(60);
-    cache.set("app", "http://old:8080".to_string(), None).await;
+    cache
+        .set("app", "http://old:8080".to_string(), None, None)
+        .await;
     cache
         .set(
             "app",
             "http://new:9090".to_string(),
             Some("/new".to_string()),
+            None,
         )
         .await;
-    let (url, path) = cache.get("app").await.unwrap();
+    let (url, path, host) = cache.get("app").await.unwrap();
     assert_eq!(url, "http://new:9090");
     assert_eq!(path.as_deref(), Some("/new"));
+    assert!(host.is_none());
 }
 
 // ============================================================================

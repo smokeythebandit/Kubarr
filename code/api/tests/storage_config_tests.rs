@@ -7,6 +7,18 @@ use kubarr::services::storage_config::{
     STORAGE_MOUNT_PATH,
 };
 
+fn managed_storage_config() -> PersistedStorageConfig {
+    PersistedStorageConfig {
+        mode: StorageMode::ManagedNfs,
+        mount_path: STORAGE_MOUNT_PATH.to_string(),
+        uid: 1000,
+        gid: 1000,
+        fs_group: 1000,
+        config_json: serde_json::json!({}),
+        validation_json: None,
+    }
+}
+
 #[tokio::test]
 async fn storage_config_db_roundtrip_preserves_validation() {
     let db = create_test_db_with_seed().await;
@@ -42,7 +54,8 @@ async fn storage_config_db_roundtrip_preserves_validation() {
 
 #[test]
 fn media_chart_values_mount_media_data_at_data() {
-    let values = media_storage_helm_values();
+    let storage = managed_storage_config();
+    let values = media_storage_helm_values(&storage).expect("helm values");
 
     assert!(values.contains(&"storage.media.existingClaim=media-data".to_string()));
     assert!(values.contains(&"storage.media.mountPath=/data".to_string()));
@@ -50,7 +63,8 @@ fn media_chart_values_mount_media_data_at_data() {
 
 #[test]
 fn media_chart_values_do_not_contain_app_specific_storage() {
-    let values = media_storage_helm_values();
+    let storage = managed_storage_config();
+    let values = media_storage_helm_values(&storage).expect("helm values");
     let joined = values.join("\n");
 
     for app_value in [
