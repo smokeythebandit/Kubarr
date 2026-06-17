@@ -25,8 +25,12 @@ jobs:
             target: test
           - image: kubarr-backend
             dockerfile: docker/Dockerfile.api
+          - image: kubarr-worker
+            dockerfile: docker/Dockerfile.worker
           - image: kubarr-frontend
             dockerfile: docker/Dockerfile.frontend
+          - image: kubarr-dns-webhook
+            dockerfile: docker/Dockerfile.dns-webhook
 
     steps:
       - name: Free disk space
