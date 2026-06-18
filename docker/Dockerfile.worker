@@ -22,7 +22,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --profile "${PROFILE}" && \
     cp "target/${PROFILE_DIR}/kubarr-worker" /kubarr-worker
 
-FROM alpine/helm:3.21.0 AS helm-source
+FROM alpine/helm:4.2.2 AS helm-source
 
 FROM public.ecr.aws/docker/library/alpine:3.23
 ARG COMMIT_HASH=unknown
