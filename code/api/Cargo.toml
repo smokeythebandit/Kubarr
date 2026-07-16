@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Web framework
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
-tower-http = { version = "0.6", features = [
+tower-http = { version = "0.7", features = [
   "cors",
   "fs",
   "trace",
@@ -40,7 +40,7 @@ sea-orm-migration = { version = "1.1", features = [
 ] }
 
 # Kubernetes
-kube = { version = "3.0", features = ["runtime", "client", "derive"] }
+kube = { version = "4.0", features = ["runtime", "client", "derive"] }
 k8s-openapi = { version = "0.27", features = ["v1_31"] }
 jiff = "0.2"
 
@@ -49,7 +49,7 @@ jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 bcrypt = "0.19"
 rsa = { version = "0.9", features = ["sha2"] }
 rand = "0.10"
-rand_core = "0.6"
+rand_core = "0.10"
 base64 = "0.22"
 hex = "0.4"
 totp-rs = { version = "5", features = ["qr", "gen_secret"] }
@@ -58,7 +58,7 @@ totp-rs = { version = "5", features = ["qr", "gen_secret"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # OpenAPI / Swagger
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
