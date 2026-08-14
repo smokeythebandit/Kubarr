@@ -31,6 +31,7 @@ pub fn apps_routes(state: AppState) -> Router {
         .route("/operations/{operation_id}", get(get_operation))
         .route("/states", get(list_app_states))
         .route("/sync", post(sync_charts))
+        .route("/sync/status", get(sync_status))
         .route("/categories", get(list_categories))
         .route("/category/{category}", get(get_apps_by_category))
         .route("/{app_name}/state", get(get_app_state))
@@ -531,7 +532,24 @@ async fn sync_charts(
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "message": "Chart sync completed"
+        "message": "Chart sync completed",
+        "last_synced": state.chart_sync.last_synced().await,
+    })))
+}
+
+/// When the app catalog was last synced from the chart registry
+#[utoipa::path(
+    get,
+    path = "/api/apps/sync/status",
+    tag = "Apps",
+    responses((status = 200, body = serde_json::Value))
+)]
+async fn sync_status(
+    State(state): State<AppState>,
+    _auth: Authorized<AppsView>,
+) -> Result<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({
+        "last_synced": state.chart_sync.last_synced().await,
     })))
 }
 

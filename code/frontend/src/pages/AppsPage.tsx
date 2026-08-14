@@ -942,10 +942,40 @@ function AppDetailPanel({
   )
 }
 
+function formatTimeAgo(iso: string): string {
+  const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  if (seconds < 60) return 'just now'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
 export default function AppsPage() {
   const { catalog, installedApps: installed, appStates, appStatuses: globalAppStatuses, refreshAppStatuses } = useMonitoring()
+  const { hasPermission } = useAuth()
+  const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
+
+  const canSyncCatalog = hasPermission('apps.install')
+  const { data: syncStatus } = useQuery({
+    queryKey: ['catalog-sync-status'],
+    queryFn: appsApi.getSyncStatus,
+    refetchInterval: 60000,
+  })
+  const syncMutation = useMutation({
+    mutationFn: appsApi.syncCatalog,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['catalog-sync-status'] })
+      refreshAppStatuses()
+      setToast({ message: 'Catalog updated from registry', type: 'success' })
+    },
+    onError: () => {
+      setToast({ message: 'Catalog sync failed', type: 'error' })
+    },
+  })
   const [operationStatuses, setOperationStatuses] = useState<Record<string, OperationStatus>>({})
   const [selectedApp, setSelectedApp] = useState<AppConfig | null>(null)
 
@@ -1195,6 +1225,22 @@ export default function AppsPage() {
               <option value="available">Available</option>
               <option value="updates">Updates Ready</option>
             </select>
+            <span className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap" title={syncStatus?.last_synced ?? undefined}>
+              {syncStatus?.last_synced ? `Catalog updated ${formatTimeAgo(syncStatus.last_synced)}` : 'Catalog not synced yet'}
+            </span>
+            {canSyncCatalog && (
+              <button
+                onClick={() => syncMutation.mutate()}
+                disabled={syncMutation.isPending}
+                title="Fetch the latest catalog from GitHub"
+                className="px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-wait shadow-sm flex items-center gap-2"
+              >
+                <svg className={`w-4 h-4 ${syncMutation.isPending ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {syncMutation.isPending ? 'Syncing…' : 'Refresh Catalog'}
+              </button>
+            )}
           </div>
         </div>
 

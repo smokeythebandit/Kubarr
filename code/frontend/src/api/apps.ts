@@ -107,4 +107,16 @@ export const appsApi = {
   logAccess: async (appName: string): Promise<void> => {
     await apiClient.post(`/apps/${appName}/access`);
   },
+
+  // When the catalog was last synced from the chart registry
+  getSyncStatus: async (): Promise<{ last_synced: string | null }> => {
+    const response = await apiClient.get('/apps/sync/status');
+    return response.data;
+  },
+
+  // Fetch the latest catalog from GitHub/registry
+  syncCatalog: async (): Promise<{ success: boolean; last_synced: string | null }> => {
+    const response = await apiClient.post('/apps/sync');
+    return response.data;
+  },
 };

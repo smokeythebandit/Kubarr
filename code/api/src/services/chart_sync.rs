@@ -28,6 +28,7 @@ struct GitHubContent {
 pub struct ChartSyncService {
     catalog: SharedCatalog,
     client: reqwest::Client,
+    last_synced: tokio::sync::RwLock<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 impl ChartSyncService {
@@ -40,7 +41,13 @@ impl ChartSyncService {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("failed to build reqwest client"),
+            last_synced: tokio::sync::RwLock::new(None),
         }
+    }
+
+    /// When the last successful sync finished, if any.
+    pub async fn last_synced(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        *self.last_synced.read().await
     }
 
     /// Discover chart names from the GitHub repo, pull each from OCI, and reload the catalog.
@@ -82,6 +89,7 @@ impl ChartSyncService {
             catalog.reload();
         }
 
+        *self.last_synced.write().await = Some(chrono::Utc::now());
         tracing::info!("Chart sync completed, {} charts synced", synced);
         Ok(())
     }
