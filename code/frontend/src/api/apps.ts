@@ -114,9 +114,9 @@ export const appsApi = {
     return response.data;
   },
 
-  // Fetch the latest catalog from GitHub/registry
+  // Fetch the latest catalog from GitHub/registry (slow: pulls every chart)
   syncCatalog: async (): Promise<{ success: boolean; last_synced: string | null }> => {
-    const response = await apiClient.post('/apps/sync');
+    const response = await apiClient.post('/apps/sync', null, { timeout: 120000 });
     return response.data;
   },
 };

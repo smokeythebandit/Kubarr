@@ -212,14 +212,35 @@ impl ChartSyncService {
         let dest = CONFIG.charts.dir.to_str().unwrap_or("/app/charts");
         std::fs::create_dir_all(dest)?;
 
-        let output = Command::new("helm")
-            .args(["pull", &chart_ref, "--untar", "--destination", dest])
-            .output()?;
+        // `helm pull --untar` refuses to overwrite an existing chart dir, so
+        // untar into a scratch dir and swap it into place; without this every
+        // sync after the first fails for already-synced charts.
+        let staging = std::path::Path::new(dest).join(format!(".pull-{}", name));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("helm pull failed for {}: {}", name, stderr.trim());
-        }
+        let output = Command::new("helm")
+            .args([
+                "pull",
+                &chart_ref,
+                "--untar",
+                "--destination",
+                &staging.to_string_lossy(),
+            ])
+            .output();
+        let result = (|| {
+            let output = output?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("helm pull failed for {}: {}", name, stderr.trim());
+            }
+            let final_dir = std::path::Path::new(dest).join(name);
+            let _ = std::fs::remove_dir_all(&final_dir);
+            std::fs::rename(staging.join(name), &final_dir)?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(&staging);
+        result?;
 
         tracing::debug!("Chart sync: pulled {}", name);
         Ok(())
