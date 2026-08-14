@@ -44,7 +44,7 @@ impl ChartSyncService {
     }
 
     /// Discover chart names from the GitHub repo, pull each from OCI, and reload the catalog.
-    pub async fn sync(&self) -> anyhow::Result<()> {
+    pub async fn sync(self: &Arc<Self>) -> anyhow::Result<()> {
         let chart_names = match self.discover_charts().await {
             Ok(names) => names,
             Err(e) => {
@@ -63,9 +63,16 @@ impl ChartSyncService {
 
         let mut synced = 0u32;
         for name in &chart_names {
-            match self.pull_chart(name) {
-                Ok(()) => synced += 1,
-                Err(e) => tracing::warn!("Chart sync: failed to pull {}: {}", name, e),
+            // Helm/tar/filesystem work is blocking; keep it off the async
+            // workers without re-entering the runtime (a nested `block_on`
+            // here panics the timer driver if the runtime shuts down while a
+            // sync is in flight, taking the whole process down with it).
+            let service = self.clone();
+            let chart = name.clone();
+            match tokio::task::spawn_blocking(move || service.pull_chart(&chart)).await {
+                Ok(Ok(())) => synced += 1,
+                Ok(Err(e)) => tracing::warn!("Chart sync: failed to pull {}: {}", name, e),
+                Err(e) => tracing::warn!("Chart sync: pull task for {} panicked: {}", name, e),
             }
         }
 
@@ -79,11 +86,11 @@ impl ChartSyncService {
         Ok(())
     }
 
-    /// Run chart sync away from the async worker threads. Sync executes Helm,
-    /// tar, and filesystem operations, which can otherwise starve HTTP probes.
+    /// Run a full chart sync. Network discovery stays on the async runtime;
+    /// the blocking Helm/tar work inside `sync` is dispatched to the blocking
+    /// pool per chart, so async workers and HTTP probes are never starved.
     pub async fn sync_on_blocking_thread(self: Arc<Self>) -> anyhow::Result<()> {
-        let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || handle.block_on(self.sync())).await?
+        self.sync().await
     }
 
     /// Query the GitHub Contents API to discover which chart directories exist.
