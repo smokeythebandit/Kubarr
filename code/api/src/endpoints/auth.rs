@@ -83,13 +83,30 @@ pub struct RecoveryLoginRequest {
 // Session Cookie Helpers
 // ============================================================================
 
+/// Optional `; Domain=...` cookie attribute from KUBARR_COOKIE_DOMAIN.
+/// Setting it to the parent domain (e.g. `example.com`) lets the session
+/// cookie flow to subdomain-routed apps (`watch.example.com`); unset keeps
+/// host-only cookies.
+fn cookie_domain_attribute() -> &'static str {
+    static ATTR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ATTR.get_or_init(|| {
+        std::env::var("KUBARR_COOKIE_DOMAIN")
+            .ok()
+            .map(|d| d.trim().trim_start_matches('.').to_string())
+            .filter(|d| !d.is_empty())
+            .map(|d| format!("; Domain={}", d))
+            .unwrap_or_default()
+    })
+}
+
 /// Create an indexed session cookie with the given token
 fn create_session_cookie_for_slot(slot: usize, token: &str, secure: bool) -> HeaderValue {
     let cookie = format!(
-        "{}_{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{}",
+        "{}_{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{}{}",
         SESSION_COOKIE_BASE,
         slot,
         token,
+        cookie_domain_attribute(),
         if secure { "; Secure" } else { "" }
     );
     HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""))
@@ -98,9 +115,10 @@ fn create_session_cookie_for_slot(slot: usize, token: &str, secure: bool) -> Hea
 /// Create the active session cookie
 fn create_active_session_cookie(slot: usize, secure: bool) -> HeaderValue {
     let cookie = format!(
-        "{}={}; SameSite=Lax; Path=/; Max-Age=604800{}",
+        "{}={}; SameSite=Lax; Path=/; Max-Age=604800{}{}",
         ACTIVE_SESSION_COOKIE,
         slot,
+        cookie_domain_attribute(),
         if secure { "; Secure" } else { "" }
     );
     HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""))
@@ -109,9 +127,10 @@ fn create_active_session_cookie(slot: usize, secure: bool) -> HeaderValue {
 /// Legacy: Create a session cookie with the given token (for backwards compatibility)
 fn create_session_cookie(token: &str, secure: bool) -> HeaderValue {
     let cookie = format!(
-        "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{}",
+        "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{}{}",
         SESSION_COOKIE_NAME,
         token,
+        cookie_domain_attribute(),
         if secure { "; Secure" } else { "" }
     );
     HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""))
@@ -120,8 +139,9 @@ fn create_session_cookie(token: &str, secure: bool) -> HeaderValue {
 /// Create a cookie that clears the session
 fn clear_session_cookie() -> HeaderValue {
     let cookie = format!(
-        "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
-        SESSION_COOKIE_NAME
+        "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{}",
+        SESSION_COOKIE_NAME,
+        cookie_domain_attribute()
     );
     HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""))
 }
