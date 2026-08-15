@@ -212,11 +212,12 @@ impl<'a> DeploymentManager<'a> {
                         if vpn_config.port_forwarding {
                             set_args.push("vpn.portForwarding.enabled=true".to_string());
                         }
-                        // Use --set-string for subnets since CIDR notation contains
-                        // commas and slashes that Helm's --set parser misinterprets
+                        // Helm's --set/--set-string parser splits values on
+                        // unescaped commas, so the comma-separated CIDR list
+                        // must have them escaped to survive as one value.
                         set_string_args.push(format!(
                             "vpn.firewallOutboundSubnets={}",
-                            vpn_config.firewall_outbound_subnets
+                            vpn_config.firewall_outbound_subnets.replace(',', "\\,")
                         ));
                     }
                     Err(e) => {
