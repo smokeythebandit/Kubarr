@@ -47,14 +47,14 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: code/api
-      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912
+      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20
         with:
           tool: cargo-tarpaulin
       - run: cargo tarpaulin --no-fail-fast --out Xml --output-dir coverage
@@ -76,7 +76,7 @@ jobs:
       TAG: ${{ inputs.image-tag }}
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Install tools (kind, kubectl, helm)
         run: |
@@ -97,11 +97,11 @@ jobs:
           "$HOME/.local/bin/kubectl" version --client
           "$HOME/.local/bin/helm" version
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '26'
 
-      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
         with:
           version: 10.34.3
 
