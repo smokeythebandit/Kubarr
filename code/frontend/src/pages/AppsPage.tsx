@@ -7,9 +7,10 @@ import { vpnApi, appVpnApi } from '../api/vpn'
 import type { VpnProvider } from '../api/vpn'
 import { VpnProviderForm } from '../components/vpn/VpnProviderForm'
 import { AppIcon, useIconColors } from '../components/AppIcon'
+import { OperationQueue } from '../components/OperationQueue'
 import { useAuth } from '../contexts/AuthContext'
 import { useMonitoring } from '../contexts/MonitoringContext'
-import type { AppConfig } from '../types'
+import type { AppConfig, AppOperation } from '../types'
 import type { ServiceEndpoint } from '../types/monitoring'
 
 type FilterType = 'all' | 'installed' | 'healthy' | 'unhealthy' | 'available' | 'updates'
@@ -965,6 +966,11 @@ export default function AppsPage() {
     queryFn: appsApi.getSyncStatus,
     refetchInterval: 60000,
   })
+  const { data: operations = [] } = useQuery({
+    queryKey: ['app-operations'],
+    queryFn: appsApi.getOperations,
+    refetchInterval: query => query.state.data?.some(operation => operation.status === 'queued' || operation.status === 'running') ? 2000 : 15000,
+  })
   const syncMutation = useMutation({
     mutationFn: appsApi.syncCatalog,
     onSuccess: () => {
@@ -1044,6 +1050,15 @@ export default function AppsPage() {
     })
   }, [appsByCategory])
 
+  const appDisplayNames = useMemo(() => Object.fromEntries(catalog.map(app => [app.name, app.display_name])), [catalog])
+  const activeOperationsByApp = useMemo(() => {
+    const active: Record<string, AppOperation> = {}
+    operations.forEach(operation => {
+      if ((operation.status === 'queued' || operation.status === 'running') && !active[operation.app_name]) active[operation.app_name] = operation
+    })
+    return active
+  }, [operations])
+
   // Always have an app selected — pick first from top-left category
   useEffect(() => {
     if (!selectedApp && sortedCategories.length > 0) {
@@ -1078,7 +1093,8 @@ export default function AppsPage() {
       return appsApi.install({ app_name: appName, namespace: appName })
     },
     onSuccess: (operation, appName) => {
-      setOperationState(appName, 'installing', operation.message || 'Install queued')
+      queryClient.setQueryData<AppOperation[]>(['app-operations'], current => [operation, ...(current || []).filter(item => item.id !== operation.id)])
+      setOperationState(appName, null)
       refreshAppStatuses()
       showToast(`${appName} install queued`, 'success')
     },
@@ -1094,7 +1110,8 @@ export default function AppsPage() {
       return appsApi.update(appName)
     },
     onSuccess: (operation, appName) => {
-      setOperationState(appName, 'updating', operation.message || 'Update queued')
+      queryClient.setQueryData<AppOperation[]>(['app-operations'], current => [operation, ...(current || []).filter(item => item.id !== operation.id)])
+      setOperationState(appName, null)
       refreshAppStatuses()
       showToast(`${appName} update queued`, 'success')
     },
@@ -1110,7 +1127,8 @@ export default function AppsPage() {
       return appsApi.delete(appName)
     },
     onSuccess: (operation, appName) => {
-      setOperationState(appName, 'deleting', operation.message || 'Uninstall queued')
+      queryClient.setQueryData<AppOperation[]>(['app-operations'], current => [operation, ...(current || []).filter(item => item.id !== operation.id)])
+      setOperationState(appName, null)
       refreshAppStatuses()
       showToast(`${appName} uninstall queued`, 'success')
     },
@@ -1123,6 +1141,7 @@ export default function AppsPage() {
   const getAppState = (app: AppConfig) => {
     const isInstalled = installed?.includes(app.name)
     const operationStatus = operationStatuses[app.name]
+    const activeOperation = activeOperationsByApp[app.name]
     const appState = appStates[app.name]
     const globalStatus = globalAppStatuses[app.name]
     const isHealthy = appState?.healthy === true || globalStatus?.healthy === true
@@ -1130,6 +1149,8 @@ export default function AppsPage() {
     let effectiveState: string
     if (operationStatus) {
       effectiveState = operationStatus.state
+    } else if (activeOperation) {
+      effectiveState = activeOperation.operation === 'delete' ? 'deleting' : activeOperation.operation === 'update' ? 'updating' : 'installing'
     } else if (appState?.observed_state === 'installing') {
       effectiveState = 'installing'
     } else if (appState?.observed_state === 'deleting') {
@@ -1246,6 +1267,8 @@ export default function AppsPage() {
 
         {/* Main content */}
         <div className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-8 space-y-8">
+          <OperationQueue operations={operations} displayNames={appDisplayNames} />
+
           {/* Empty State */}
           {sortedCategories.length === 0 && filter !== 'all' && (
             <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -1315,7 +1338,7 @@ export default function AppsPage() {
                         onOpen={() => handleOpen(app)}
                         onClick={() => setSelectedApp(app)}
                         updateAvailable={updateAvailable}
-                        isOperationPending={installMutation.isPending || updateMutation.isPending || deleteMutation.isPending}
+                        isOperationPending={Boolean(activeOperationsByApp[app.name]) || (installMutation.isPending && installMutation.variables === app.name) || (updateMutation.isPending && updateMutation.variables === app.name) || (deleteMutation.isPending && deleteMutation.variables === app.name)}
                       />
                     )
                   })}
@@ -1346,7 +1369,7 @@ export default function AppsPage() {
             updateAvailable={updateAvailable}
             currentVersion={selectedAppState?.installed_chart_version}
             newVersion={selectedAppState?.available_chart_version}
-            isOperationPending={installMutation.isPending || updateMutation.isPending || deleteMutation.isPending}
+            isOperationPending={Boolean(activeOperationsByApp[selectedApp.name]) || (installMutation.isPending && installMutation.variables === selectedApp.name) || (updateMutation.isPending && updateMutation.variables === selectedApp.name) || (deleteMutation.isPending && deleteMutation.variables === selectedApp.name)}
           />
         )
       })()}
