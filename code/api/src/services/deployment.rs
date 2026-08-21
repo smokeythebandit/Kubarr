@@ -5,11 +5,12 @@ use chrono::{DateTime, Utc};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{Namespace, Service};
 use kube::api::{Api, DeleteParams, ListParams};
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
 
 use crate::config::CONFIG;
 use crate::error::{AppError, Result};
+use crate::models::app_state;
 use crate::services::catalog::{kubarr_system_component, lifecycle_for_app_name, AppCatalog};
 use crate::services::storage_config::{self, PersistedStorageConfig};
 use crate::services::vpn;
@@ -117,7 +118,7 @@ impl<'a> DeploymentManager<'a> {
             .and_then(|chart| {
                 chart
                     .rsplit_once('-')
-                    .map(|(_, version)| version.to_string())
+                    .map(|(_, version)| normalize_chart_version(version))
             })
         {
             return Some(version);
@@ -145,7 +146,17 @@ impl<'a> DeploymentManager<'a> {
         let release = lifecycle.release_name.as_str();
         let release_namespace = lifecycle.release_namespace.as_str();
         let namespace = lifecycle.namespace.as_str();
-        let chart_version = self.catalog.chart_version(&request.app_name);
+        let chart_version = if let Some(db) = self.db {
+            app_state::Entity::find_by_id(request.app_name.clone())
+                .one(db)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|state| state.available_chart_version)
+        } else {
+            None
+        }
+        .or_else(|| self.catalog.chart_version(&request.app_name));
 
         // VPN credentials are a namespaced Secret and must exist before Helm
         // renders the release. Helm's --create-namespace happens too late.
@@ -629,8 +640,12 @@ fn chart_version_from_manifest(manifest: &str, app_name: &str) -> Option<String>
     manifest.lines().find_map(|line| {
         let chart = line.trim().strip_prefix(prefix)?.trim();
         let expected = format!("{}-", app_name);
-        chart.strip_prefix(&expected).map(ToString::to_string)
+        chart.strip_prefix(&expected).map(normalize_chart_version)
     })
+}
+
+fn normalize_chart_version(version: &str) -> String {
+    version.replace('_', "+")
 }
 
 #[cfg(test)]
@@ -746,5 +761,10 @@ mod tests {
         let cloned = status.clone();
         assert_eq!(cloned.app_name, status.app_name);
         assert_eq!(cloned.status, status.status);
+    }
+
+    #[test]
+    fn chart_version_normalizes_oci_build_metadata() {
+        assert_eq!(normalize_chart_version("1.29.2_5.1"), "1.29.2+5.1");
     }
 }

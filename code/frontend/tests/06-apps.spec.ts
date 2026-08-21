@@ -84,6 +84,16 @@ test.describe('Apps Page', () => {
   });
 
   test.describe('App Filtering', () => {
+    test('category selector filters the catalog', async ({ page }) => {
+      const categorySelector = page.getByLabel('App category');
+      await expect(categorySelector).toBeVisible();
+
+      await categorySelector.selectOption('media-manager');
+
+      await expect(page.locator('h2:has-text("Media Managers")')).toBeVisible();
+      await expect(page.locator('h2:has-text("Download Clients")')).not.toBeVisible();
+    });
+
     test('filter dropdown is visible', async ({ page }) => {
       // Look for a filter/category selector
       const filterButton = page.locator('button:has-text("All"), select, [role="combobox"]').first();

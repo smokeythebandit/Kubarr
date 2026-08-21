@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Build stage
 FROM public.ecr.aws/docker/library/node:26-alpine AS builder
 
@@ -7,7 +8,9 @@ WORKDIR /app
 COPY code/frontend/package.json code/frontend/pnpm-lock.yaml code/frontend/.npmrc ./
 
 # Install dependencies
-RUN npm install -g pnpm@10.34.3 --ignore-scripts && pnpm install --frozen-lockfile --ignore-scripts
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
+    npm install -g pnpm@10.34.3 --ignore-scripts && \
+    pnpm install --frozen-lockfile --ignore-scripts
 
 # Copy source code
 COPY code/frontend/ ./
@@ -23,9 +26,6 @@ ENV VITE_VERSION=${VERSION}
 ENV VITE_CHANNEL=${CHANNEL}
 ENV VITE_COMMIT_HASH=${COMMIT_HASH}
 ENV VITE_BUILD_TIME=${BUILD_TIME}
-
-# Test stage: has Node.js + all dev dependencies for lint/build checks
-FROM builder AS test
 
 # Build the app
 FROM builder AS built

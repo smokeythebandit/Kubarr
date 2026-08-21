@@ -13,23 +13,21 @@ ENV CARGO_INCREMENTAL=1
 
 COPY code/api/Cargo.toml code/api/Cargo.lock* ./
 RUN mkdir src && echo '' > src/lib.rs && echo 'fn main() {}' > src/main.rs
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/code/api/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=api-target,target=/app/code/api/target,sharing=locked \
     cargo build --profile ${PROFILE} && rm -rf src
 
 COPY code/api/src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/code/api/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=api-target,target=/app/code/api/target,sharing=locked \
     PROFILE_DIR=$(if [ "$PROFILE" = "release" ]; then echo "release"; else echo "$PROFILE"; fi) && \
     rm -f "target/${PROFILE_DIR}/kubarr-api" "target/${PROFILE_DIR}/libkubarr"* 2>/dev/null || true && \
     find "target/${PROFILE_DIR}/deps" -maxdepth 1 \( -name 'kubarr_api*' -o -name 'kubarr*' -o -name 'libkubarr*' \) -delete 2>/dev/null || true && \
     touch src/lib.rs src/main.rs && \
     cargo build --profile "${PROFILE}" --bin kubarr-api && \
     cp "target/${PROFILE_DIR}/kubarr-api" /kubarr-api
-
-FROM builder AS test
 
 FROM alpine/helm:3.21.0 AS helm-source
 

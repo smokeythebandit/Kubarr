@@ -16,6 +16,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { MonitoringProvider, useMonitoring } from './contexts/MonitoringContext'
 import { PageTransition } from './components/PageTransition'
+import { InstallAppButton } from './components/InstallAppButton'
 import { sessionLogout } from './api/auth'
 import { Grid3X3, HardDrive, FileText, Activity, Settings, User, LogOut, Ship, ChevronDown, Sun, Moon, Monitor, Network, Menu, X, Shield, Bell, Check, Trash2, AlertCircle, Info, AlertTriangle } from 'lucide-react'
 import { notificationsApi, Notification } from './api/notifications'
@@ -393,6 +394,8 @@ function UserMenu() {
               <User size={16} strokeWidth={2} />
               <span>Add another account</span>
             </button>
+
+            <InstallAppButton onInstall={() => setDropdownOpen(false)} />
 
             <Link
               to="/account"

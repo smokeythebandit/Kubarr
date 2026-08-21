@@ -530,6 +530,12 @@ async fn sync_charts(
         .await
         .map_err(|e| AppError::Internal(format!("Chart sync failed: {}", e)))?;
 
+    if let Ok(db) = state.get_db().await {
+        AppManager::new(db, state.k8s_client.clone(), state.catalog.clone())
+            .refresh_available_chart_versions()
+            .await?;
+    }
+
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Chart sync completed",

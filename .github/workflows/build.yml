@@ -17,30 +17,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: kubarr-backend-test
+          - component: backend
+            image: kubarr-backend
             dockerfile: docker/Dockerfile.api
-            target: test
-          - image: kubarr-frontend-test
+          - component: frontend
+            image: kubarr-frontend
             dockerfile: docker/Dockerfile.frontend
-            target: test
-          - image: kubarr-backend
-            dockerfile: docker/Dockerfile.api
-          - image: kubarr-worker
+          - component: worker
+            image: kubarr-worker
             dockerfile: docker/Dockerfile.worker
-          - image: kubarr-frontend
-            dockerfile: docker/Dockerfile.frontend
-          - image: kubarr-dns-webhook
+          - component: dns-webhook
+            image: kubarr-dns-webhook
             dockerfile: docker/Dockerfile.dns-webhook
 
     steps:
-      - name: Free disk space
-        run: |
-          docker image prune -f || true
-          docker container prune -f || true
-          docker volume prune -f || true
-          df -h
-
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
+      - uses: docker/setup-buildx-action@v3
 
       - name: Extract version metadata
         id: meta
@@ -59,46 +52,33 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 
-      - name: Build ${{ matrix.image }}
-        env:
-          DOCKER_BUILDKIT: '1'
-          DOCKERFILE: ${{ matrix.dockerfile }}
-          IMAGE_NAME: ${{ matrix.image }}:${{ inputs.image-tag }}
-          TARGET: ${{ matrix.target || '' }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          CHANNEL: ${{ steps.meta.outputs.channel }}
-          COMMIT_HASH: ${{ github.sha }}
-        run: |
-          for attempt in 1 2 3; do
-            echo "=== Build attempt ${attempt}/3 ==="
-            build_args=(-f "$DOCKERFILE" -t "$IMAGE_NAME")
-            if [ -n "$TARGET" ]; then
-              build_args+=(--target "$TARGET")
-            fi
-            if docker build "${build_args[@]}" \
-                --build-arg "VERSION=$VERSION" \
-                --build-arg "CHANNEL=$CHANNEL" \
-                --build-arg "COMMIT_HASH=$COMMIT_HASH" \
-                --build-arg "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" .; then
-              echo "Build succeeded on attempt ${attempt}"
-              exit 0
-            fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "Build failed, waiting 3 minutes before retry (rate limit backoff)..."
-              sleep 180
-            fi
-          done
-          echo "ERROR: Build failed after 3 attempts"
-          exit 1
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: ${{ matrix.image }}:${{ inputs.image-tag }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            CHANNEL=${{ steps.meta.outputs.channel }}
+            COMMIT_HASH=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
       - name: Save image
-        run: docker save "${{ matrix.image }}:${{ inputs.image-tag }}" > "${{ matrix.image }}.tar"
+        env:
+          IMAGE: ${{ matrix.image }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+        run: docker save "${IMAGE}:${IMAGE_TAG}" | gzip -1 > "${IMAGE}.tar.gz"
 
       - name: Upload image artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ${{ matrix.image }}
-          path: ${{ matrix.image }}.tar
+          path: ${{ matrix.image }}.tar.gz
+          compression-level: 0
+          retention-days: 1
 
   docs:
     runs-on: ubuntu-latest
@@ -124,7 +104,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: '22'
+          node-version: '26'
           cache: npm
 
       - run: npm ci

@@ -167,6 +167,29 @@ impl AppManager {
         Ok(state.into())
     }
 
+    /// Refresh the catalog version fields without waiting for a worker reconcile.
+    pub async fn refresh_available_chart_versions(&self) -> Result<()> {
+        let catalog = self.catalog.read().await;
+        let now = Utc::now();
+
+        for state in app_state::Entity::find().all(&self.db).await? {
+            let available_chart_version = catalog.chart_version(&state.app_name);
+            let update_available = matches!(
+                (&state.installed_chart_version, &available_chart_version),
+                (Some(installed), Some(available)) if installed != available
+            );
+
+            let mut active: app_state::ActiveModel = state.into();
+            active.available_chart_version = Set(available_chart_version);
+            active.update_available = Set(update_available);
+            active.last_checked_at = Set(Some(now));
+            active.updated_at = Set(now);
+            active.update(&self.db).await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn run_worker(
         self: Arc<Self>,
         poll_interval: Duration,
@@ -506,14 +529,18 @@ impl AppManager {
             });
             (available, installed)
         };
-        let update_available = matches!(
-            (&installed_chart_version, &available_chart_version),
-            (Some(installed), Some(available)) if installed != available
-        );
         if let Some(existing) = app_state::Entity::find_by_id(app_name.to_string())
             .one(&self.db)
             .await?
         {
+            let available_chart_version = existing
+                .available_chart_version
+                .clone()
+                .or(available_chart_version);
+            let update_available = matches!(
+                (&installed_chart_version, &available_chart_version),
+                (Some(installed), Some(available)) if installed != available
+            );
             let mut active: app_state::ActiveModel = existing.into();
             active.namespace = Set(namespace.to_string());
             active.desired_state = Set(desired_state.to_string());
@@ -530,6 +557,10 @@ impl AppManager {
             active.updated_at = Set(now);
             active.update(&self.db).await?;
         } else {
+            let update_available = matches!(
+                (&installed_chart_version, &available_chart_version),
+                (Some(installed), Some(available)) if installed != available
+            );
             app_state::ActiveModel {
                 app_name: Set(app_name.to_string()),
                 namespace: Set(namespace.to_string()),

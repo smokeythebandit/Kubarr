@@ -14,6 +14,7 @@ import type { AppConfig, AppOperation } from '../types'
 import type { ServiceEndpoint } from '../types/monitoring'
 
 type FilterType = 'all' | 'installed' | 'healthy' | 'unhealthy' | 'available' | 'updates'
+type AppsTab = 'catalog' | 'operations'
 
 type OperationState = 'installing' | 'updating' | 'deleting' | 'error'
 
@@ -986,9 +987,42 @@ export default function AppsPage() {
   const [selectedApp, setSelectedApp] = useState<AppConfig | null>(null)
 
   const filter = (searchParams.get('filter') as FilterType) || 'all'
+  const categoryFilter = searchParams.get('category') || 'all'
+  const activeTab: AppsTab = searchParams.get('tab') === 'operations' ? 'operations' : 'catalog'
+  const activeOperationCount = operations.filter(operation => operation.status === 'queued' || operation.status === 'running').length
+
+  const setActiveTab = (tab: AppsTab) => {
+    const next = new URLSearchParams(searchParams)
+    if (tab === 'catalog') {
+      next.delete('tab')
+    } else {
+      next.set('tab', tab)
+    }
+    setSearchParams(next)
+  }
 
   const clearFilter = () => {
     setSearchParams({})
+  }
+
+  const setFilter = (nextFilter: FilterType) => {
+    const next = new URLSearchParams(searchParams)
+    if (nextFilter === 'all') {
+      next.delete('filter')
+    } else {
+      next.set('filter', nextFilter)
+    }
+    setSearchParams(next)
+  }
+
+  const setCategoryFilter = (nextCategory: string) => {
+    const next = new URLSearchParams(searchParams)
+    if (nextCategory === 'all') {
+      next.delete('category')
+    } else {
+      next.set('category', nextCategory)
+    }
+    setSearchParams(next)
   }
 
   const isLoading = catalog.length === 0
@@ -996,9 +1030,14 @@ export default function AppsPage() {
   // Filter apps based on filter type
   const filteredCatalog = useMemo(() => {
     if (!catalog) return []
-    if (filter === 'all') return catalog
 
     return catalog.filter(app => {
+      if (categoryFilter !== 'all' && (app.category || 'other') !== categoryFilter) {
+        return false
+      }
+
+      if (filter === 'all') return true
+
       const isInstalled = installed?.includes(app.name) || appStates[app.name]?.observed_state === 'installed' || appStates[app.name]?.observed_state === 'unhealthy'
       const appStatus = globalAppStatuses[app.name]
       const isHealthy = appStatus?.healthy === true
@@ -1018,7 +1057,33 @@ export default function AppsPage() {
           return true
       }
     })
-  }, [catalog, installed, appStates, globalAppStatuses, filter])
+  }, [catalog, installed, appStates, globalAppStatuses, filter, categoryFilter])
+
+  const categories = useMemo(() => {
+    const available = new Set(catalog.map(app => app.category || 'other'))
+    return Array.from(available).sort((a, b) => {
+      const aIndex = categoryOrder.indexOf(a)
+      const bIndex = categoryOrder.indexOf(b)
+      if (aIndex === -1 && bIndex === -1) return a.localeCompare(b)
+      if (aIndex === -1) return 1
+      if (bIndex === -1) return -1
+      return aIndex - bIndex
+    })
+  }, [catalog])
+
+  const appDisplayNames = useMemo(
+    () => Object.fromEntries(catalog.map(app => [app.name, app.display_name])),
+    [catalog],
+  )
+  const activeOperationsByApp = useMemo(() => {
+    const active: Record<string, AppOperation> = {}
+    operations.forEach(operation => {
+      if ((operation.status === 'queued' || operation.status === 'running') && !active[operation.app_name]) {
+        active[operation.app_name] = operation
+      }
+    })
+    return active
+  }, [operations])
 
   // Group apps by category
   const appsByCategory = useMemo(() => {
@@ -1050,23 +1115,17 @@ export default function AppsPage() {
     })
   }, [appsByCategory])
 
-  const appDisplayNames = useMemo(() => Object.fromEntries(catalog.map(app => [app.name, app.display_name])), [catalog])
-  const activeOperationsByApp = useMemo(() => {
-    const active: Record<string, AppOperation> = {}
-    operations.forEach(operation => {
-      if ((operation.status === 'queued' || operation.status === 'running') && !active[operation.app_name]) active[operation.app_name] = operation
-    })
-    return active
-  }, [operations])
-
-  // Always have an app selected — pick first from top-left category
+  // Keep the detail panel aligned with the current filters.
   useEffect(() => {
-    if (!selectedApp && sortedCategories.length > 0) {
+    const selectedAppIsVisible = selectedApp && filteredCatalog.some(app => app.name === selectedApp.name)
+    if (!selectedAppIsVisible && sortedCategories.length > 0) {
       const firstCategory = sortedCategories[0]
       const firstApp = appsByCategory[firstCategory]?.[0]
       if (firstApp) setSelectedApp(firstApp)
+    } else if (sortedCategories.length === 0 && selectedApp) {
+      setSelectedApp(null)
     }
-  }, [sortedCategories, appsByCategory, selectedApp])
+  }, [sortedCategories, appsByCategory, filteredCatalog, selectedApp])
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToast({ message, type })
@@ -1150,7 +1209,11 @@ export default function AppsPage() {
     if (operationStatus) {
       effectiveState = operationStatus.state
     } else if (activeOperation) {
-      effectiveState = activeOperation.operation === 'delete' ? 'deleting' : activeOperation.operation === 'update' ? 'updating' : 'installing'
+      effectiveState = activeOperation.operation === 'delete'
+        ? 'deleting'
+        : activeOperation.operation === 'update'
+          ? 'updating'
+          : 'installing'
     } else if (appState?.observed_state === 'installing') {
       effectiveState = 'installing'
     } else if (appState?.observed_state === 'deleting') {
@@ -1221,22 +1284,18 @@ export default function AppsPage() {
       {/* Left: Header + Content */}
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Header */}
-        <div className="flex-shrink-0 flex items-center justify-between border-b border-gray-200 dark:border-gray-800 px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-4">
+        <div className="flex-shrink-0 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-gray-200 dark:border-gray-800 px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-4">
           <div>
             <h1 className="text-3xl font-bold">Apps</h1>
-            <p className="text-gray-500 dark:text-gray-400 mt-2">Browse and install applications for your media server</p>
+            <p className="text-gray-500 dark:text-gray-400 mt-2">
+              {activeTab === 'catalog' ? 'Browse and install applications for your media server' : 'Track application work handled by the cluster worker'}
+            </p>
           </div>
-          <div className="flex items-center gap-3">
+          {activeTab === 'catalog' && <div className="flex flex-wrap items-center gap-3">
             <select
               value={filter}
-              onChange={(e) => {
-                const newFilter = e.target.value as FilterType
-                if (newFilter === 'all') {
-                  setSearchParams({})
-                } else {
-                  setSearchParams({ filter: newFilter })
-                }
-              }}
+              onChange={(e) => setFilter(e.target.value as FilterType)}
+              aria-label="App status"
               className="px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm font-medium text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 cursor-pointer shadow-sm"
             >
               <option value="all">All Apps</option>
@@ -1245,6 +1304,19 @@ export default function AppsPage() {
               <option value="unhealthy">Unhealthy</option>
               <option value="available">Available</option>
               <option value="updates">Updates Ready</option>
+            </select>
+            <select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              aria-label="App category"
+              className="px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm font-medium text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 cursor-pointer shadow-sm"
+            >
+              <option value="all">All Categories</option>
+              {categories.map(category => (
+                <option key={category} value={category}>
+                  {categoryInfo[category]?.label || category.replace(/-/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase())}
+                </option>
+              ))}
             </select>
             <span className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap" title={syncStatus?.last_synced ?? undefined}>
               {syncStatus?.last_synced ? `Catalog updated ${formatTimeAgo(syncStatus.last_synced)}` : 'Catalog not synced yet'}
@@ -1262,15 +1334,39 @@ export default function AppsPage() {
                 {syncMutation.isPending ? 'Syncing…' : 'Refresh Catalog'}
               </button>
             )}
-          </div>
+          </div>}
+        </div>
+
+        <div className="flex-shrink-0 border-b border-gray-200 px-4 dark:border-gray-800 sm:px-6 lg:px-8 xl:px-12 2xl:px-16">
+          <nav aria-label="Apps views" className="flex gap-6">
+            <button
+              type="button"
+              onClick={() => setActiveTab('catalog')}
+              aria-current={activeTab === 'catalog' ? 'page' : undefined}
+              className={`border-b-2 px-1 py-3 text-sm font-semibold transition-colors ${activeTab === 'catalog' ? 'border-blue-500 text-blue-600 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-900 dark:hover:text-white'}`}
+            >
+              Catalog
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('operations')}
+              aria-current={activeTab === 'operations' ? 'page' : undefined}
+              className={`flex items-center gap-2 border-b-2 px-1 py-3 text-sm font-semibold transition-colors ${activeTab === 'operations' ? 'border-blue-500 text-blue-600 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-900 dark:hover:text-white'}`}
+            >
+              Operations
+              {activeOperationCount > 0 && <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[11px] font-bold text-white">{activeOperationCount}</span>}
+            </button>
+          </nav>
         </div>
 
         {/* Main content */}
         <div className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-8 space-y-8">
-          <OperationQueue operations={operations} displayNames={appDisplayNames} />
+          {activeTab === 'operations' ? (
+            <OperationQueue operations={operations} displayNames={appDisplayNames} />
+          ) : <>
 
           {/* Empty State */}
-          {sortedCategories.length === 0 && filter !== 'all' && (
+          {sortedCategories.length === 0 && (filter !== 'all' || categoryFilter !== 'all') && (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <div className="p-4 bg-gray-100 dark:bg-gray-800 rounded-full mb-4">
                 <svg className="w-12 h-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1278,7 +1374,7 @@ export default function AppsPage() {
                 </svg>
               </div>
               <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
-                No {filter} apps found
+                No matching apps found
               </h3>
               <p className="text-gray-500 dark:text-gray-400 mb-4">
                 {filter === 'installed' && "You haven't installed any apps yet."}
@@ -1286,6 +1382,7 @@ export default function AppsPage() {
                 {filter === 'unhealthy' && "All your installed apps are healthy!"}
                 {filter === 'available' && "You've installed all available apps!"}
                 {filter === 'updates' && "No apps have updates ready."}
+                {filter === 'all' && categoryFilter !== 'all' && 'No apps are available in this category.'}
               </p>
               <button
                 onClick={clearFilter}
@@ -1338,7 +1435,10 @@ export default function AppsPage() {
                         onOpen={() => handleOpen(app)}
                         onClick={() => setSelectedApp(app)}
                         updateAvailable={updateAvailable}
-                        isOperationPending={Boolean(activeOperationsByApp[app.name]) || (installMutation.isPending && installMutation.variables === app.name) || (updateMutation.isPending && updateMutation.variables === app.name) || (deleteMutation.isPending && deleteMutation.variables === app.name)}
+                        isOperationPending={Boolean(activeOperationsByApp[app.name]) ||
+                          (installMutation.isPending && installMutation.variables === app.name) ||
+                          (updateMutation.isPending && updateMutation.variables === app.name) ||
+                          (deleteMutation.isPending && deleteMutation.variables === app.name)}
                       />
                     )
                   })}
@@ -1346,11 +1446,12 @@ export default function AppsPage() {
               </section>
             )
           })}
+          </>}
         </div>
       </div>
 
       {/* App Detail Panel (right sidebar) */}
-      {selectedApp && (() => {
+      {activeTab === 'catalog' && selectedApp && (() => {
         const { isInstalled, isHealthy, effectiveState } = getAppState(selectedApp)
         const namespace = appStates[selectedApp.name]?.namespace || selectedApp.name
         const selectedAppState = appStates[selectedApp.name]
@@ -1369,7 +1470,10 @@ export default function AppsPage() {
             updateAvailable={updateAvailable}
             currentVersion={selectedAppState?.installed_chart_version}
             newVersion={selectedAppState?.available_chart_version}
-            isOperationPending={Boolean(activeOperationsByApp[selectedApp.name]) || (installMutation.isPending && installMutation.variables === selectedApp.name) || (updateMutation.isPending && updateMutation.variables === selectedApp.name) || (deleteMutation.isPending && deleteMutation.variables === selectedApp.name)}
+            isOperationPending={Boolean(activeOperationsByApp[selectedApp.name]) ||
+              (installMutation.isPending && installMutation.variables === selectedApp.name) ||
+              (updateMutation.isPending && updateMutation.variables === selectedApp.name) ||
+              (deleteMutation.isPending && deleteMutation.variables === selectedApp.name)}
           />
         )
       })()}

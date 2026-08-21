@@ -51,6 +51,20 @@ pub async fn run_worker() -> anyhow::Result<()> {
     if let Err(e) = chart_sync.sync().await {
         tracing::warn!("Initial worker chart sync failed: {}", e);
     }
+    tokio::spawn({
+        let chart_sync = chart_sync.clone();
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    CONFIG.charts.sync_interval,
+                ))
+                .await;
+                if let Err(e) = chart_sync.sync().await {
+                    tracing::warn!("Periodic worker chart sync failed: {}", e);
+                }
+            }
+        }
+    });
     let conn = init_database(&k8s_client).await?;
     let domain_reconciler = Arc::new(DomainReconciler::new(conn.clone(), k8s_client.clone()));
     let manager = Arc::new(AppManager::new(conn, k8s_client, catalog));

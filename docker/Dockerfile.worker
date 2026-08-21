@@ -15,9 +15,9 @@ COPY code/api ./code/api
 COPY code/worker ./code/worker
 
 WORKDIR /app/code/worker
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/code/worker/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=worker-target,target=/app/code/worker/target,sharing=locked \
     PROFILE_DIR=$(if [ "$PROFILE" = "release" ]; then echo "release"; else echo "$PROFILE"; fi) && \
     cargo build --profile "${PROFILE}" && \
     cp "target/${PROFILE_DIR}/kubarr-worker" /kubarr-worker

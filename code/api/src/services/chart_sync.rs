@@ -10,10 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde::Deserialize;
 
 use crate::config::CONFIG;
+use crate::models::app_state;
 use crate::state::SharedCatalog;
 
 /// GitHub Contents API entry
@@ -22,6 +23,17 @@ struct GitHubContent {
     name: String,
     #[serde(rename = "type")]
     content_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DiscoveredChart {
+    name: String,
+    version: String,
+}
+
+#[derive(Deserialize)]
+struct ChartMetadata {
+    version: String,
 }
 
 /// Shared chart sync service used by both the scheduler and the on-demand endpoint.
@@ -50,10 +62,34 @@ impl ChartSyncService {
         *self.last_synced.read().await
     }
 
+    pub async fn refresh_available_chart_versions(
+        &self,
+        db: &DatabaseConnection,
+    ) -> anyhow::Result<()> {
+        let catalog = self.catalog.read().await;
+        let now = chrono::Utc::now();
+
+        for state in app_state::Entity::find().all(db).await? {
+            let available = catalog.chart_version(&state.app_name);
+            let update_available = matches!(
+                (&state.installed_chart_version, &available),
+                (Some(installed), Some(available)) if installed != available
+            );
+            let mut active: app_state::ActiveModel = state.into();
+            active.available_chart_version = Set(available);
+            active.update_available = Set(update_available);
+            active.last_checked_at = Set(Some(now));
+            active.updated_at = Set(now);
+            active.update(db).await?;
+        }
+
+        Ok(())
+    }
+
     /// Discover chart names from the GitHub repo, pull each from OCI, and reload the catalog.
     pub async fn sync(self: &Arc<Self>) -> anyhow::Result<()> {
-        let chart_names = match self.discover_charts().await {
-            Ok(names) => names,
+        let charts = match self.discover_charts().await {
+            Ok(charts) => charts,
             Err(e) => {
                 tracing::warn!(
                     "Chart sync: GitHub Contents API discovery failed, trying archive fallback: {}",
@@ -63,23 +99,32 @@ impl ChartSyncService {
             }
         };
 
-        if chart_names.is_empty() {
+        if charts.is_empty() {
             tracing::warn!("Chart sync: no charts discovered from GitHub");
             return Ok(());
         }
 
         let mut synced = 0u32;
-        for name in &chart_names {
+        for chart in &charts {
             // Helm/tar/filesystem work is blocking; keep it off the async
             // workers without re-entering the runtime (a nested `block_on`
             // here panics the timer driver if the runtime shuts down while a
             // sync is in flight, taking the whole process down with it).
             let service = self.clone();
-            let chart = name.clone();
+            let chart = chart.clone();
+            let chart_name = chart.name.clone();
+            let chart_version = chart.version.clone();
             match tokio::task::spawn_blocking(move || service.pull_chart(&chart)).await {
                 Ok(Ok(())) => synced += 1,
-                Ok(Err(e)) => tracing::warn!("Chart sync: failed to pull {}: {}", name, e),
-                Err(e) => tracing::warn!("Chart sync: pull task for {} panicked: {}", name, e),
+                Ok(Err(e)) => tracing::warn!(
+                    "Chart sync: failed to pull {} {}: {}",
+                    chart_name,
+                    chart_version,
+                    e
+                ),
+                Err(e) => {
+                    tracing::warn!("Chart sync: pull task for {} panicked: {}", chart_name, e)
+                }
             }
         }
 
@@ -102,8 +147,8 @@ impl ChartSyncService {
     }
 
     /// Query the GitHub Contents API to discover which chart directories exist.
-    async fn discover_charts(&self) -> anyhow::Result<Vec<String>> {
-        let mut names = Vec::new();
+    async fn discover_charts(&self) -> anyhow::Result<Vec<DiscoveredChart>> {
+        let mut charts = Vec::new();
         let mut dirs = VecDeque::from([String::new()]);
 
         while let Some(dir) = dirs.pop_front() {
@@ -127,7 +172,22 @@ impl ChartSyncService {
 
             if has_chart {
                 if let Some(name) = dir.rsplit('/').next() {
-                    names.push(name.to_string());
+                    let url = format!(
+                        "https://raw.githubusercontent.com/{}/{}/{}/Chart.yaml",
+                        CONFIG.charts.repo, CONFIG.charts.git_ref, dir,
+                    );
+                    let content = self
+                        .client
+                        .get(url)
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .text()
+                        .await?;
+                    charts.push(DiscoveredChart {
+                        name: name.to_string(),
+                        version: chart_version_from_yaml(&content)?,
+                    });
                 }
                 continue;
             }
@@ -143,12 +203,12 @@ impl ChartSyncService {
             }
         }
 
-        tracing::debug!("Chart sync: discovered {} charts from GitHub", names.len());
-        Ok(names)
+        tracing::debug!("Chart sync: discovered {} charts from GitHub", charts.len());
+        Ok(charts)
     }
 
     /// Download the source archive and discover charts without using the GitHub API.
-    async fn discover_charts_from_archive(&self) -> anyhow::Result<Vec<String>> {
+    async fn discover_charts_from_archive(&self) -> anyhow::Result<Vec<DiscoveredChart>> {
         let url = format!(
             "https://github.com/{}/archive/{}.tar.gz",
             CONFIG.charts.repo, CONFIG.charts.git_ref,
@@ -169,53 +229,78 @@ impl ChartSyncService {
             .await?;
         fs::write(&archive_path, bytes)?;
 
-        let output = Command::new("tar").arg("-tzf").arg(&archive_path).output();
-        let _ = fs::remove_file(&archive_path);
-        let output = output?;
+        let result = (|| {
+            let output = Command::new("tar")
+                .arg("-tzf")
+                .arg(&archive_path)
+                .output()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("failed to list chart archive: {}", stderr.trim());
-        }
-
-        let mut names = Vec::new();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let path = line.trim_end_matches('/');
-            if !path.ends_with("/Chart.yaml") {
-                continue;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("failed to list chart archive: {}", stderr.trim());
             }
 
-            let mut parts = path.split('/').collect::<Vec<_>>();
-            if parts.len() < 3 {
-                continue;
-            }
+            let mut charts = Vec::new();
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let path = line.trim_end_matches('/');
+                if !path.ends_with("/Chart.yaml") {
+                    continue;
+                }
 
-            parts.pop();
-            if let Some(name) = parts.last() {
-                let name = (*name).to_string();
-                if !names.contains(&name) {
-                    names.push(name);
+                let mut parts = path.split('/').collect::<Vec<_>>();
+                if parts.len() < 3 {
+                    continue;
+                }
+
+                parts.pop();
+                if let Some(name) = parts.last() {
+                    let name = (*name).to_string();
+                    if charts
+                        .iter()
+                        .any(|chart: &DiscoveredChart| chart.name == name)
+                    {
+                        continue;
+                    }
+
+                    let chart_output = Command::new("tar")
+                        .args(["-xOzf"])
+                        .arg(&archive_path)
+                        .arg(path)
+                        .output()?;
+                    if !chart_output.status.success() {
+                        let stderr = String::from_utf8_lossy(&chart_output.stderr);
+                        anyhow::bail!("failed to read {}: {}", path, stderr.trim());
+                    }
+                    let content = String::from_utf8(chart_output.stdout)?;
+                    charts.push(DiscoveredChart {
+                        name,
+                        version: chart_version_from_yaml(&content)?,
+                    });
                 }
             }
-        }
+
+            Ok::<_, anyhow::Error>(charts)
+        })();
+        let _ = fs::remove_file(&archive_path);
+        let charts = result?;
 
         tracing::debug!(
             "Chart sync: discovered {} charts from GitHub archive",
-            names.len()
+            charts.len()
         );
-        Ok(names)
+        Ok(charts)
     }
 
     /// Pull a single chart from the OCI registry using `helm pull`.
-    fn pull_chart(&self, name: &str) -> anyhow::Result<()> {
-        let chart_ref = format!("{}/{}", CONFIG.charts.registry, name);
+    fn pull_chart(&self, chart: &DiscoveredChart) -> anyhow::Result<()> {
+        let chart_ref = format!("{}/{}", CONFIG.charts.registry, chart.name);
         let dest = CONFIG.charts.dir.to_str().unwrap_or("/app/charts");
         std::fs::create_dir_all(dest)?;
 
         // `helm pull --untar` refuses to overwrite an existing chart dir, so
         // untar into a scratch dir and swap it into place; without this every
         // sync after the first fails for already-synced charts.
-        let staging = std::path::Path::new(dest).join(format!(".pull-{}", name));
+        let staging = std::path::Path::new(dest).join(format!(".pull-{}", chart.name));
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)?;
 
@@ -223,6 +308,8 @@ impl ChartSyncService {
             .args([
                 "pull",
                 &chart_ref,
+                "--version",
+                &chart.version,
                 "--untar",
                 "--destination",
                 &staging.to_string_lossy(),
@@ -232,19 +319,29 @@ impl ChartSyncService {
             let output = output?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("helm pull failed for {}: {}", name, stderr.trim());
+                anyhow::bail!(
+                    "helm pull failed for {} {}: {}",
+                    chart.name,
+                    chart.version,
+                    stderr.trim()
+                );
             }
-            let final_dir = std::path::Path::new(dest).join(name);
+            let final_dir = std::path::Path::new(dest).join(&chart.name);
             let _ = std::fs::remove_dir_all(&final_dir);
-            std::fs::rename(staging.join(name), &final_dir)?;
+            std::fs::rename(staging.join(&chart.name), &final_dir)?;
             Ok(())
         })();
         let _ = std::fs::remove_dir_all(&staging);
         result?;
 
-        tracing::debug!("Chart sync: pulled {}", name);
+        tracing::debug!("Chart sync: pulled {} {}", chart.name, chart.version);
         Ok(())
     }
+}
+
+fn chart_version_from_yaml(content: &str) -> anyhow::Result<String> {
+    let metadata: ChartMetadata = serde_yaml::from_str(content)?;
+    Ok(metadata.version)
 }
 
 /// Periodic task wrapper that runs chart sync on an interval.
@@ -263,7 +360,8 @@ impl super::scheduler::PeriodicTask for ChartSyncTask {
     }
 
     async fn run(&self, _db: &DatabaseConnection) -> anyhow::Result<()> {
-        self.service.clone().sync_on_blocking_thread().await
+        self.service.clone().sync_on_blocking_thread().await?;
+        self.service.refresh_available_chart_versions(_db).await
     }
 }
 
@@ -371,5 +469,12 @@ mod tests {
             .collect();
 
         assert_eq!(names, vec!["visible"]);
+    }
+
+    #[test]
+    fn chart_version_preserves_build_metadata() {
+        let version = chart_version_from_yaml("name: openresty\nversion: 1.29.2+5.1\n")
+            .expect("chart metadata");
+        assert_eq!(version, "1.29.2+5.1");
     }
 }
