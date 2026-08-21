@@ -313,6 +313,35 @@ impl K8sClient {
         Ok(secret)
     }
 
+    /// Ensure a namespace exists before creating namespaced resources in it.
+    pub async fn ensure_namespace(&self, namespace: &str) -> Result<()> {
+        let namespaces: Api<Namespace> = Api::all(self.client.clone());
+
+        match namespaces.get(namespace).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(error)) if error.code == 404 => {
+                let ns = Namespace {
+                    metadata: ObjectMeta {
+                        name: Some(namespace.to_string()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+
+                match namespaces.create(&PostParams::default(), &ns).await {
+                    Ok(_) => Ok(()),
+                    Err(kube::Error::Api(error)) if error.code == 409 => Ok(()),
+                    Err(error) => Err(AppError::Internal(format!(
+                        "Failed to create namespace: {error}"
+                    ))),
+                }
+            }
+            Err(error) => Err(AppError::Internal(format!(
+                "Failed to get namespace: {error}"
+            ))),
+        }
+    }
+
     /// Ensure an NFS-backed PV and PVC exist for a media app.
     ///
     /// Creates (idempotently):
@@ -334,20 +363,7 @@ impl K8sClient {
         };
 
         // 1. Create namespace if it doesn't exist
-        let namespaces: Api<Namespace> = Api::all(self.client.clone());
-        if namespaces.get(app_name).await.is_err() {
-            let ns = Namespace {
-                metadata: ObjectMeta {
-                    name: Some(app_name.to_string()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            namespaces
-                .create(&PostParams::default(), &ns)
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to create namespace: {}", e)))?;
-        }
+        self.ensure_namespace(app_name).await?;
 
         // 2. Create PV if it doesn't exist
         let pvs: Api<PersistentVolume> = Api::all(self.client.clone());

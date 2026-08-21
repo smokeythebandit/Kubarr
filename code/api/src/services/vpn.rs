@@ -519,12 +519,7 @@ pub async fn create_vpn_secret_for_app(
     // Set VPN type
     secret_data.insert("VPN_TYPE".to_string(), provider.vpn_type.to_string());
 
-    // Set service provider if specified
-    if let Some(ref service_provider) = provider.service_provider {
-        if service_provider != "custom" {
-            secret_data.insert("VPN_SERVICE_PROVIDER".to_string(), service_provider.clone());
-        }
-    }
+    add_service_provider_secret_data(provider.service_provider.as_deref(), &mut secret_data);
 
     match provider.vpn_type {
         vpn_provider::VpnType::WireGuard => {
@@ -765,12 +760,7 @@ async fn create_test_vpn_secret(
     // Set VPN type
     secret_data.insert("VPN_TYPE".to_string(), provider.vpn_type.to_string());
 
-    // Set service provider if specified
-    if let Some(ref service_provider) = provider.service_provider {
-        if service_provider != "custom" {
-            secret_data.insert("VPN_SERVICE_PROVIDER".to_string(), service_provider.clone());
-        }
-    }
+    add_service_provider_secret_data(provider.service_provider.as_deref(), &mut secret_data);
 
     match provider.vpn_type {
         vpn_provider::VpnType::WireGuard => {
@@ -1096,6 +1086,20 @@ fn validate_credentials(
     Ok(())
 }
 
+fn add_service_provider_secret_data(
+    service_provider: Option<&str>,
+    data: &mut BTreeMap<String, String>,
+) {
+    // Gluetun requires an explicit provider value, including `custom` for
+    // manually supplied WireGuard endpoints.
+    if let Some(service_provider) = service_provider {
+        data.insert(
+            "VPN_SERVICE_PROVIDER".to_string(),
+            service_provider.to_string(),
+        );
+    }
+}
+
 fn build_wireguard_secret_data(
     credentials: &serde_json::Value,
     data: &mut BTreeMap<String, String>,
@@ -1249,6 +1253,27 @@ mod tests {
         let creds = json!({});
         let result = validate_credentials(&VpnType::OpenVpn, &creds);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_custom_service_provider_is_added_to_secret_data() {
+        let mut data = BTreeMap::new();
+
+        add_service_provider_secret_data(Some("custom"), &mut data);
+
+        assert_eq!(
+            data.get("VPN_SERVICE_PROVIDER").map(String::as_str),
+            Some("custom")
+        );
+    }
+
+    #[test]
+    fn test_missing_service_provider_is_not_added_to_secret_data() {
+        let mut data = BTreeMap::new();
+
+        add_service_provider_secret_data(None, &mut data);
+
+        assert!(!data.contains_key("VPN_SERVICE_PROVIDER"));
     }
 
     // -------------------------------------------------------------------------

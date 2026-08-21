@@ -145,6 +145,11 @@ impl<'a> DeploymentManager<'a> {
         let release = lifecycle.release_name.as_str();
         let release_namespace = lifecycle.release_namespace.as_str();
         let namespace = lifecycle.namespace.as_str();
+        let chart_version = self.catalog.chart_version(&request.app_name);
+
+        // VPN credentials are a namespaced Secret and must exist before Helm
+        // renders the release. Helm's --create-namespace happens too late.
+        self.k8s.ensure_namespace(namespace).await?;
 
         // Build helm upgrade --install command
         let mut helm_args = vec![
@@ -156,6 +161,9 @@ impl<'a> DeploymentManager<'a> {
             release_namespace,
             "--create-namespace",
         ];
+        if let Some(ref version) = chart_version {
+            helm_args.extend(["--version", version]);
+        }
         if request.reuse_values {
             helm_args.push("--reuse-values");
         }
