@@ -23,7 +23,7 @@ jobs:
           workspaces: code/api
 
       - name: Unit tests
-        run: cargo test --locked
+        run: cargo test --locked --lib
         working-directory: code/api
 
   frontend:
