@@ -55,10 +55,8 @@ pub async fn run_worker() -> anyhow::Result<()> {
         let chart_sync = chart_sync.clone();
         async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    CONFIG.charts.sync_interval,
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_secs(CONFIG.charts.sync_interval))
+                    .await;
                 if let Err(e) = chart_sync.sync().await {
                     tracing::warn!("Periodic worker chart sync failed: {}", e);
                 }
