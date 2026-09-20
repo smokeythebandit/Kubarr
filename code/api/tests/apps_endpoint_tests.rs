@@ -400,9 +400,11 @@ async fn test_get_apps_by_category_returns_array() {
 }
 
 #[tokio::test]
-async fn test_install_app_returns_500_without_k8s() {
-    let (app, cookie) = make_admin("admin_install", "admin_install@test.com").await;
-    let (status, _) = make_request(
+async fn test_install_app_queues_without_k8s() {
+    let apps = vec![make_app_config("sonarr", "media", false, false)];
+    let (app, cookie) =
+        make_admin_with_catalog("admin_install", "admin_install@test.com", apps).await;
+    let (status, body) = make_request(
         app,
         "POST",
         "/api/apps/install",
@@ -410,36 +412,37 @@ async fn test_install_app_returns_500_without_k8s() {
         Some(serde_json::json!({"app_name": "sonarr"})),
     )
     .await;
-    // K8s not available → INTERNAL_SERVER_ERROR
-    assert_eq!(
-        status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "install without K8s must return 500"
-    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let operation: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(operation["status"], "queued");
+    assert_eq!(operation["operation"], "install");
+    assert_eq!(operation["app_name"], "sonarr");
 }
 
 #[tokio::test]
-async fn test_delete_app_returns_500_without_k8s() {
-    let (app, cookie) = make_admin("admin_del", "admin_del@test.com").await;
-    let (status, _) = make_request(app, "DELETE", "/api/apps/sonarr", Some(&cookie), None).await;
-    // K8s not available → INTERNAL_SERVER_ERROR
-    assert_eq!(
-        status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "delete without K8s must return 500"
-    );
+async fn test_delete_app_queues_without_k8s() {
+    let apps = vec![make_app_config("sonarr", "media", false, false)];
+    let (app, cookie) = make_admin_with_catalog("admin_del", "admin_del@test.com", apps).await;
+    let (status, body) = make_request(app, "DELETE", "/api/apps/sonarr", Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let operation: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(operation["status"], "queued");
+    assert_eq!(operation["operation"], "delete");
+    assert_eq!(operation["app_name"], "sonarr");
 }
 
 #[tokio::test]
-async fn test_restart_app_returns_500_without_k8s() {
-    let (app, cookie) = make_admin("admin_restart", "admin_restart@test.com").await;
-    let (status, _) =
+async fn test_restart_app_queues_without_k8s() {
+    let apps = vec![make_app_config("sonarr", "media", false, false)];
+    let (app, cookie) =
+        make_admin_with_catalog("admin_restart", "admin_restart@test.com", apps).await;
+    let (status, body) =
         make_request(app, "POST", "/api/apps/sonarr/restart", Some(&cookie), None).await;
-    assert_eq!(
-        status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "restart without K8s must return 500"
-    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let operation: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(operation["status"], "queued");
+    assert_eq!(operation["operation"], "restart");
+    assert_eq!(operation["app_name"], "sonarr");
 }
 
 #[tokio::test]

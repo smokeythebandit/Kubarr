@@ -42,6 +42,7 @@ export default defineConfig({
           { text: 'Docker', link: '/docker' },
           { text: 'Configuration', link: '/configuration' },
           { text: 'Development', link: '/development' },
+          { text: 'Testing', link: '/testing' },
           { text: 'Versioning', link: '/versioning' }
         ]
       },

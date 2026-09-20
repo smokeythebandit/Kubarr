@@ -16,6 +16,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:browser": "playwright test --config playwright.browser.config.ts",
+    "test:typecheck": "tsc --project tsconfig.tests.json",
     "prepare": "husky"
   },
   "dependencies": {

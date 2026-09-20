@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "vitest/globals", "@testing-library/jest-dom"],
+    "noUnusedLocals": false
+  },
+  "include": ["tests/**/*.ts", "playwright*.config.ts", "vite.browser.config.ts", "src/vite-env.d.ts"],
+  "exclude": [],
+  "references": []
+}

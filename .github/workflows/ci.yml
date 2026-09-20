@@ -19,21 +19,29 @@ jobs:
   check:
     uses: ./.github/workflows/check.yml
 
+  fast-test:
+    uses: ./.github/workflows/fast-test.yml
+
   build:
-    needs: check
+    needs: [check, fast-test]
     uses: ./.github/workflows/build.yml
     with:
       image-tag: ci-${{ github.sha }}
 
   test:
-    needs: [check, build]
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/test.yml
     with:
       image-tag: ci-${{ github.sha }}
 
   publish:
-    needs: test
-    if: github.event_name != 'pull_request'
+    needs: [build, test]
+    if: >-
+      !cancelled() && github.event_name != 'pull_request' &&
+      needs.build.result == 'success' &&
+      (needs.test.result == 'success' ||
+       (!startsWith(github.ref, 'refs/tags/v') && needs.test.result == 'skipped'))
     uses: ./.github/workflows/publish.yml
     with:
       image-tag: ci-${{ github.sha }}

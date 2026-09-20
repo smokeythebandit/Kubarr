@@ -4,9 +4,9 @@ Get Kubarr running on your cluster in a few minutes.
 
 ## Prerequisites
 
-- A Kubernetes cluster (k3s, K3d, Kind, EKS, GKE, AKS — anything 1.20+)
+- A Kubernetes cluster (k3s, K3d, Kind, EKS, GKE, AKS), version 1.34-1.37 for the bundled Helm 4.3
 - `kubectl` configured to talk to your cluster
-- `helm` 3.0+
+- `helm` 4 (CI and runtime images use 4.3.0)
 
 ## Install Kubarr
 

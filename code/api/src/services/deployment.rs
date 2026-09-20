@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::process::Command;
 
 use chrono::{DateTime, Utc};
@@ -99,7 +100,8 @@ impl<'a> DeploymentManager<'a> {
         let lifecycle = lifecycle_for_app_name(app_name);
         let output = Command::new("helm")
             .args([
-                "status",
+                "get",
+                "metadata",
                 lifecycle.release_name.as_str(),
                 "-n",
                 lifecycle.release_namespace.as_str(),
@@ -111,23 +113,7 @@ impl<'a> DeploymentManager<'a> {
         if !output.status.success() {
             return None;
         }
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-        if let Some(version) = value
-            .get("chart")
-            .and_then(|chart| chart.as_str())
-            .and_then(|chart| {
-                chart
-                    .rsplit_once('-')
-                    .map(|(_, version)| normalize_chart_version(version))
-            })
-        {
-            return Some(version);
-        }
-
-        value
-            .get("manifest")
-            .and_then(|manifest| manifest.as_str())
-            .and_then(|manifest| chart_version_from_manifest(manifest, app_name))
+        chart_version_from_metadata(&output.stdout)
     }
 
     /// Deploy an application using Helm
@@ -135,6 +121,16 @@ impl<'a> DeploymentManager<'a> {
         &self,
         request: &DeploymentRequest,
         storage_config: Option<&PersistedStorageConfig>,
+    ) -> Result<DeploymentStatus> {
+        self.deploy_app_with_command(request, storage_config, |args| self.run_helm_command(args))
+            .await
+    }
+
+    async fn deploy_app_with_command(
+        &self,
+        request: &DeploymentRequest,
+        storage_config: Option<&PersistedStorageConfig>,
+        run_helm: impl FnOnce(&[&str]) -> Result<String>,
     ) -> Result<DeploymentStatus> {
         // Get app config from catalog
         let app_config = self.catalog.get_app(&request.app_name).ok_or_else(|| {
@@ -162,10 +158,11 @@ impl<'a> DeploymentManager<'a> {
         // renders the release. Helm's --create-namespace happens too late.
         self.k8s.ensure_namespace(namespace).await?;
 
-        // Build helm upgrade --install command
+        // Keep Helm 3's client-side apply and readiness checks explicit under Helm 4.
         let mut helm_args = vec![
             "upgrade",
             "--install",
+            "--server-side=false",
             release,
             &chart_ref,
             "-n",
@@ -179,12 +176,14 @@ impl<'a> DeploymentManager<'a> {
             helm_args.push("--reuse-values");
         }
         if request.wait {
-            helm_args.extend(["--wait", "--atomic", "--timeout", "10m"]);
+            helm_args.extend(["--wait=legacy", "--rollback-on-failure", "--timeout", "10m"]);
         }
 
         // Collect --set arguments
-        let mut set_args: Vec<String> = Vec::new();
-        let mut set_string_args: Vec<String> = Vec::new();
+        // The API creates the namespace above, so the chart must not render and
+        // make Helm adopt that cluster-scoped resource during upgrades.
+        let mut set_args: Vec<String> = namespace_helm_values(namespace).into();
+        let mut vpn_values_file = None;
 
         // Add storage configuration using the shared NFS-backed media PVC.
         if let Some(storage) = storage_config {
@@ -231,13 +230,18 @@ impl<'a> DeploymentManager<'a> {
                         if vpn_config.port_forwarding {
                             set_args.push("vpn.portForwarding.enabled=true".to_string());
                         }
-                        // Helm's --set/--set-string parser splits values on
-                        // unescaped commas, so the comma-separated CIDR list
-                        // must have them escaped to survive as one value.
-                        set_string_args.push(format!(
-                            "vpn.firewallOutboundSubnets={}",
-                            vpn_config.firewall_outbound_subnets.replace(',', "\\,")
-                        ));
+                        // Avoid Helm's comma-sensitive --set parser for the CIDR list.
+                        let path = std::env::temp_dir()
+                            .join(format!("kubarr-vpn-values-{}.yaml", uuid::Uuid::new_v4()));
+                        let values = serde_yaml::to_string(&serde_json::json!({
+                            "vpn": {
+                                "firewallOutboundSubnets": vpn_config.firewall_outbound_subnets
+                            }
+                        }))?;
+                        fs::write(&path, values).map_err(|error| {
+                            AppError::Internal(format!("Failed to write Helm values file: {error}"))
+                        })?;
+                        vpn_values_file = Some(path);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -261,15 +265,20 @@ impl<'a> DeploymentManager<'a> {
             helm_args.push(arg);
         }
 
-        // Add --set-string arguments (for values containing special chars like commas/slashes)
-        for arg in &set_string_args {
-            helm_args.push("--set-string");
-            helm_args.push(arg);
+        let vpn_values_path = vpn_values_file
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        if let Some(path) = vpn_values_path.as_deref() {
+            helm_args.extend(["--values", path]);
         }
 
         // Run helm command
         let args_str: Vec<&str> = helm_args.iter().map(|s| s.as_ref()).collect();
-        self.run_helm_command(&args_str)?;
+        let result = run_helm(&args_str);
+        if let Some(path) = vpn_values_file {
+            let _ = fs::remove_file(path);
+        }
+        result?;
 
         Ok(DeploymentStatus {
             app_name: request.app_name.clone(),
@@ -635,18 +644,21 @@ fn single_workload_health(kind: &str, name: &str, healthy: bool) -> serde_json::
     })
 }
 
-fn chart_version_from_manifest(manifest: &str, app_name: &str) -> Option<String> {
-    let prefix = "helm.sh/chart:";
-    manifest.lines().find_map(|line| {
-        let chart = line.trim().strip_prefix(prefix)?.trim();
-        let expected = format!("{}-", app_name);
-        chart.strip_prefix(&expected).map(normalize_chart_version)
-    })
+fn chart_version_from_metadata(metadata: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(metadata).ok()?;
+    value.get("version")?.as_str().map(str::to_owned)
 }
 
-fn normalize_chart_version(version: &str) -> String {
-    version.replace('_', "+")
+fn namespace_helm_values(namespace: &str) -> [String; 2] {
+    [
+        format!("namespace.name={namespace}"),
+        "namespace.create=false".to_string(),
+    ]
 }
+
+#[cfg(test)]
+#[path = "deployment_tests.rs"]
+mod deployment_tests;
 
 #[cfg(test)]
 mod tests {
@@ -764,7 +776,43 @@ mod tests {
     }
 
     #[test]
-    fn chart_version_normalizes_oci_build_metadata() {
-        assert_eq!(normalize_chart_version("1.29.2_5.1"), "1.29.2+5.1");
+    fn chart_version_from_metadata_preserves_semver() {
+        for version in ["1.29.2", "1.29.2-rc.1", "1.29.2+5.1", "1.29.2-rc.1+5.1"] {
+            let metadata = serde_json::to_vec(&serde_json::json!({
+                "chart": "my-hyphenated-chart",
+                "version": version,
+                "appVersion": "9.0.0",
+                "revision": 7
+            }))
+            .unwrap();
+            assert_eq!(
+                chart_version_from_metadata(&metadata).as_deref(),
+                Some(version)
+            );
+        }
+    }
+
+    #[test]
+    fn chart_version_from_metadata_rejects_missing_or_invalid_version() {
+        for metadata in [
+            "not json",
+            "{}",
+            r#"{"version": null}"#,
+            r#"{"version": 3}"#,
+            r#"{"chart": "radarr-1.29.2", "manifest": "helm.sh/chart: radarr-1.29.2"}"#,
+        ] {
+            assert_eq!(chart_version_from_metadata(metadata.as_bytes()), None);
+        }
+    }
+
+    #[test]
+    fn namespace_values_disable_chart_managed_namespaces() {
+        assert_eq!(
+            namespace_helm_values("victoriametrics"),
+            [
+                "namespace.name=victoriametrics".to_string(),
+                "namespace.create=false".to_string(),
+            ]
+        );
     }
 }

@@ -22,6 +22,11 @@ pub struct K8sClient {
 }
 
 impl K8sClient {
+    #[cfg(test)]
+    pub(crate) fn from_client(client: Client) -> Self {
+        Self { client }
+    }
+
     /// Create a new Kubernetes client
     pub async fn new() -> Result<Self> {
         let client = if CONFIG.kubernetes.in_cluster {
@@ -329,12 +334,31 @@ impl K8sClient {
                 };
 
                 match namespaces.create(&PostParams::default(), &ns).await {
-                    Ok(_) => Ok(()),
-                    Err(kube::Error::Api(error)) if error.code == 409 => Ok(()),
-                    Err(error) => Err(AppError::Internal(format!(
-                        "Failed to create namespace: {error}"
-                    ))),
+                    Ok(_) => {}
+                    Err(kube::Error::Api(error)) if error.code == 409 => {}
+                    Err(error) => {
+                        return Err(AppError::Internal(format!(
+                            "Failed to create namespace: {error}"
+                        )))
+                    }
+                };
+
+                for _ in 0..50 {
+                    match namespaces.get(namespace).await {
+                        Ok(_) => return Ok(()),
+                        Err(kube::Error::Api(error)) if error.code == 404 => {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                        Err(error) => {
+                            return Err(AppError::Internal(format!(
+                                "Failed to verify namespace: {error}"
+                            )))
+                        }
+                    }
                 }
+                Err(AppError::Internal(format!(
+                    "Namespace '{namespace}' was not visible after creation"
+                )))
             }
             Err(error) => Err(AppError::Internal(format!(
                 "Failed to get namespace: {error}"
@@ -572,6 +596,10 @@ fn format_memory(bytes: i64) -> String {
         format!("{:.2}Gi", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
+
+#[cfg(test)]
+#[path = "k8s_namespace_tests.rs"]
+mod namespace_tests;
 
 #[cfg(test)]
 mod tests {

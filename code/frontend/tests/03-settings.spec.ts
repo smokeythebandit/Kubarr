@@ -35,7 +35,7 @@ test.describe('Settings Page', () => {
       await expect(page.locator('text=NETWORKING').first()).toBeVisible();
       await expect(page.locator('text=VPN').first()).toBeVisible();
       await expect(page.locator('text=Dynamic DNS').first()).toBeVisible();
-      await expect(page.locator('nav button:has-text("Cloudflare Tunnel")')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Domains', exact: true })).toBeVisible();
     });
 
     test('can navigate between sections', async ({ page }) => {
@@ -319,6 +319,7 @@ test.describe('Settings Page', () => {
       { nav: 'Notifications', urlParam: 'notifications' },
       { nav: 'Audit Logs', urlParam: 'audit' },
       { nav: 'VPN', urlParam: 'vpn' },
+      { nav: 'Domains', urlParam: 'domains' },
       { nav: 'Dynamic DNS', urlParam: 'ddns' },
       { nav: "Let's Encrypt", urlParam: 'letsencrypt' },
       { nav: 'General', urlParam: 'general' },

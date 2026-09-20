@@ -1,8 +1,8 @@
 # Docker
 
-Kubarr ships two container images, one for the Rust backend and one for the frontend SPA. Both Dockerfiles live in `docker/` and are built from the repository root.
+Kubarr ships container images for the Rust API, worker, frontend SPA, and DNS webhook. Their Dockerfiles live in `docker/` and are built from the repository root.
 
-## Backend (`docker/Dockerfile.backend`)
+## Backend (`docker/Dockerfile.api`)
 
 A multi-stage build that produces a statically-linked Rust binary on Alpine Linux.
 
@@ -10,10 +10,8 @@ A multi-stage build that produces a statically-linked Rust binary on Alpine Linu
 
 | Stage | Base | Purpose |
 |---|---|---|
-| `rust-builder` | `rust:1.92-alpine` | Installs musl/OpenSSL and compiles Rust dependencies (cached separately from application code) |
-| `test` | extends `rust-builder` | Adds clippy and rustfmt, compiles in dev profile for CI lint and test jobs |
-| `builder` | extends `rust-builder` | Builds the final `kubarr` binary with the chosen profile |
-| `asset-builder` | `alpine:3.23` | Downloads the Helm CLI |
+| `builder` | `rust:1.92-alpine` | Installs musl/OpenSSL and builds `kubarr-api`, caching dependencies separately from application code |
+| `helm-source` | `alpine/helm:4.3.0` | Supplies the Helm CLI for the target image architecture |
 | *(final)* | `alpine:3.23` | Copies the binary, Helm, and CA certs into a minimal runtime image |
 
 ### Build args
@@ -21,7 +19,6 @@ A multi-stage build that produces a statically-linked Rust binary on Alpine Linu
 | Arg | Default | Description |
 |---|---|---|
 | `PROFILE` | `release` | Cargo build profile. Use `dev-release` for faster builds during development |
-| `TARGETARCH` | `amd64` | Architecture for the Helm download |
 | `COMMIT_HASH` | `unknown` | Git commit SHA baked into the image |
 | `BUILD_TIME` | `unknown` | Build timestamp baked into the image |
 
@@ -32,11 +29,15 @@ The build uses BuildKit cache mounts for the Cargo registry, git checkouts, and 
 ### Usage
 
 ```bash
-docker build -f docker/Dockerfile.backend -t kubarr-backend:latest \
+docker build -f docker/Dockerfile.api -t kubarr-backend:latest \
   --build-arg PROFILE=dev-release .
 ```
 
 The final image exposes port **8000**.
+
+The worker (`docker/Dockerfile.worker`) uses the same Helm 4.3.0 source image.
+Keep both Dockerfiles aligned with the Helm pins in application E2E and the
+charts repository's validation/publishing workflows.
 
 ---
 

@@ -1,4 +1,4 @@
-name: Test
+name: Release Tests
 
 on:
   workflow_call:
@@ -11,44 +11,6 @@ permissions:
   contents: read
 
 jobs:
-  backend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
-        with:
-          workspaces: code/api
-
-      - name: Unit tests
-        run: cargo test --locked --lib
-        working-directory: code/api
-
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
-        with:
-          version: 10.34.3
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
-        with:
-          node-version: '26'
-          cache: pnpm
-          cache-dependency-path: code/frontend/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile --ignore-scripts
-        working-directory: code/frontend
-
-      - name: Unit tests
-        run: pnpm test
-        working-directory: code/frontend
-
-      - name: Build
-        run: pnpm run build
-        working-directory: code/frontend
-
   coverage:
     name: backend / coverage
     if: startsWith(github.ref, 'refs/tags/v')
@@ -64,7 +26,7 @@ jobs:
       - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912
         with:
           tool: cargo-tarpaulin
-      - run: cargo tarpaulin --no-fail-fast --out Xml --output-dir coverage
+      - run: cargo tarpaulin --lib --no-fail-fast --out Xml --output-dir coverage
         working-directory: code/api
         continue-on-error: true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -80,23 +42,44 @@ jobs:
     timeout-minutes: 120
     env:
       KIND_CLUSTER: kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      KUBECONFIG: /tmp/kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}.kubeconfig
+      CHARTS_REV: ae335477cd0a12f649e8b171d5464dcb2a3b7a5f
       TAG: ${{ inputs.image-tag }}
+      TEST_USERNAME: admin
+      TEST_PASSWORD: adminadmin
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
+      - name: Checkout pinned charts
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: smokeythebandit/kubarr-charts
+          ref: ${{ env.CHARTS_REV }}
+          path: charts
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: code/cli
+      - name: Build installer
+        run: cargo build --locked --manifest-path code/cli/Cargo.toml
 
       - name: Install tools (kind, kubectl, helm)
         run: |
           mkdir -p "$HOME/.local/bin"
           # kind
-          curl -fsSLo "$HOME/.local/bin/kind" https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          curl -fsSLo "$HOME/.local/bin/kind" https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
           chmod +x "$HOME/.local/bin/kind"
-          # kubectl — use Google storage (dl.k8s.io mirror) for reliability
+          # Keep kubectl and the Kind node within Helm's supported Kubernetes range.
           curl -fsSLo "$HOME/.local/bin/kubectl" \
-            "https://storage.googleapis.com/kubernetes-release/release/v1.29.2/bin/linux/amd64/kubectl"
+            "https://dl.k8s.io/release/v1.35.8/bin/linux/amd64/kubectl"
           chmod +x "$HOME/.local/bin/kubectl"
           # helm — extract from Docker image to avoid Fastly CDN SSL issues
-          docker create --name helm-extract alpine/helm:3.21.0
+          docker create --name helm-extract alpine/helm:4.3.0
           docker cp helm-extract:/usr/bin/helm "$HOME/.local/bin/helm"
           docker rm helm-extract
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -143,88 +126,28 @@ jobs:
         with:
           name: kubarr-frontend
 
+      - name: Download worker image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: kubarr-worker
+
       - name: Load images
         run: |
           gunzip -c kubarr-backend.tar.gz | docker load
           gunzip -c kubarr-frontend.tar.gz | docker load
-
-      - name: Cleanup stale Kind resources
-        run: |
-          for cluster in $(kind get clusters 2>/dev/null); do
-            if [[ "$cluster" == kubarr-e2e-* && "$cluster" != "$KIND_CLUSTER" ]]; then
-              echo "Removing stale cluster: $cluster"
-              kind delete cluster --name "$cluster" 2>/dev/null || true
-            fi
-          done
-          docker rm -f kind-registry 2>/dev/null || true
-          docker container prune -f 2>/dev/null || true
-          pkill -f "kubectl port-forward" 2>/dev/null || true
-
-      - name: Start local registry
-        run: |
-          docker run -d -p 5001:5000 --name kind-registry --restart=always registry:2
-          # Wait for registry to be ready
-          for _ in $(seq 1 20); do
-            if curl -sf http://localhost:5001/v2/ 2>/dev/null; then
-              echo "Registry is ready"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "ERROR: Registry did not become ready"
-          exit 1
-
-      - name: Cache third-party images in local registry
-        run: |
-          # Pre-pull bootstrap component images and push to the local registry so
-          # Kind nodes (inside DinD) don't have to fetch them from DockerHub at
-          # deploy time. This avoids rate-limit-induced startup delays that cause
-          # the bootstrap timeout to expire (victoriametrics image is ~100MB and
-          # takes 4-5 min to pull cold from a rate-limited IP).
-          #
-          # Images are pushed with paths matching the DockerHub mirror namespace:
-          #   - Official library images: localhost:5001/library/<image>:<tag>
-          #   - Other images:            localhost:5001/<org>/<image>:<tag>
-          pull_and_cache() {
-            local image="$1"
-            local dest="$2"
-            echo "Pulling ${image}..."
-            docker pull --platform linux/amd64 "${image}"
-            echo "Pushing to local registry as ${dest}..."
-            docker tag "${image}" "localhost:5001/${dest}"
-            docker push "localhost:5001/${dest}"
-          }
-          pull_and_cache postgres:16-alpine                                   library/postgres:16-alpine
-          pull_and_cache victoriametrics/victoria-metrics:v1.96.0             victoriametrics/victoria-metrics:v1.96.0
-          pull_and_cache victoriametrics/victoria-logs:v1.3.2-victorialogs    victoriametrics/victoria-logs:v1.3.2-victorialogs
-          pull_and_cache fluent/fluent-bit:3.2.2                              fluent/fluent-bit:3.2.2
+          gunzip -c kubarr-worker.tar.gz | docker load
 
       - name: Create Kind cluster
         run: |
-          # Use native snapshotter — overlayfs is not available inside DinD.
-          # Mirror localhost:5001 to the local registry for kubarr images.
-          # Mirror docker.io to the local registry (with DockerHub fallback) so
-          # bootstrap component pods (postgres, victoriametrics, etc.) are served
-          # instantly from the local cache instead of pulling from DockerHub.
-          cat > /tmp/kind-config.yaml << 'EOF'
-          kind: Cluster
-          apiVersion: kind.x-k8s.io/v1alpha4
-          containerdConfigPatches:
-            - |-
-              [plugins."io.containerd.grpc.v1.cri".containerd]
-                snapshotter = "native"
-              [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5001"]
-                endpoint = ["http://kind-registry:5000"]
-              [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
-                endpoint = ["http://kind-registry:5000", "https://registry-1.docker.io"]
-          EOF
+          # Managed NFS runs inside Kind but uses the hosted runner's kernel.
+          sudo modprobe nfs
+          sudo modprobe nfsd
           for attempt in 1 2 3; do
             echo "=== Kind cluster creation attempt ${attempt}/3 ==="
-            if kind create cluster --name "$KIND_CLUSTER" --image kindest/node:v1.29.2 \
-                --config /tmp/kind-config.yaml --wait 180s 2>&1; then
+            if kind create cluster --name "$KIND_CLUSTER" \
+                --image kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0 \
+                --wait 180s 2>&1; then
               echo "Cluster created successfully on attempt ${attempt}"
-              # Connect registry to Kind network so nodes can resolve kind-registry hostname
-              docker network connect "kind" kind-registry 2>/dev/null || true
               kubectl cluster-info --context "kind-${KIND_CLUSTER}"
               exit 0
             fi
@@ -238,71 +161,106 @@ jobs:
           echo "ERROR: Failed to create Kind cluster after 3 attempts"
           exit 1
 
-      - name: Push kubarr images to local registry
+      - name: Load images into Kind
         run: |
-          docker tag "kubarr-backend:${TAG}" "localhost:5001/kubarr-backend:${TAG}"
-          docker push "localhost:5001/kubarr-backend:${TAG}"
-          docker tag "kubarr-frontend:${TAG}" "localhost:5001/kubarr-frontend:${TAG}"
-          docker push "localhost:5001/kubarr-frontend:${TAG}"
+          kind load docker-image --name "$KIND_CLUSTER" \
+            "kubarr-backend:${TAG}" "kubarr-frontend:${TAG}" "kubarr-worker:${TAG}"
+          # Match the pinned charts; pre-load dependencies before Helm's wait timeout starts.
+          for image in \
+            itsthenetwork/nfs-server-alpine:12 \
+            postgres:16-alpine \
+            fluent/fluent-bit:5.1.0 \
+            victoriametrics/victoria-metrics:v1.149.0 \
+            victoriametrics/victoria-logs:v1.52.0 \
+            openresty/openresty:1.27.1.2-alpine; do
+            docker pull --platform linux/amd64 "$image"
+            kind load docker-image --name "$KIND_CLUSTER" "$image"
+          done
 
-      - name: Clone charts
-        run: git clone --depth 1 https://github.com/smokeythebandit/kubarr-charts.git charts
+      - name: Prepare installer charts
+        run: |
+          # Build local kubarr-common dependencies in place, preserving file:// paths.
+          # The CLI expects a flat chart directory, unlike the categorized source tree.
+          mkdir -p "$RUNNER_TEMP/installer-charts"
+          for chart in system/managed-nfs system/postgresql \
+            monitoring/fluent-bit monitoring/victorialogs monitoring/victoriametrics \
+            system/kubarr-backend system/kubarr-frontend system/openresty system/kubarr-worker; do
+            helm dependency build --skip-refresh "charts/$chart"
+            ln -s "$GITHUB_WORKSPACE/charts/$chart" "$RUNNER_TEMP/installer-charts/${chart##*/}"
+          done
 
       - name: Deploy Kubarr
+        env:
+          KUBARR_CHARTS_DIR: ${{ runner.temp }}/installer-charts
+          KUBARR_BACKEND_IMAGE: kubarr-backend
+          KUBARR_FRONTEND_IMAGE: kubarr-frontend
+          KUBARR_WORKER_IMAGE: kubarr-worker
+          KUBARR_IMAGE_TAG: ${{ inputs.image-tag }}
+          KUBARR_IMAGE_PULL_POLICY: Never
         run: |
-          openssl genrsa -out "/tmp/jwt-private-${KIND_CLUSTER}.pem" 2048
-          openssl rsa -in "/tmp/jwt-private-${KIND_CLUSTER}.pem" -pubout -out "/tmp/jwt-public-${KIND_CLUSTER}.pem"
-
-          kubectl create namespace kubarr --dry-run=client -o yaml | kubectl apply -f -
-
-          kubectl create secret generic kubarr-jwt-keys \
-            --from-file=private.pem="/tmp/jwt-private-${KIND_CLUSTER}.pem" \
-            --from-file=public.pem="/tmp/jwt-public-${KIND_CLUSTER}.pem" \
-            -n kubarr --dry-run=client -o yaml | kubectl apply -f -
-
-          helm upgrade --install kubarr ./charts/kubarr \
-            --namespace kubarr \
-            --set namespace.create=false \
-            --set backend.image.repository=localhost:5001/kubarr-backend \
-            --set "backend.image.tag=${TAG}" \
-            --set backend.image.pullPolicy=IfNotPresent \
-            --set frontend.image.repository=localhost:5001/kubarr-frontend \
-            --set "frontend.image.tag=${TAG}" \
-            --set frontend.image.pullPolicy=IfNotPresent \
-            --set oauth2.enabled=true \
-            --set auth.jwt.existingSecret=kubarr-jwt-keys \
-            --set networkPolicy.enabled=false \
-            --set backend.livenessProbe.initialDelaySeconds=30 \
-            --set backend.livenessProbe.timeoutSeconds=5 \
-            --set backend.livenessProbe.failureThreshold=6 \
-            --set backend.readinessProbe.initialDelaySeconds=5 \
-            --set backend.readinessProbe.periodSeconds=5 \
-            --set backend.readinessProbe.failureThreshold=30 \
-            --timeout=5m
+          # Bootstrap installs dependencies and seeds storage/admin records after migrations.
+          # auth.setup.ts logs in to an existing account; it does not create one.
+          code/cli/target/debug/kubarr bootstrap \
+            --cluster-mode existing \
+            --storage-mode managed-nfs --storage-size 5Gi --storage-class standard \
+            --admin-username "$TEST_USERNAME" --admin-email admin@example.com \
+            --admin-password "$TEST_PASSWORD"
+          # Restart with the same catalog revision before tests can install apps.
+          for component in kubarr-backend kubarr-worker; do
+            kubectl set env "deployment/$component" -n "$component" "KUBARR_CHARTS_GIT_REF=$CHARTS_REV"
+          done
 
       - name: Wait for pods
         run: |
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kubarr-backend -n kubarr --timeout=300s
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kubarr-frontend -n kubarr --timeout=120s
-          kubectl get pods -n kubarr
+          for component in kubarr-backend kubarr-frontend kubarr-worker; do
+            kubectl rollout status "deployment/$component" -n "$component" --timeout=300s
+          done
+          kubectl rollout status deployment/kubarr-gateway -n openresty --timeout=300s
+          kubectl get pods -A
 
       - name: Port-forward
         run: |
           # Watchdog loop: restart port-forward automatically if it dies mid-test
-          (while true; do
-            kubectl port-forward --address 127.0.0.1 svc/kubarr-backend 18000:8000 -n kubarr
-            echo "[watchdog] Port-forward exited, restarting in 2s..."
-            sleep 2
-          done) &
+          (
+            trap 'kill "${forward_pid:-}" 2>/dev/null || true; exit 0' TERM
+            while true; do
+              kubectl port-forward --address 127.0.0.1 svc/kubarr-gateway 18000:8080 -n openresty &
+              forward_pid=$!
+              wait "$forward_pid" || true
+              echo "[watchdog] Port-forward exited, restarting in 2s..."
+              sleep 2
+            done
+          ) &
+          echo "$!" > "$RUNNER_TEMP/kubarr-port-forward.pid"
 
           for _ in $(seq 1 60); do
-            if curl -s http://localhost:18000/api/system/health 2>/dev/null | grep -q "ok"; then
-              echo "Backend is healthy"
+            if curl -fsS --max-time 5 http://localhost:18000/api/system/health | grep -q '"ok"' &&
+                curl -fsS --max-time 5 http://localhost:18000/login | grep -q '<html'; then
+              echo "Gateway serves both the API and frontend"
               exit 0
             fi
             sleep 2
           done
-          echo "ERROR: Backend did not become healthy"
+          echo "ERROR: Gateway did not become ready"
+          exit 1
+
+      - name: Wait for app catalog
+        run: |
+          # Health does not wait for the asynchronous catalog sync used by 06-apps.spec.ts.
+          cookie_jar="$RUNNER_TEMP/kubarr-e2e-cookies"
+          trap 'rm -f "$cookie_jar"' EXIT
+          jq -n --arg username "$TEST_USERNAME" --arg password "$TEST_PASSWORD" \
+            '{username: $username, password: $password}' |
+            curl -fsS --max-time 30 -c "$cookie_jar" -H 'Content-Type: application/json' \
+              --data-binary @- http://localhost:18000/auth/login > /dev/null
+          for _ in $(seq 1 120); do
+            if curl -fsS --max-time 10 -b "$cookie_jar" http://localhost:18000/api/apps/catalog |
+                jq -e 'map(.name) | ["sonarr", "radarr", "jellyfin"] - . | length == 0' > /dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "ERROR: Required apps did not appear in the catalog"
           exit 1
 
       - name: Playwright
@@ -331,17 +289,19 @@ jobs:
           kind get clusters 2>/dev/null || true
           echo "=== Pod status ==="
           kubectl get pods -A -o wide 2>/dev/null || true
-          echo "=== Backend logs ==="
-          kubectl logs -l app.kubernetes.io/name=kubarr-backend -n kubarr --tail=100 2>/dev/null || true
-          echo "=== Frontend logs ==="
-          kubectl logs -l app.kubernetes.io/name=kubarr-frontend -n kubarr --tail=50 2>/dev/null || true
+          for namespace in kubarr-backend kubarr-frontend kubarr-worker openresty \
+            kubarr-storage kubarr-database fluent-bit victorialogs victoriametrics; do
+            echo "=== $namespace logs ==="
+            kubectl logs -n "$namespace" -l app.kubernetes.io/instance --all-containers --tail=100 2>/dev/null || true
+          done
           echo "=== Pod events ==="
-          kubectl get events -n kubarr --sort-by='.lastTimestamp' 2>/dev/null | tail -30 || true
+          kubectl get events -A --sort-by='.lastTimestamp' 2>/dev/null | tail -60 || true
 
       - name: Cleanup
         if: always()
         run: |
-          pkill -f "kubectl port-forward.*svc/kubarr-backend.*18000" 2>/dev/null || true
-          rm -f "/tmp/jwt-private-${KIND_CLUSTER}.pem" "/tmp/jwt-public-${KIND_CLUSTER}.pem"
+          if [ -f "$RUNNER_TEMP/kubarr-port-forward.pid" ]; then
+            read -r watchdog_pid < "$RUNNER_TEMP/kubarr-port-forward.pid"
+            kill "$watchdog_pid" 2>/dev/null || true
+          fi
           kind delete cluster --name "$KIND_CLUSTER" 2>/dev/null || true
-          docker rm -f kind-registry 2>/dev/null || true

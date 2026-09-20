@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -219,11 +220,48 @@ impl AppManager {
     }
 
     async fn process_next_operation(&self) -> Result<()> {
+        self.process_next_operation_with(|operation| async move {
+            self.execute_operation(&operation).await
+        })
+        .await
+    }
+
+    async fn process_next_operation_with<F, Fut>(&self, execute: F) -> Result<()>
+    where
+        F: FnOnce(app_operation::Model) -> Fut,
+        Fut: Future<Output = Result<String>>,
+    {
         let Some(operation) = self.claim_next_operation().await? else {
             return Ok(());
         };
 
-        let result = self.execute_operation(&operation).await;
+        let result: Result<String> = async {
+            let message = execute(operation.clone()).await?;
+            if operation.operation != OP_RESTART {
+                self.upsert_state(
+                    &operation.app_name,
+                    &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
+                        .namespace,
+                    desired_state_for_operation(&operation.operation),
+                    if operation.operation == OP_DELETE {
+                        OBS_NOT_INSTALLED
+                    } else {
+                        OBS_INSTALLING
+                    },
+                    false,
+                    Some(if operation.operation == OP_DELETE {
+                        "Removed".to_string()
+                    } else {
+                        message.clone()
+                    }),
+                    Some(operation.id.clone()),
+                    false,
+                )
+                .await?;
+            }
+            Ok(message)
+        }
+        .await;
         match result {
             Ok(message) => {
                 self.finish_operation(&operation.id, STATUS_SUCCEEDED, Some(message), None)
@@ -241,12 +279,14 @@ impl AppManager {
                 .await?;
                 self.upsert_state(
                     &operation.app_name,
-                    &operation.app_name,
+                    &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
+                        .namespace,
                     desired_state_for_operation(&operation.operation),
                     OBS_FAILED,
                     false,
                     Some(error),
                     Some(operation.id.clone()),
+                    false,
                 )
                 .await?;
             }
@@ -265,8 +305,16 @@ impl AppManager {
             return Ok(None);
         };
 
+        self.claim_operation(operation).await
+    }
+
+    async fn claim_operation(
+        &self,
+        operation: app_operation::Model,
+    ) -> Result<Option<app_operation::Model>> {
         let now = Utc::now();
         let attempts = operation.attempts + 1;
+        let id = operation.id.clone();
         let mut active: app_operation::ActiveModel = operation.into();
         active.status = Set(STATUS_RUNNING.to_string());
         active.message = Set(Some("Worker started operation".to_string()));
@@ -274,7 +322,17 @@ impl AppManager {
         active.updated_at = Set(now);
         active.attempts = Set(attempts);
 
-        Ok(Some(active.update(&self.db).await?))
+        // Competing workers may have selected the same row. Only one may execute it.
+        let claimed = app_operation::Entity::update_many()
+            .set(active)
+            .filter(app_operation::Column::Id.eq(&id))
+            .filter(app_operation::Column::Status.eq(STATUS_QUEUED))
+            .exec(&self.db)
+            .await?;
+        if claimed.rows_affected == 0 {
+            return Ok(None);
+        }
+        Ok(app_operation::Entity::find_by_id(id).one(&self.db).await?)
     }
 
     async fn execute_operation(&self, operation: &app_operation::Model) -> Result<String> {
@@ -292,16 +350,6 @@ impl AppManager {
             OP_DELETE => {
                 let manager = DeploymentManager::new(client, &catalog);
                 manager.remove_app(&operation.app_name).await?;
-                self.upsert_state(
-                    &operation.app_name,
-                    &operation.app_name,
-                    DESIRED_REMOVED,
-                    OBS_NOT_INSTALLED,
-                    false,
-                    Some("Removed".to_string()),
-                    Some(operation.id.clone()),
-                )
-                .await?;
                 Ok(format!("Removed {}", operation.app_name))
             }
             OP_RESTART => {
@@ -361,17 +409,6 @@ impl AppManager {
         };
         let status = manager.deploy_app(&request, deployment_storage).await?;
 
-        self.upsert_state(
-            &operation.app_name,
-            &status.namespace,
-            DESIRED_INSTALLED,
-            OBS_INSTALLING,
-            false,
-            Some(status.message.clone()),
-            Some(operation.id.clone()),
-        )
-        .await?;
-
         Ok(status.message)
     }
 
@@ -429,6 +466,7 @@ impl AppManager {
             false,
             Some(format!("Queued {}", operation)),
             Some(id.to_string()),
+            true,
         )
         .await
     }
@@ -478,6 +516,7 @@ impl AppManager {
                 false,
                 Some("Not installed".to_string()),
                 None,
+                false,
             )
             .await?;
             return Ok(());
@@ -503,6 +542,7 @@ impl AppManager {
             healthy,
             message,
             None,
+            false,
         )
         .await
     }
@@ -517,6 +557,7 @@ impl AppManager {
         healthy: bool,
         message: Option<String>,
         operation_id: Option<String>,
+        enqueue: bool,
     ) -> Result<()> {
         let now = Utc::now();
         let (available_chart_version, installed_chart_version) = {
@@ -533,6 +574,11 @@ impl AppManager {
             .one(&self.db)
             .await?
         {
+            // A completed operation must not replace a newer queued intent.
+            if !enqueue && operation_id.is_some() && operation_id != existing.last_operation_id {
+                return Ok(());
+            }
+            let previous_operation_id = existing.last_operation_id.clone();
             let available_chart_version = existing
                 .available_chart_version
                 .clone()
@@ -543,7 +589,10 @@ impl AppManager {
             );
             let mut active: app_state::ActiveModel = existing.into();
             active.namespace = Set(namespace.to_string());
-            active.desired_state = Set(desired_state.to_string());
+            // Reconciliation observes reality; it does not change requested intent.
+            if enqueue || operation_id.is_some() {
+                active.desired_state = Set(desired_state.to_string());
+            }
             active.observed_state = Set(observed_state.to_string());
             active.healthy = Set(healthy);
             active.message = Set(message);
@@ -555,7 +604,16 @@ impl AppManager {
             active.update_available = Set(update_available);
             active.last_checked_at = Set(Some(now));
             active.updated_at = Set(now);
-            active.update(&self.db).await?;
+            let mut update = app_state::Entity::update_many()
+                .set(active)
+                .filter(app_state::Column::AppName.eq(app_name));
+            if !enqueue {
+                update = update.filter(match previous_operation_id {
+                    Some(id) => app_state::Column::LastOperationId.eq(id),
+                    None => app_state::Column::LastOperationId.is_null(),
+                });
+            }
+            update.exec(&self.db).await?;
         } else {
             let update_available = matches!(
                 (&installed_chart_version, &available_chart_version),
@@ -582,6 +640,10 @@ impl AppManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "app_manager_tests.rs"]
+mod tests;
 
 fn validate_operation(operation: &str) -> Result<()> {
     match operation {

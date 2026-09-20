@@ -1,0 +1,92 @@
+name: Fast Tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KUBECONFIG: /dev/null
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: code/api
+
+      - name: Library and worker/deployment contracts
+        run: cargo test --locked --lib
+        working-directory: code/api
+
+      - name: Operation API and permission contracts
+        run: cargo test --locked --test app_operations_tests
+        working-directory: code/api
+
+      - name: Session-authenticated enqueue integration
+        run: cargo test --locked --test apps_endpoint_tests queues_without_k8s
+        working-directory: code/api
+
+  cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: code/cli
+      - run: cargo test --locked --bin kubarr
+        working-directory: code/cli
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+        with:
+          version: 10.34.3
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '26'
+          cache: pnpm
+          cache-dependency-path: code/frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: code/frontend
+
+      - name: Unit tests
+        run: pnpm test
+        working-directory: code/frontend
+
+      - name: Typecheck browser tests
+        run: pnpm test:typecheck
+        working-directory: code/frontend
+
+      - name: Build
+        run: pnpm run build
+        working-directory: code/frontend
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+        working-directory: code/frontend
+
+      - name: Deterministic browser tests
+        run: pnpm test:browser
+        working-directory: code/frontend
+
+      - name: Browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: browser-test-results
+          path: code/frontend/test-results/browser/
+          retention-days: 7

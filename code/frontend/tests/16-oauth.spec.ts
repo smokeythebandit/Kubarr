@@ -118,6 +118,7 @@ test.describe('OAuth Configuration and Login Flow', () => {
   });
 
   test.describe('Login Page OAuth Buttons', () => {
+    test.use({ storageState: { cookies: [], origins: [] } });
     test('login page loads and renders without console errors', async ({ page }) => {
       const consoleErrors: string[] = [];
       page.on('console', (msg) => {
@@ -181,6 +182,7 @@ test.describe('OAuth Configuration and Login Flow', () => {
   });
 
   test.describe('OAuth Callback Error Paths', () => {
+    test.use({ storageState: { cookies: [], origins: [] } });
     test('OAuth callback with access_denied does not return 500 or blank page', async ({ page }) => {
       // The OAuth callback URL is handled by the backend
       // It should redirect to login or return a handled error response

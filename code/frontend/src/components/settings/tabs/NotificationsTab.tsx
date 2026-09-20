@@ -82,6 +82,9 @@ export function NotificationsTab({
                       </div>
                     </div>
                     <button
+                      role="switch"
+                      aria-label={`${channel.channel_type} notifications`}
+                      aria-checked={channel.enabled}
                       onClick={() => onToggleChannel(channel.channel_type, !channel.enabled)}
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                         channel.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
@@ -200,6 +203,7 @@ export function NotificationsTab({
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <select
+                          aria-label={`${formatAuditAction(event.event_type)} severity`}
                           value={event.severity}
                           onChange={(e) => onUpdateEventSeverity(event.event_type, e.target.value)}
                           className="px-2 py-1 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -211,6 +215,9 @@ export function NotificationsTab({
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap text-right">
                         <button
+                          role="switch"
+                          aria-label={`${formatAuditAction(event.event_type)} notifications`}
+                          aria-checked={event.enabled}
                           onClick={() => onToggleEvent(event.event_type, !event.enabled)}
                           className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                             event.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'

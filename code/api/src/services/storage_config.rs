@@ -581,11 +581,12 @@ async fn ensure_managed_nfs_server(
     let mut args = vec![
         "upgrade".to_string(),
         "--install".to_string(),
+        "--server-side=false".to_string(),
         MANAGED_NFS_RELEASE.to_string(),
         MANAGED_NFS_CHART_REF.to_string(),
         "-n".to_string(),
         BOOTSTRAP_RELEASE_NAMESPACE.to_string(),
-        "--wait".to_string(),
+        "--wait=legacy".to_string(),
         "--timeout".to_string(),
         "5m".to_string(),
         "--set".to_string(),
