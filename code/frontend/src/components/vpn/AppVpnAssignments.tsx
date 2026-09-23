@@ -57,7 +57,7 @@ export function AppVpnAssignments({
   };
 
   const handleRemove = async (appName: string) => {
-    if (!confirm(`Remove VPN from ${appName}? The app will be redeployed without the VPN sidecar.`)) {
+    if (!confirm(`Remove VPN from ${appName}? This will queue a redeploy without the VPN sidecar.`)) {
       return;
     }
     setRemovingApp(appName);
@@ -239,7 +239,7 @@ export function AppVpnAssignments({
               </div>
 
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                The app will be automatically redeployed with the VPN sidecar.
+                Assigning VPN queues an app redeploy with the VPN sidecar.
               </p>
             </div>
           )}
@@ -355,7 +355,7 @@ export function AppVpnAssignments({
       )}
 
       <p className="text-sm text-gray-500 dark:text-gray-400">
-        Apps are automatically redeployed when VPN settings change.
+        Assigning or removing VPN queues an app redeploy. Later provider edits apply on the app&apos;s next redeploy.
       </p>
     </div>
   );

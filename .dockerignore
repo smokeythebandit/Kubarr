@@ -37,6 +37,8 @@ coverage
 *.test.*
 __tests__
 .pytest_cache
+.acceptance-runs/
+.local-cluster/
 
 # Large directories not needed for Docker builds
 .auto-claude/

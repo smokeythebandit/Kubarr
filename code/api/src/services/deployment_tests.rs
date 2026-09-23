@@ -56,18 +56,24 @@ async fn database(app_name: &str) -> DatabaseConnection {
     db
 }
 
-// A strict transport script also proves that namespace visibility precedes Secret creation.
-fn kube_client(namespace: &str, with_vpn: bool) -> (K8sClient, Arc<Mutex<Vec<Value>>>) {
+// A strict transport script proves Secret creation/cleanup ordering around Helm.
+fn kube_client(
+    namespace: &str,
+    app_name: &str,
+    with_vpn: bool,
+) -> (K8sClient, Arc<Mutex<Vec<Value>>>) {
     let namespace = namespace.to_owned();
+    let app_name = app_name.to_owned();
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let recorded = bodies.clone();
     let service = service_fn(move |request: Request<Body>| {
         let namespace = namespace.clone();
+        let app_name = app_name.clone();
         let recorded = recorded.clone();
         async move {
             let ns_path = format!("/api/v1/namespaces/{namespace}");
             let secret_path = format!("{ns_path}/secrets");
-            let named_secret_path = format!("{secret_path}/vpn-{namespace}");
+            let named_secret_path = format!("{secret_path}/vpn-{app_name}");
             let steps = if with_vpn {
                 vec![
                     ("GET", ns_path.as_str(), 404),
@@ -78,7 +84,10 @@ fn kube_client(namespace: &str, with_vpn: bool) -> (K8sClient, Arc<Mutex<Vec<Val
                     ("POST", secret_path.as_str(), 201),
                 ]
             } else {
-                vec![("GET", ns_path.as_str(), 200)]
+                vec![
+                    ("GET", ns_path.as_str(), 200),
+                    ("DELETE", named_secret_path.as_str(), 404),
+                ]
             };
             let index = recorded.lock().unwrap().len();
             let (method, path, status) = steps.get(index).expect("unexpected kube request");
@@ -113,6 +122,120 @@ fn kube_client(namespace: &str, with_vpn: bool) -> (K8sClient, Arc<Mutex<Vec<Val
     )
 }
 
+fn ready_postgresql_client() -> K8sClient {
+    let service = service_fn(|request: Request<Body>| async move {
+        let response = match request.uri().path() {
+            "/api/v1/namespaces/kubarr-database" => {
+                json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "kubarr-database"}})
+            }
+            "/apis/apps/v1/namespaces/kubarr-database/statefulsets/kubarr-db" => json!({
+                "apiVersion": "apps/v1",
+                "kind": "StatefulSet",
+                "metadata": {"name": "kubarr-db", "namespace": "kubarr-database"},
+                "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "kubarr-db"}}, "serviceName": "kubarr-db"},
+                "status": {"readyReplicas": 1}
+            }),
+            path => panic!("unexpected kube request: {path}"),
+        };
+        Ok::<_, std::convert::Infallible>(
+            Response::builder()
+                .status(200)
+                .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                .unwrap(),
+        )
+    });
+    K8sClient::from_client(Client::new(service, "default"))
+}
+
+#[tokio::test]
+async fn release_metadata_command_is_single_typed_lookup_and_preserves_prerelease() {
+    let (k8s, _) = kube_client("regression-metadata", "regression-metadata", false);
+    let catalog = catalog("regression-metadata", false);
+    let manager = DeploymentManager::new(&k8s, &catalog);
+    let lifecycle = lifecycle_for_app_name("regression-metadata");
+    let mut calls = 0;
+    let metadata = manager
+        .release_metadata_with_command(&lifecycle, |args| {
+            calls += 1;
+            assert_eq!(
+                args,
+                [
+                    "get",
+                    "metadata",
+                    "regression-metadata",
+                    "-n",
+                    "regression-metadata",
+                    "-o",
+                    "json"
+                ]
+            );
+            Ok(Some(
+                serde_json::to_vec(&json!({"version": VERSION, "status": "deployed"})).unwrap(),
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(metadata.version, VERSION);
+    assert_eq!(metadata.status, "deployed");
+}
+
+#[tokio::test]
+async fn release_metadata_rejects_missing_status() {
+    let (k8s, _) = kube_client("regression-metadata", "regression-metadata", false);
+    let catalog = catalog("regression-metadata", false);
+    let manager = DeploymentManager::new(&k8s, &catalog);
+    let lifecycle = lifecycle_for_app_name("regression-metadata");
+    let error = manager
+        .release_metadata_with_command(&lifecycle, |_| {
+            Ok(Some(
+                serde_json::to_vec(&json!({"version": VERSION})).unwrap(),
+            ))
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("missing field `status`"), "{error}");
+}
+
+#[tokio::test]
+async fn ready_workload_is_unhealthy_until_helm_release_is_deployed() {
+    for helm_status in [
+        Some("pending-upgrade"),
+        Some("pending-install"),
+        Some("failed"),
+        Some("deployed"),
+        None,
+    ] {
+        let k8s = ready_postgresql_client();
+        let catalog = catalog("postgresql", true);
+        let manager = DeploymentManager::new(&k8s, &catalog);
+        let health = manager
+            .app_health_with_metadata_command("postgresql", |_| {
+                Ok(helm_status.map(|status| ReleaseMetadata {
+                    version: VERSION.into(),
+                    status: status.into(),
+                }))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(health["deployments"][0]["healthy"], true);
+        if helm_status.is_none() || helm_status == Some("deployed") {
+            assert_eq!(health["healthy"], true);
+            assert_eq!(health["status"], "healthy");
+            assert!(health.get("helm_status").is_none());
+        } else {
+            assert_eq!(health["healthy"], false);
+            assert_eq!(health["status"], "unhealthy");
+            assert_eq!(health["helm_status"], helm_status.unwrap());
+            assert!(health["message"]
+                .as_str()
+                .unwrap()
+                .contains(helm_status.unwrap()));
+        }
+    }
+}
+
 #[tokio::test]
 async fn deploy_app_composes_helm4_flags_and_release_workload_namespaces() {
     for (app_name, is_system, namespace, release_namespace) in [
@@ -129,7 +252,7 @@ async fn deploy_app_composes_helm4_flags_and_release_workload_namespaces() {
         let catalog = catalog(app_name, is_system);
         for wait in [false, true] {
             for reuse_values in [false, true] {
-                let (k8s, bodies) = kube_client(namespace, false);
+                let (k8s, bodies) = kube_client(namespace, app_name, false);
                 let manager = DeploymentManager::with_db(&k8s, &catalog, &db);
                 let request = DeploymentRequest {
                     app_name: app_name.into(),
@@ -179,7 +302,8 @@ async fn deploy_app_composes_helm4_flags_and_release_workload_namespaces() {
                             !is_system
                         );
                         assert!(!args.contains(&"--values"));
-                        assert!(!args.iter().any(|arg| arg.starts_with("vpn.")));
+                        assert!(values.contains(&"vpn.enabled=false"));
+                        assert!(values.contains(&"vpn.secretName="));
                         Ok("deployed".into())
                     })
                     .await
@@ -188,6 +312,11 @@ async fn deploy_app_composes_helm4_flags_and_release_workload_namespaces() {
                 assert_eq!(result.app_name, app_name);
                 assert_eq!(result.namespace, namespace);
                 assert_eq!(result.status, "installing");
+                assert_eq!(
+                    bodies.lock().unwrap().len(),
+                    2,
+                    "managed VPN Secret cleanup must follow successful Helm"
+                );
             }
         }
     }
@@ -216,7 +345,7 @@ async fn assert_vpn_values_lifetime(helm_fails: bool) {
     )
     .await
     .unwrap();
-    let (k8s, bodies) = kube_client(app_name, true);
+    let (k8s, bodies) = kube_client(app_name, app_name, true);
     let catalog = catalog(app_name, false);
     let manager = DeploymentManager::with_db(&k8s, &catalog, &db);
     let request = DeploymentRequest {
@@ -310,6 +439,59 @@ async fn deploy_app_vpn_cleans_values_and_propagates_helm_failure() {
 }
 
 #[tokio::test]
+async fn deploy_app_assigned_vpn_explicitly_resets_disabled_port_forwarding() {
+    let app_name = "regression-vpn-port-forwarding-off";
+    let db = database(app_name).await;
+    let provider = vpn::create_vpn_provider(
+        &db,
+        vpn::CreateVpnProviderRequest {
+            name: "No forwarding VPN".into(),
+            vpn_type: vpn_provider::VpnType::WireGuard,
+            service_provider: Some("custom".into()),
+            credentials: json!({"private_key": PRIVATE_KEY, "addresses": ["10.2.0.2/32"]}),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: SUBNETS.into(),
+        },
+    )
+    .await
+    .unwrap();
+    vpn::assign_vpn_to_app(
+        &db,
+        app_name,
+        vpn::AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let (k8s, _) = kube_client(app_name, app_name, true);
+    let catalog = catalog(app_name, false);
+    let request = DeploymentRequest {
+        app_name: app_name.into(),
+        custom_config: HashMap::new(),
+        reuse_values: true,
+        wait: false,
+    };
+
+    DeploymentManager::with_db(&k8s, &catalog, &db)
+        .deploy_app_with_command(&request, None, |args| {
+            assert!(args.contains(&"--reuse-values"));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--set", "vpn.portForwarding.enabled=false"]));
+            assert!(!args
+                .windows(2)
+                .any(|pair| pair == ["--set", "vpn.portForwarding.enabled=true"]));
+            Ok("deployed".into())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn deploy_app_namespace_failure_prevents_helm_execution() {
     let service = service_fn(|request: Request<Body>| async move {
         assert_eq!(request.method(), "GET");
@@ -332,4 +514,442 @@ async fn deploy_app_namespace_failure_prevents_helm_execution() {
         .to_string();
     assert!(error.contains("Failed to get namespace"), "{error}");
     assert!(error.contains("injected denial"), "{error}");
+}
+
+#[tokio::test]
+async fn deploy_app_successfully_deletes_unassigned_managed_vpn_secret_after_helm() {
+    let app_name = "regression-vpn-cleanup";
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let service = service_fn(move |request: Request<Body>| {
+        let recorded = recorded.clone();
+        async move {
+            let method = request.method().clone();
+            let path = request.uri().path().to_owned();
+            recorded
+                .lock()
+                .unwrap()
+                .push((method.clone(), path.clone()));
+            let response = match (method.as_str(), path.as_str()) {
+                ("GET", "/api/v1/namespaces/regression-vpn-cleanup") => json!({
+                    "apiVersion": "v1", "kind": "Namespace",
+                    "metadata": {"name": "regression-vpn-cleanup"}
+                }),
+                (
+                    "DELETE",
+                    "/api/v1/namespaces/regression-vpn-cleanup/secrets/vpn-regression-vpn-cleanup",
+                ) => json!({
+                    "apiVersion": "v1", "kind": "Status", "status": "Success", "code": 200
+                }),
+                _ => panic!("unexpected kube request: {method} {path}"),
+            };
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(200)
+                    .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                    .unwrap(),
+            )
+        }
+    });
+    let k8s = K8sClient::from_client(Client::new(service, "default"));
+    let db = database(app_name).await;
+    let catalog = catalog(app_name, false);
+    let request: DeploymentRequest = serde_json::from_value(json!({"app_name": app_name})).unwrap();
+    let helm_called = Arc::new(Mutex::new(false));
+    let called = helm_called.clone();
+
+    DeploymentManager::with_db(&k8s, &catalog, &db)
+        .deploy_app_with_command(&request, None, |_| {
+            *called.lock().unwrap() = true;
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            Ok("deployed".into())
+        })
+        .await
+        .unwrap();
+
+    assert!(*helm_called.lock().unwrap());
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn deploy_app_helm_failure_retains_unassigned_managed_vpn_secret() {
+    let app_name = "regression-vpn-rollback";
+    let (k8s, requests) = kube_client(app_name, app_name, false);
+    let db = database(app_name).await;
+    let catalog = catalog(app_name, false);
+    let request: DeploymentRequest = serde_json::from_value(json!({"app_name": app_name})).unwrap();
+
+    let error = DeploymentManager::with_db(&k8s, &catalog, &db)
+        .deploy_app_with_command(&request, None, |_| {
+            Err(AppError::Internal("injected Helm rollback".into()))
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("injected Helm rollback"), "{error}");
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "failed Helm must not delete credentials needed by a rollback pod"
+    );
+}
+
+#[tokio::test]
+async fn deploy_app_vpn_secret_cleanup_forbidden_fails_after_successful_helm() {
+    let app_name = "regression-vpn-cleanup-denied";
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let service = service_fn(move |request: Request<Body>| {
+        let recorded = recorded.clone();
+        async move {
+            let method = request.method().clone();
+            let path = request.uri().path().to_owned();
+            recorded
+                .lock()
+                .unwrap()
+                .push((method.clone(), path.clone()));
+            let (status, response) = match (method.as_str(), path.as_str()) {
+                ("GET", "/api/v1/namespaces/regression-vpn-cleanup-denied") => (
+                    200,
+                    json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": app_name}}),
+                ),
+                (
+                    "DELETE",
+                    "/api/v1/namespaces/regression-vpn-cleanup-denied/secrets/vpn-regression-vpn-cleanup-denied",
+                ) => (
+                    403,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": 403, "reason": "Forbidden", "message": "injected cleanup denial"}),
+                ),
+                _ => panic!("unexpected kube request: {method} {path}"),
+            };
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(status)
+                    .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                    .unwrap(),
+            )
+        }
+    });
+    let k8s = K8sClient::from_client(Client::new(service, "default"));
+    let db = database(app_name).await;
+    let catalog = catalog(app_name, false);
+    let request: DeploymentRequest = serde_json::from_value(json!({"app_name": app_name})).unwrap();
+    let mut helm_calls = 0;
+
+    let error = DeploymentManager::with_db(&k8s, &catalog, &db)
+        .deploy_app_with_command(&request, None, |_| {
+            helm_calls += 1;
+            Ok("deployed".into())
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(helm_calls, 1);
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert!(error.contains("VPN sidecar was removed"), "{error}");
+    assert!(error.contains("failed to delete managed Secret"), "{error}");
+    assert!(error.contains("injected cleanup denial"), "{error}");
+}
+
+#[tokio::test]
+async fn deploy_app_vpn_secret_create_failure_prevents_helm_execution() {
+    let app_name = "regression-secret-denied";
+    let db = database(app_name).await;
+    let provider = vpn::create_vpn_provider(
+        &db,
+        vpn::CreateVpnProviderRequest {
+            name: "Denied VPN".into(),
+            vpn_type: vpn_provider::VpnType::WireGuard,
+            service_provider: Some("custom".into()),
+            credentials: json!({"private_key": PRIVATE_KEY, "addresses": ["10.2.0.2/32"]}),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: SUBNETS.into(),
+        },
+    )
+    .await
+    .unwrap();
+    vpn::assign_vpn_to_app(
+        &db,
+        app_name,
+        vpn::AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let service = service_fn(move |request: Request<Body>| {
+        let recorded = recorded.clone();
+        async move {
+            let method = request.method().clone();
+            let path = request.uri().path().to_owned();
+            recorded
+                .lock()
+                .unwrap()
+                .push((method.clone(), path.clone()));
+            let (status, response) = match (method.as_str(), path.as_str()) {
+                ("GET", "/api/v1/namespaces/regression-secret-denied") => (
+                    200,
+                    json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": app_name}}),
+                ),
+                (
+                    "DELETE",
+                    "/api/v1/namespaces/regression-secret-denied/secrets/vpn-regression-secret-denied",
+                ) => (
+                    404,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": 404, "reason": "NotFound"}),
+                ),
+                ("POST", "/api/v1/namespaces/regression-secret-denied/secrets") => (
+                    403,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": 403, "reason": "Forbidden", "message": "injected secret denial"}),
+                ),
+                _ => panic!("unexpected kube request: {method} {path}"),
+            };
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(status)
+                    .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                    .unwrap(),
+            )
+        }
+    });
+    let k8s = K8sClient::from_client(Client::new(service, "default"));
+    let catalog = catalog(app_name, false);
+    let request: DeploymentRequest = serde_json::from_value(json!({"app_name": app_name})).unwrap();
+    let error = DeploymentManager::with_db(&k8s, &catalog, &db)
+        .deploy_app_with_command(&request, None, |_| {
+            panic!("Helm must not execute after Secret creation failure")
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("injected secret denial"), "{error}");
+    assert_eq!(requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn deploy_app_vpn_lookup_failure_prevents_kube_and_helm_calls() {
+    let app_name = "regression-vpn-lookup-error";
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let catalog = catalog(app_name, false);
+    let service = service_fn(|request: Request<Body>| async move {
+        panic!("Kubernetes must not be called after VPN lookup failure: {request:?}");
+        #[allow(unreachable_code)]
+        Ok::<_, std::convert::Infallible>(Response::new(Body::empty()))
+    });
+    let k8s = K8sClient::from_client(Client::new(service, "default"));
+    let request: DeploymentRequest = serde_json::from_value(json!({"app_name": app_name})).unwrap();
+    let error = DeploymentManager::with_db(&k8s, &catalog, &db)
+        .deploy_app_with_command(&request, None, |_| {
+            panic!("Helm must not execute after VPN lookup failure")
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("app_vpn_configs"), "{error}");
+}
+
+#[tokio::test]
+async fn deploy_app_disabled_assigned_vpn_prevents_kube_and_helm_calls() {
+    let app_name = "regression-disabled-vpn";
+    let db = database(app_name).await;
+    let provider = vpn::create_vpn_provider(
+        &db,
+        vpn::CreateVpnProviderRequest {
+            name: "Disabled VPN".into(),
+            vpn_type: vpn_provider::VpnType::WireGuard,
+            service_provider: Some("custom".into()),
+            credentials: json!({"private_key": PRIVATE_KEY, "addresses": ["10.2.0.2/32"]}),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: SUBNETS.into(),
+        },
+    )
+    .await
+    .unwrap();
+    vpn::assign_vpn_to_app(
+        &db,
+        app_name,
+        vpn::AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    vpn::update_vpn_provider(
+        &db,
+        provider.id,
+        vpn::UpdateVpnProviderRequest {
+            name: None,
+            service_provider: None,
+            credentials: None,
+            enabled: Some(false),
+            kill_switch: None,
+            firewall_outbound_subnets: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let catalog = catalog(app_name, false);
+    let service = service_fn(|request: Request<Body>| async move {
+        panic!("Kubernetes must not be called for a disabled assigned VPN: {request:?}");
+        #[allow(unreachable_code)]
+        Ok::<_, std::convert::Infallible>(Response::new(Body::empty()))
+    });
+    let k8s = K8sClient::from_client(Client::new(service, "default"));
+    let request: DeploymentRequest = serde_json::from_value(json!({"app_name": app_name})).unwrap();
+    let error = DeploymentManager::with_db(&k8s, &catalog, &db)
+        .deploy_app_with_command(&request, None, |_| {
+            panic!("Helm must not execute for a disabled assigned VPN")
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.to_ascii_lowercase().contains("disabled"), "{error}");
+}
+
+#[tokio::test]
+async fn deploy_app_without_database_explicitly_disables_reused_vpn_values() {
+    let app_name = "regression-no-database";
+    let catalog = catalog(app_name, false);
+    let (k8s, requests) = kube_client(app_name, app_name, false);
+    let request: DeploymentRequest = serde_json::from_value(json!({
+        "app_name": app_name,
+        "reuse_values": true
+    }))
+    .unwrap();
+    DeploymentManager::new(&k8s, &catalog)
+        .deploy_app_with_command(&request, None, |args| {
+            assert!(args.contains(&"--reuse-values"));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--set", "vpn.enabled=false"]));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--set", "vpn.secretName="]));
+            Ok("deployed".into())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "a manager without database assignment state must not delete Secrets"
+    );
+}
+
+#[tokio::test]
+async fn deploy_app_rejects_managed_vpn_custom_config_before_api_calls() {
+    let app_name = "regression-vpn-overrides";
+    let db = database(app_name).await;
+    let provider = vpn::create_vpn_provider(
+        &db,
+        vpn::CreateVpnProviderRequest {
+            name: "Override VPN".into(),
+            vpn_type: vpn_provider::VpnType::WireGuard,
+            service_provider: Some("custom".into()),
+            credentials: json!({"private_key": PRIVATE_KEY, "addresses": ["10.2.0.2/32"]}),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: SUBNETS.into(),
+        },
+    )
+    .await
+    .unwrap();
+    vpn::assign_vpn_to_app(
+        &db,
+        app_name,
+        vpn::AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: Some(false),
+        },
+    )
+    .await
+    .unwrap();
+    let catalog = catalog(app_name, false);
+    for key in [
+        "vpn",
+        "vpn.enabled",
+        "vpn[0].enabled",
+        "vpn.[0].enabled",
+        "image.tag,vpn.killSwitch",
+    ] {
+        let service = service_fn(|request: Request<Body>| async move {
+            panic!("Kubernetes must not be called for reserved custom config: {request:?}");
+            #[allow(unreachable_code)]
+            Ok::<_, std::convert::Infallible>(Response::new(Body::empty()))
+        });
+        let k8s = K8sClient::from_client(Client::new(service, "default"));
+        let request = DeploymentRequest {
+            app_name: app_name.into(),
+            custom_config: HashMap::from([(key.into(), "false".into())]),
+            reuse_values: true,
+            wait: false,
+        };
+        let error = DeploymentManager::with_db(&k8s, &catalog, &db)
+            .deploy_app_with_command(&request, None, |_| {
+                panic!("Helm must not execute for reserved custom config")
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(key), "{error}");
+        assert!(error.contains("use VPN settings"), "{error}");
+    }
+
+    for value in [
+        "tag,vpn=false",
+        "tag,vpn.enabled=false",
+        "tag,vpn[0].enabled=false",
+        "tag,vpn={enabled:false}",
+        "tag,{ vpn.killSwitch=false,other}",
+        r"tag\,vpn.secretName=attacker-secret",
+    ] {
+        let service = service_fn(|request: Request<Body>| async move {
+            panic!("Kubernetes must not be called for an injected VPN override: {request:?}");
+            #[allow(unreachable_code)]
+            Ok::<_, std::convert::Infallible>(Response::new(Body::empty()))
+        });
+        let k8s = K8sClient::from_client(Client::new(service, "default"));
+        let request = DeploymentRequest {
+            app_name: app_name.into(),
+            custom_config: HashMap::from([("image.tag".into(), value.into())]),
+            reuse_values: true,
+            wait: false,
+        };
+        let error = DeploymentManager::with_db(&k8s, &catalog, &db)
+            .deploy_app_with_command(&request, None, |_| {
+                panic!("Helm must not execute for an injected VPN override")
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("custom_config key 'image.tag'"), "{error}");
+        assert!(error.contains("use VPN settings"), "{error}");
+        assert!(
+            !error.contains(value),
+            "error must not disclose value: {error}"
+        );
+    }
+}
+
+#[test]
+fn custom_config_allows_values_without_injected_vpn_assignments() {
+    let custom_config = HashMap::from([
+        ("image.tag".into(), "stable,replicaCount=2".into()),
+        ("podAnnotations.example".into(), "{alpha,beta}".into()),
+        ("environment.NOTE".into(), "vpn.enabled=false".into()),
+    ]);
+    validate_custom_config(&custom_config).unwrap();
 }

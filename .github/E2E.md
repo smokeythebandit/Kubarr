@@ -3,7 +3,9 @@
 `ci.yml` runs `fast-test.yml` on every PR and push before building images. After
 the build, it calls `test.yml` for `v*` tags only. The latter contains live E2E and
 diagnostic backend library coverage; coverage does not run the unvetted integration
-targets. Release publishing requires successful live E2E. Non-tag publishing
+targets. Release publishing requires successful live E2E and the separate
+`acceptance.yml` real application-lifecycle job and the controlled
+`vpn-acceptance.yml` WireGuard lab. Non-tag publishing
 requires the checks, fast tests, and build, but does not run live E2E.
 
 The E2E job builds the repository's CLI and uses `kubarr bootstrap` rather than
@@ -22,7 +24,9 @@ existing client-side apply and readiness behavior during the Helm major upgrade.
 Rollback uses Helm 4's `--rollback-on-failure` flag. The installer requires Helm 4
 before making cluster changes. Existing Helm 3 release records remain usable.
 
-`CHARTS_REV` pins the chart source. Local `kubarr-common` dependencies are built
+`CHARTS_REV` pins the validated bootstrap chart source. `CATALOG_REV` separately
+pins runtime discovery to the upstream-aligned versions published in GHCR, rather
+than requesting the obsolete pre-alignment versions. Local `kubarr-common` dependencies are built
 in the categorized checkout before exposing flat symlinks to the CLI. When
 updating the revision, also check the preloaded third-party image tags against
 the rendered charts. Application artifacts and image names must match
@@ -31,7 +35,7 @@ the rendered charts. Application artifacts and image names must match
 Bootstrap seeds the disposable `admin` / `adminadmin` test account and validated
 storage records after API migrations. `auth.setup.ts` only logs in; it does not
 create an account. The API and worker then roll out with chart discovery pinned
-to `CHARTS_REV`. Before Playwright starts, CI checks API health, the login page,
+to `CATALOG_REV`. Before Playwright starts, CI checks API health, the login page,
 and the catalog entries used by the app tests through
 `openresty/svc/kubarr-gateway` on port 8080.
 
@@ -58,7 +62,8 @@ called by `ci.yml` and is not maintained by this repair.
 ## Coordinated Chart Update
 
 The current pin includes OpenResty chart `0.2.5`, which fixes unknown frontend
-routes returning HTTP 500 instead of the SPA's 404 page. Push the chart commit
+routes returning HTTP 500 instead of the SPA's 404 page, worker chart `0.2.4`
+with singleton replacement and shutdown grace, and monitoring startup fixes. Push the chart commit
 before running this workflow, and publish its versioned application charts to
 GHCR before the catalog readiness check can succeed. A source commit being
 available does not establish that its chart packages have been published.

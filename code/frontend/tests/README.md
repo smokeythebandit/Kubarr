@@ -47,8 +47,18 @@ panes and are not yet covered by this browser milestone.
 
 ## Live Tests
 
+### Real disposable-cluster frontend acceptance
+
+`playwright.real.config.ts` and `tests/real/` now provide a separate, real-backend
+lane: 14 settings, VPN-configuration, and app-lifecycle scenarios. It is driven by
+`KUBARR_ACCEPTANCE_FRONTEND=1 tests/acceptance/app-lifecycle.sh` from the application
+root with the other disposable-run prerequisites. See `tests/real/README.md` for
+coverage, safety, and limitations. It does not use the mocked browser fixtures.
+
+### Legacy live suite
+
 `playwright.config.ts` still owns the live `auth` and `chromium` projects and
-explicitly ignores `tests/browser`. The nonexistent bootstrap setup dependency
+explicitly ignores `tests/browser` and `tests/real`. The nonexistent bootstrap setup dependency
 was removed. Discovery is safe and does not execute login or contact a target:
 
 ```sh

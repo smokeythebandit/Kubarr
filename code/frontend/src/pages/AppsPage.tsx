@@ -16,7 +16,7 @@ import type { ServiceEndpoint } from '../types/monitoring'
 type FilterType = 'all' | 'installed' | 'healthy' | 'unhealthy' | 'available' | 'updates'
 type AppsTab = 'catalog' | 'operations'
 
-type OperationState = 'installing' | 'updating' | 'deleting' | 'error'
+type OperationState = 'installing' | 'updating' | 'deleting' | 'restarting' | 'error'
 
 interface OperationStatus {
   state: OperationState
@@ -207,7 +207,7 @@ function AppCardComponent({
       {(isInstalled || app.is_system) && (
         <div
           className={`h-1 w-full ${
-            effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting'
+            effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting' || effectiveState === 'restarting'
               ? 'bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 animate-pulse'
               : effectiveState === 'error'
               ? 'bg-red-500'
@@ -284,6 +284,12 @@ function AppCardComponent({
                     Removing
                   </span>
                 )}
+                {effectiveState === 'restarting' && (
+                  <span className="inline-flex items-center gap-1 bg-blue-500/20 text-blue-500 dark:text-blue-400 text-xs px-2 py-0.5 rounded-full animate-pulse">
+                    <span className="w-1.5 h-1.5 bg-blue-400 rounded-full"></span>
+                    Restarting
+                  </span>
+                )}
                 {effectiveState === 'error' && (
                   <span className="inline-flex items-center gap-1 bg-red-500/20 text-red-500 dark:text-red-400 text-xs px-2 py-0.5 rounded-full">
                     <span className="w-1.5 h-1.5 bg-red-400 rounded-full"></span>
@@ -357,7 +363,7 @@ function AppCardComponent({
               disabled
               className="w-full bg-gray-100 dark:bg-gray-700/50 cursor-not-allowed text-gray-500 dark:text-gray-400 text-sm font-medium py-2.5 px-4 rounded-lg"
             >
-              {effectiveState === 'updating' ? 'Updating...' : effectiveState === 'installing' ? 'Installing...' : 'Removing...'}
+              {effectiveState === 'updating' ? 'Updating...' : effectiveState === 'installing' ? 'Installing...' : effectiveState === 'restarting' ? 'Restarting...' : 'Removing...'}
             </button>
           )}
         </div>
@@ -466,11 +472,13 @@ interface AppDetailPanelProps {
   onInstall: () => void
   onUpdate: () => void
   onDelete: () => void
+  onRestart: () => void
   onOpen: () => void
   updateAvailable: boolean
   currentVersion?: string | null
   newVersion?: string | null
   isOperationPending: boolean
+  onVpnChangeQueued: () => void
 }
 
 function AppDetailPanel({
@@ -482,16 +490,19 @@ function AppDetailPanel({
   onInstall,
   onUpdate,
   onDelete,
+  onRestart,
   onOpen,
   updateAvailable,
   currentVersion,
   newVersion,
-  isOperationPending
+  isOperationPending,
+  onVpnChangeQueued
 }: AppDetailPanelProps) {
   const colors = useIconColors(app?.name || '')
   const { hasPermission } = useAuth()
   const canViewVpn = hasPermission('vpn.view')
   const canManageVpn = hasPermission('vpn.manage')
+  const canRestart = hasPermission('apps.restart')
   const queryClient = useQueryClient()
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null)
   const [killSwitchOverride, setKillSwitchOverride] = useState<boolean | null>(null)
@@ -538,20 +549,32 @@ function AppDetailPanel({
   const assignVpnMutation = useMutation({
     mutationFn: ({ appName, providerId, killSwitch, portFwd }: { appName: string; providerId: number; killSwitch?: boolean; portFwd?: boolean }) =>
       appVpnApi.assignVpn(appName, { vpn_provider_id: providerId, kill_switch_override: killSwitch, port_forwarding: portFwd }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['app-vpn-config', app?.name] })
+    onSuccess: (_config, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['app-operations'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'states'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'installed'] })
+      queryClient.invalidateQueries({ queryKey: ['monitoring', 'pods', variables.appName] })
+      queryClient.invalidateQueries({ queryKey: ['app-vpn-config', variables.appName] })
+      onVpnChangeQueued()
     },
   })
 
   const removeVpnMutation = useMutation({
     mutationFn: (appName: string) => appVpnApi.removeVpn(appName),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['app-vpn-config', app?.name] })
+    onSuccess: (_response, appName) => {
+      queryClient.invalidateQueries({ queryKey: ['app-operations'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'states'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'installed'] })
+      queryClient.invalidateQueries({ queryKey: ['monitoring', 'pods', appName] })
+      queryClient.invalidateQueries({ queryKey: ['app-vpn-config', appName] })
       setSelectedProviderId(null)
       setKillSwitchOverride(null)
       setPortForwarding(false)
+      onVpnChangeQueued()
     },
   })
+
+  const isVpnChangePending = isOperationPending || assignVpnMutation.isPending || removeVpnMutation.isPending
 
   const enabledProviders = useMemo(() => vpnProviders?.filter((p: VpnProvider) => p.enabled) || [], [vpnProviders])
 
@@ -570,13 +593,15 @@ function AppDetailPanel({
   return (
     <div
       className="w-[480px] flex-shrink-0 overflow-y-auto bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-700 shadow-xl"
+      role="region"
+      aria-label={`${app.display_name} details`}
       style={{ background: bgGradient }}
     >
         {/* Status bar */}
         {(isInstalled || app.is_system) && (
           <div
             className={`h-1.5 w-full ${
-              effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting'
+              effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting' || effectiveState === 'restarting'
                 ? 'bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 animate-pulse'
                 : effectiveState === 'error'
                 ? 'bg-red-500'
@@ -626,6 +651,19 @@ function AppDetailPanel({
                       Open
                     </button>
                   )}
+                  {canRestart && isInstalled && (
+                    <button
+                      type="button"
+                      onClick={onRestart}
+                      disabled={isOperationPending}
+                      className="bg-gray-100 dark:bg-gray-800 hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50 text-gray-600 dark:text-gray-300 hover:text-white text-sm font-semibold py-2 px-4 rounded-xl transition-colors flex items-center gap-1.5"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      Restart
+                    </button>
+                  )}
                   {isInstalled && effectiveState === 'installed' && updateAvailable && (
                     <button
                       onClick={onUpdate}
@@ -658,7 +696,7 @@ function AppDetailPanel({
                       {effectiveState === 'error' ? 'Retry' : 'Install'}
                     </button>
                   )}
-                  {(effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting') && (
+                  {(effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting' || effectiveState === 'restarting') && (
                     <button
                       disabled
                       className="bg-gray-100 dark:bg-gray-800 cursor-not-allowed text-gray-500 dark:text-gray-400 text-sm font-semibold py-2 px-4 rounded-xl flex items-center gap-1.5"
@@ -666,7 +704,7 @@ function AppDetailPanel({
                       <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                       </svg>
-                      {effectiveState === 'updating' ? 'Updating...' : effectiveState === 'installing' ? 'Installing...' : 'Removing...'}
+                      {effectiveState === 'updating' ? 'Updating...' : effectiveState === 'installing' ? 'Installing...' : effectiveState === 'restarting' ? 'Restarting...' : 'Removing...'}
                     </button>
                   )}
                 </div>
@@ -793,7 +831,7 @@ function AppDetailPanel({
                           const val = e.target.value
                           setSelectedProviderId(val ? Number(val) : null)
                         }}
-                        disabled={!canManageVpn}
+                        disabled={!canManageVpn || isVpnChangePending}
                         className="flex-1 min-w-0 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60 disabled:cursor-not-allowed"
                       >
                         <option value="">No VPN</option>
@@ -804,6 +842,7 @@ function AppDetailPanel({
                       {canManageVpn && (
                         <button
                           onClick={() => setShowVpnForm(true)}
+                          disabled={isVpnChangePending}
                           className="flex-shrink-0 p-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-500 hover:text-blue-600 hover:border-blue-300 dark:hover:border-blue-600 transition-colors"
                           title="Add VPN provider"
                         >
@@ -833,6 +872,7 @@ function AppDetailPanel({
                           <button
                             key={String(opt.value)}
                             onClick={() => setKillSwitchOverride(opt.value as boolean | null)}
+                            disabled={isVpnChangePending}
                             className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
                               killSwitchOverride === opt.value
                                 ? 'bg-blue-600 text-white'
@@ -863,6 +903,7 @@ function AppDetailPanel({
                           <button
                             key={String(opt.value)}
                             onClick={() => setPortForwarding(opt.value)}
+                            disabled={isVpnChangePending}
                             className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
                               portForwarding === opt.value
                                 ? 'bg-blue-600 text-white'
@@ -887,7 +928,7 @@ function AppDetailPanel({
                             killSwitch: killSwitchOverride ?? undefined,
                             portFwd: portForwarding,
                           })}
-                          disabled={assignVpnMutation.isPending || (appVpnConfig?.vpn_provider_id === selectedProviderId && appVpnConfig?.kill_switch_override === killSwitchOverride && appVpnConfig?.port_forwarding === portForwarding)}
+                          disabled={isVpnChangePending || (appVpnConfig?.vpn_provider_id === selectedProviderId && appVpnConfig?.kill_switch_override === killSwitchOverride && appVpnConfig?.port_forwarding === portForwarding)}
                           className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white text-xs font-semibold py-2 px-3 rounded-lg transition-colors"
                         >
                           {assignVpnMutation.isPending ? 'Saving...' : appVpnConfig ? 'Update VPN' : 'Enable VPN'}
@@ -896,7 +937,7 @@ function AppDetailPanel({
                       {appVpnConfig && (
                         <button
                           onClick={() => removeVpnMutation.mutate(app.name)}
-                          disabled={removeVpnMutation.isPending}
+                          disabled={isVpnChangePending}
                           className="bg-gray-200 dark:bg-gray-700 hover:bg-red-600 disabled:cursor-not-allowed text-gray-600 dark:text-gray-300 hover:text-white text-xs font-semibold py-2 px-3 rounded-lg transition-colors"
                         >
                           {removeVpnMutation.isPending ? 'Removing...' : 'Remove VPN'}
@@ -905,12 +946,19 @@ function AppDetailPanel({
                     </div>
                   )}
 
-                  {/* Current status */}
+                  {isOperationPending && (
+                    <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400" role="status">
+                      <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse"></span>
+                      VPN change pending while the app operation is queued or running
+                    </div>
+                  )}
+
+                  {/* Current configuration */}
                   {appVpnConfig && (
                     <div className="space-y-1 pt-1">
-                      <div className="flex items-center gap-2 text-xs text-green-600 dark:text-green-400">
-                        <span className="w-1.5 h-1.5 bg-green-500 rounded-full"></span>
-                        VPN active via {appVpnConfig.vpn_provider_name}
+                      <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
+                        <span className="w-1.5 h-1.5 bg-blue-500 rounded-full"></span>
+                        VPN configured via {appVpnConfig.vpn_provider_name}
                         {appVpnConfig.effective_kill_switch && ' (kill switch on)'}
                       </div>
                       {appVpnConfig.port_forwarding && (
@@ -954,6 +1002,16 @@ function formatTimeAgo(iso: string): string {
   return `${Math.floor(hours / 24)}d ago`
 }
 
+function operationErrorMessage(error: unknown): string {
+  if (typeof error !== 'object' || error === null) return 'Unknown error'
+
+  const apiError = error as { message?: unknown; response?: { data?: { detail?: unknown } } }
+  const detail = apiError.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (typeof apiError.message === 'string') return apiError.message
+  return 'Unknown error'
+}
+
 export default function AppsPage() {
   const { catalog, installedApps: installed, appStates, appStatuses: globalAppStatuses, refreshAppStatuses } = useMonitoring()
   const { hasPermission } = useAuth()
@@ -967,7 +1025,7 @@ export default function AppsPage() {
     queryFn: appsApi.getSyncStatus,
     refetchInterval: 60000,
   })
-  const { data: operations = [] } = useQuery({
+  const { data: operations = [], isLoading: operationsLoading } = useQuery({
     queryKey: ['app-operations'],
     queryFn: appsApi.getOperations,
     refetchInterval: query => query.state.data?.some(operation => operation.status === 'queued' || operation.status === 'running') ? 2000 : 15000,
@@ -1197,6 +1255,28 @@ export default function AppsPage() {
     },
   })
 
+  const restartMutation = useMutation({
+    mutationFn: (appName: string) => {
+      setOperationState(appName, 'restarting')
+      return appsApi.restart(appName)
+    },
+    onSuccess: (operation, appName) => {
+      queryClient.setQueryData<AppOperation[]>(['app-operations'], current => [operation, ...(current || []).filter(item => item.id !== operation.id)])
+      queryClient.invalidateQueries({ queryKey: ['app-operations'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'states'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'installed'] })
+      queryClient.invalidateQueries({ queryKey: ['monitoring', 'pods', appName] })
+      setOperationState(appName, null)
+      refreshAppStatuses()
+      showToast(`${appName} restart queued`, 'success')
+    },
+    onError: (error: unknown, appName) => {
+      const message = operationErrorMessage(error)
+      setOperationState(appName, 'error', message)
+      showToast(`Failed to restart ${appName}: ${message}`, 'error')
+    },
+  })
+
   const getAppState = (app: AppConfig) => {
     const isInstalled = installed?.includes(app.name)
     const operationStatus = operationStatuses[app.name]
@@ -1213,7 +1293,9 @@ export default function AppsPage() {
         ? 'deleting'
         : activeOperation.operation === 'update'
           ? 'updating'
-          : 'installing'
+          : activeOperation.operation === 'restart'
+            ? 'restarting'
+            : 'installing'
     } else if (appState?.observed_state === 'installing') {
       effectiveState = 'installing'
     } else if (appState?.observed_state === 'deleting') {
@@ -1435,10 +1517,11 @@ export default function AppsPage() {
                         onOpen={() => handleOpen(app)}
                         onClick={() => setSelectedApp(app)}
                         updateAvailable={updateAvailable}
-                        isOperationPending={Boolean(activeOperationsByApp[app.name]) ||
+                        isOperationPending={operationsLoading || Boolean(activeOperationsByApp[app.name]) ||
                           (installMutation.isPending && installMutation.variables === app.name) ||
                           (updateMutation.isPending && updateMutation.variables === app.name) ||
-                          (deleteMutation.isPending && deleteMutation.variables === app.name)}
+                          (deleteMutation.isPending && deleteMutation.variables === app.name) ||
+                          (restartMutation.isPending && restartMutation.variables === app.name)}
                       />
                     )
                   })}
@@ -1466,14 +1549,17 @@ export default function AppsPage() {
             onInstall={() => installMutation.mutate(selectedApp.name)}
             onUpdate={() => updateMutation.mutate(selectedApp.name)}
             onDelete={() => deleteMutation.mutate(selectedApp.name)}
+            onRestart={() => restartMutation.mutate(selectedApp.name)}
             onOpen={() => handleOpen(selectedApp)}
             updateAvailable={updateAvailable}
             currentVersion={selectedAppState?.installed_chart_version}
             newVersion={selectedAppState?.available_chart_version}
-            isOperationPending={Boolean(activeOperationsByApp[selectedApp.name]) ||
+            isOperationPending={operationsLoading || Boolean(activeOperationsByApp[selectedApp.name]) ||
               (installMutation.isPending && installMutation.variables === selectedApp.name) ||
               (updateMutation.isPending && updateMutation.variables === selectedApp.name) ||
-              (deleteMutation.isPending && deleteMutation.variables === selectedApp.name)}
+              (deleteMutation.isPending && deleteMutation.variables === selectedApp.name) ||
+              (restartMutation.isPending && restartMutation.variables === selectedApp.name)}
+            onVpnChangeQueued={() => showToast('VPN change queued', 'success')}
           />
         )
       })()}

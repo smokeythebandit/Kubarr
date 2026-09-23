@@ -64,6 +64,12 @@ export interface AppVpnConfig {
   port_forwarding: boolean;
   created_at: string;
   updated_at: string;
+  operation_id?: string;
+}
+
+export interface VpnOperationResponse {
+  message: string;
+  operation_id: string;
 }
 
 export interface AssignVpnRequest {
@@ -156,8 +162,9 @@ export const appVpnApi = {
   },
 
   // Remove VPN from an app
-  removeVpn: async (appName: string): Promise<void> => {
-    await apiClient.delete(`/vpn/apps/${appName}`);
+  removeVpn: async (appName: string): Promise<VpnOperationResponse> => {
+    const response = await apiClient.delete<VpnOperationResponse>(`/vpn/apps/${appName}`);
+    return response.data;
   },
 
   // Get the VPN forwarded port for an app

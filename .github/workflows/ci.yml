@@ -35,13 +35,31 @@ jobs:
     with:
       image-tag: ci-${{ github.sha }}
 
+  acceptance:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/acceptance.yml
+    with:
+      image-tag: ci-${{ github.sha }}
+
+  vpn-acceptance:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/vpn-acceptance.yml
+    with:
+      image-tag: ci-${{ github.sha }}
+
   publish:
-    needs: [build, test]
+    needs: [build, test, acceptance, vpn-acceptance]
     if: >-
       !cancelled() && github.event_name != 'pull_request' &&
       needs.build.result == 'success' &&
-      (needs.test.result == 'success' ||
-       (!startsWith(github.ref, 'refs/tags/v') && needs.test.result == 'skipped'))
+      ((startsWith(github.ref, 'refs/tags/v') &&
+        needs.test.result == 'success' && needs.acceptance.result == 'success' &&
+        needs.vpn-acceptance.result == 'success') ||
+       (!startsWith(github.ref, 'refs/tags/v') &&
+        needs.test.result == 'skipped' && needs.acceptance.result == 'skipped' &&
+        needs.vpn-acceptance.result == 'skipped'))
     uses: ./.github/workflows/publish.yml
     with:
       image-tag: ci-${{ github.sha }}

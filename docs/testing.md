@@ -56,6 +56,70 @@ See `code/frontend/tests/README.md` for fixtures, scenarios, and remaining gaps.
 
 ## Live And External Tests
 
+### Controlled VPN acceptance
+
+`tests/acceptance/vpn/` creates a real WireGuard server and two controlled HTTP
+endpoints on isolated Docker networks. The production Sonarr/Gluetun integration
+is configured through the browser in a separate disposable cluster. The suite
+checks handshake/counters, source identity, three server-outage rounds, route-loss
+kill-switch behavior, recovery, and UI removal. Independent endpoint logs check
+for escaped requests while an unprotected control verifies reachability.
+
+This lane passed locally with exit status 0 and complete cleanup on 2026-09-23.
+See `tests/acceptance/vpn/validated-run-2026-09-23.md`. It protects the existing
+`kubarr-local` environment and does not use commercial credentials. Coverage is
+explicitly IPv4 HTTP, not IPv6/DNS or universal VPN leak protection.
+
+The dedicated `vpn-acceptance.yml` workflow can run manually and is required for
+tagged publication. Its kernel-module and inotify setup applies only to ephemeral
+CI runners; local host changes require explicit operator action.
+
+### Real application lifecycle acceptance
+
+`.github/workflows/acceptance.yml` runs `tests/acceptance/app-lifecycle.sh`.
+Manual dispatch builds current images; release-tag CI passes its existing image
+tag and reuses the build artifacts without uploading duplicate artifacts.
+Tagged publication requires both this acceptance job and the separate legacy
+browser release suite to succeed. Pull requests retain the fast test lane.
+
+Acceptance has independent `api` and `frontend` matrix jobs. The frontend job uses
+Chromium against the real gateway for 14 UI-driven settings, VPN configuration,
+and app lifecycle scenarios. It does not mock API responses. App operations must
+finish in the worker and workloads must become healthy; reload/read-only API
+checks verify settings persistence. VPN tests use unassigned disposable providers
+and do not claim tunnel connectivity. See `code/frontend/tests/real/README.md` and
+`tests/acceptance/validated-frontend-run-2026-09-22.md` for the passing local run.
+
+The acceptance harness uses an isolated Kind kubeconfig, real CLI bootstrap,
+managed NFS, a local OCI registry, and actual Sonarr workloads. It installs through
+Kubarr's API/worker, checks Sonarr's API through the authenticated gateway, changes
+a real application setting, writes an NFS sentinel, upgrades between two chart
+versions, replaces the worker during a running upgrade, restarts Sonarr, and
+uninstalls it. The old worker's logs must show the shutdown signal before completion
+of that exact operation; observing only a ready replacement is insufficient.
+Version/revision, pod replacement,
+application configuration, and exact sentinel contents are asserted. Both chart
+versions deliberately use the same application image; this does not test Sonarr
+binary/database migration compatibility or a previous-to-current Kubarr upgrade.
+
+See `tests/acceptance/README.md` for build commands and the explicit disposable-run
+opt-in. Host NFS modules must already be loaded locally; CI loads them explicitly.
+The offline helper checks run on PRs but do not count as a successful deployment.
+
+Runtime catalog injection uses:
+
+| Variable | Purpose |
+| --- | --- |
+| `KUBARR_CHARTS_SOURCE_DIR` | Optional read-only chart metadata tree replacing GitHub discovery. ConfigMap-projected metadata symlinks are supported only within that tree. |
+| `KUBARR_CHARTS_REGISTRY` | OCI source for real chart pulls and installs. |
+| `KUBARR_CHARTS_PLAIN_HTTP` | Explicit `true` to allow a disposable HTTP registry; defaults to false. Never enable for untrusted networks. |
+| `KUBARR_CHARTS_DIR` | Downloaded chart cache, distinct from the metadata source. |
+
+Catalog sync serializes concurrent requests within a process and reports pull
+failures rather than recording a successful sync. Registry images and third-party
+application images still need to be downloaded before execution; the suite is not
+fully offline. Default Kind networking does not prove NetworkPolicy enforcement.
+
 The release-only workflow remains separate because it needs images, a disposable
 Kind cluster, NFS kernel support, and published chart artifacts. See
 `.github/E2E.md` for its prerequisites and the outstanding chart publication/pin
@@ -69,7 +133,8 @@ or use an inherited `DATABASE_URL` for destructive migration checks. Cargo's
 The existing library suite also contains legacy provider/configuration tests;
 the new contract tests do not certify the entire historical suite as hermetic.
 
-The next priorities are isolated PostgreSQL migration/claim tests, interrupted
-worker recovery, isolated live storage/2FA scenarios, and real gateway
-and NetworkPolicy enforcement checks. Fast mocks cannot establish cluster admission,
+The next priorities are isolated PostgreSQL migration/claim tests, recovery after
+abrupt worker/node loss (as distinct from tested graceful shutdown), isolated live
+2FA scenarios, application-binary/platform upgrade pairs, and NetworkPolicy
+enforcement checks. Fast mocks cannot establish cluster admission,
 VPN connectivity, provider delivery, DNS/TLS, or network isolation.

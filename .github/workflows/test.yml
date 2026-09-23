@@ -43,7 +43,9 @@ jobs:
     env:
       KIND_CLUSTER: kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       KUBECONFIG: /tmp/kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}.kubeconfig
-      CHARTS_REV: ae335477cd0a12f649e8b171d5464dcb2a3b7a5f
+      CHARTS_REV: 01e45468f233b03b4a7d70a320aec9075f77c213
+      # Catalog versions must match the upstream-aligned OCI packages being published.
+      CATALOG_REV: 8f327ba6a8e1203e8b078a73d1e46ae1c03a5b32
       TAG: ${{ inputs.image-tag }}
       TEST_USERNAME: admin
       TEST_PASSWORD: adminadmin
@@ -205,9 +207,9 @@ jobs:
             --storage-mode managed-nfs --storage-size 5Gi --storage-class standard \
             --admin-username "$TEST_USERNAME" --admin-email admin@example.com \
             --admin-password "$TEST_PASSWORD"
-          # Restart with the same catalog revision before tests can install apps.
+          # Both processes must discover the same published catalog versions.
           for component in kubarr-backend kubarr-worker; do
-            kubectl set env "deployment/$component" -n "$component" "KUBARR_CHARTS_GIT_REF=$CHARTS_REV"
+            kubectl set env "deployment/$component" -n "$component" "KUBARR_CHARTS_GIT_REF=$CATALOG_REV"
           done
 
       - name: Wait for pods

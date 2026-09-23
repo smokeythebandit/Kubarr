@@ -3,14 +3,15 @@
 //! Discovers charts from GitHub and pulls them from an OCI registry
 //! so the catalog always reflects the latest published versions.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 
 use crate::config::CONFIG;
@@ -33,6 +34,7 @@ struct DiscoveredChart {
 
 #[derive(Deserialize)]
 struct ChartMetadata {
+    name: String,
     version: String,
 }
 
@@ -40,6 +42,7 @@ struct ChartMetadata {
 pub struct ChartSyncService {
     catalog: SharedCatalog,
     client: reqwest::Client,
+    sync_lock: tokio::sync::Mutex<()>,
     last_synced: tokio::sync::RwLock<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
@@ -53,6 +56,7 @@ impl ChartSyncService {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("failed to build reqwest client"),
+            sync_lock: tokio::sync::Mutex::new(()),
             last_synced: tokio::sync::RwLock::new(None),
         }
     }
@@ -69,18 +73,44 @@ impl ChartSyncService {
         let catalog = self.catalog.read().await;
         let now = chrono::Utc::now();
 
-        for state in app_state::Entity::find().all(db).await? {
-            let available = catalog.chart_version(&state.app_name);
-            let update_available = matches!(
-                (&state.installed_chart_version, &available),
-                (Some(installed), Some(available)) if installed != available
-            );
-            let mut active: app_state::ActiveModel = state.into();
-            active.available_chart_version = Set(available);
-            active.update_available = Set(update_available);
-            active.last_checked_at = Set(Some(now));
-            active.updated_at = Set(now);
-            active.update(db).await?;
+        for initial_state in app_state::Entity::find().all(db).await? {
+            let observed_available = catalog.chart_version(&initial_state.app_name);
+            let mut state = initial_state;
+            loop {
+                let available = observed_available
+                    .clone()
+                    .or_else(|| state.available_chart_version.clone());
+                let update_available = matches!(
+                    (&state.installed_chart_version, &available),
+                    (Some(installed), Some(available)) if installed != available
+                );
+                let installed_before = state.installed_chart_version.clone();
+                let available_before = state.available_chart_version.clone();
+                let app_name = state.app_name.clone();
+                let mut active: app_state::ActiveModel = state.into();
+                active.available_chart_version = Set(available);
+                active.update_available = Set(update_available);
+                active.last_checked_at = Set(Some(now));
+                active.updated_at = Set(now);
+                let mut update = app_state::Entity::update_many()
+                    .set(active)
+                    .filter(app_state::Column::AppName.eq(&app_name));
+                update = update.filter(match installed_before.as_deref() {
+                    Some(version) => app_state::Column::InstalledChartVersion.eq(version),
+                    None => app_state::Column::InstalledChartVersion.is_null(),
+                });
+                update = update.filter(match available_before.as_deref() {
+                    Some(version) => app_state::Column::AvailableChartVersion.eq(version),
+                    None => app_state::Column::AvailableChartVersion.is_null(),
+                });
+                if update.exec(db).await?.rows_affected != 0 {
+                    break;
+                }
+                let Some(current) = app_state::Entity::find_by_id(app_name).one(db).await? else {
+                    break;
+                };
+                state = current;
+            }
         }
 
         Ok(())
@@ -88,14 +118,39 @@ impl ChartSyncService {
 
     /// Discover chart names from the GitHub repo, pull each from OCI, and reload the catalog.
     pub async fn sync(self: &Arc<Self>) -> anyhow::Result<()> {
-        let charts = match self.discover_charts().await {
-            Ok(charts) => charts,
-            Err(e) => {
-                tracing::warn!(
-                    "Chart sync: GitHub Contents API discovery failed, trying archive fallback: {}",
-                    e
-                );
-                self.discover_charts_from_archive().await?
+        self.run_serialized(self.sync_transaction()).await
+    }
+
+    /// Sync the process catalog and persist its versions as the shared authoritative targets.
+    pub async fn sync_and_refresh(self: &Arc<Self>, db: &DatabaseConnection) -> anyhow::Result<()> {
+        self.run_serialized(async {
+            self.sync_transaction().await?;
+            self.refresh_available_chart_versions(db).await
+        })
+        .await
+    }
+
+    async fn run_serialized<F>(&self, transaction: F) -> anyhow::Result<()>
+    where
+        F: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let _guard = self.sync_lock.lock().await;
+        transaction.await
+    }
+
+    async fn sync_transaction(self: &Arc<Self>) -> anyhow::Result<()> {
+        let charts = if let Some(source_dir) = CONFIG.charts.source_dir.as_deref() {
+            discover_charts_from_local_source(source_dir)?
+        } else {
+            match self.discover_charts().await {
+                Ok(charts) => charts,
+                Err(e) => {
+                    tracing::warn!(
+                        "Chart sync: GitHub Contents API discovery failed, trying archive fallback: {}",
+                        e
+                    );
+                    self.discover_charts_from_archive().await?
+                }
             }
         };
 
@@ -104,34 +159,55 @@ impl ChartSyncService {
             return Ok(());
         }
 
-        let mut synced = 0u32;
-        for chart in &charts {
+        self.sync_discovered_with(charts, |chart| {
             // Helm/tar/filesystem work is blocking; keep it off the async
             // workers without re-entering the runtime (a nested `block_on`
             // here panics the timer driver if the runtime shuts down while a
             // sync is in flight, taking the whole process down with it).
             let service = self.clone();
-            let chart = chart.clone();
-            let chart_name = chart.name.clone();
-            let chart_version = chart.version.clone();
-            match tokio::task::spawn_blocking(move || service.pull_chart(&chart)).await {
-                Ok(Ok(())) => synced += 1,
-                Ok(Err(e)) => tracing::warn!(
-                    "Chart sync: failed to pull {} {}: {}",
-                    chart_name,
-                    chart_version,
-                    e
-                ),
-                Err(e) => {
-                    tracing::warn!("Chart sync: pull task for {} panicked: {}", chart_name, e)
+            async move {
+                tokio::task::spawn_blocking(move || service.pull_chart(&chart))
+                    .await
+                    .map_err(|error| anyhow::anyhow!("pull task panicked: {error}"))?
+            }
+        })
+        .await
+    }
+
+    async fn sync_discovered_with<P, F>(
+        &self,
+        charts: Vec<DiscoveredChart>,
+        mut pull: P,
+    ) -> anyhow::Result<()>
+    where
+        P: FnMut(DiscoveredChart) -> F,
+        F: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let mut synced = 0usize;
+        let mut failures = Vec::new();
+        for chart in charts {
+            let name = chart.name.clone();
+            let version = chart.version.clone();
+            match pull(chart).await {
+                Ok(()) => synced += 1,
+                Err(error) => {
+                    tracing::warn!("Chart sync: failed to pull {name} {version}: {error}");
+                    failures.push(format!("{name} {version}: {error}"));
                 }
             }
         }
 
-        // Reload the catalog from the (now-updated) charts directory
+        // Reload even after a partial failure: successfully pulled charts are
+        // complete atomic directory swaps and are safer to expose than to hide
+        // behind a stale in-memory catalog. The transaction still fails and
+        // does not advance last_synced until every requested chart succeeds.
         {
             let mut catalog = self.catalog.write().await;
             catalog.reload();
+        }
+
+        if !failures.is_empty() {
+            anyhow::bail!("chart sync failed for: {}", failures.join("; "));
         }
 
         *self.last_synced.write().await = Some(chrono::Utc::now());
@@ -304,17 +380,13 @@ impl ChartSyncService {
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)?;
 
-        let output = Command::new("helm")
-            .args([
-                "pull",
-                &chart_ref,
-                "--version",
-                &chart.version,
-                "--untar",
-                "--destination",
-                &staging.to_string_lossy(),
-            ])
-            .output();
+        let args = helm_pull_args(
+            &chart_ref,
+            &chart.version,
+            &staging.to_string_lossy(),
+            CONFIG.charts.plain_http,
+        );
+        let output = Command::new("helm").args(&args).output();
         let result = (|| {
             let output = output?;
             if !output.status.success() {
@@ -340,8 +412,196 @@ impl ChartSyncService {
 }
 
 fn chart_version_from_yaml(content: &str) -> anyhow::Result<String> {
-    let metadata: ChartMetadata = serde_yaml::from_str(content)?;
+    #[derive(Deserialize)]
+    struct VersionMetadata {
+        version: String,
+    }
+    let metadata: VersionMetadata = serde_yaml::from_str(content)?;
     Ok(metadata.version)
+}
+
+fn discover_charts_from_local_source(root: &Path) -> anyhow::Result<Vec<DiscoveredChart>> {
+    if !root.is_dir() {
+        anyhow::bail!(
+            "KUBARR_CHARTS_SOURCE_DIR is not a readable directory: {}",
+            root.display()
+        );
+    }
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to resolve KUBARR_CHARTS_SOURCE_DIR {}: {error}",
+            root.display()
+        )
+    })?;
+
+    let mut pending = VecDeque::from([root.to_path_buf()]);
+    let mut names = HashSet::new();
+    let mut charts = Vec::new();
+    while let Some(dir) = pending.pop_front() {
+        let entries = fs::read_dir(&dir).map_err(|error| {
+            anyhow::anyhow!("failed to read chart source {}: {error}", dir.display())
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                anyhow::anyhow!("failed to read chart source {}: {error}", dir.display())
+            })?;
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push_back(entry.path());
+            }
+        }
+
+        let metadata_path = dir.join("Chart.yaml");
+        let file_type = match fs::symlink_metadata(&metadata_path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                anyhow::bail!("failed to inspect {}: {error}", metadata_path.display())
+            }
+        };
+        let metadata_read_path = if file_type.is_file() {
+            metadata_path.clone()
+        } else if file_type.is_symlink() {
+            let target = fs::canonicalize(&metadata_path).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to resolve chart metadata symlink {}: {error}",
+                    metadata_path.display()
+                )
+            })?;
+            if !target.starts_with(&canonical_root) {
+                anyhow::bail!(
+                    "chart metadata symlink {} resolves outside KUBARR_CHARTS_SOURCE_DIR to {}",
+                    metadata_path.display(),
+                    target.display()
+                );
+            }
+            if !target.is_file() {
+                anyhow::bail!(
+                    "chart metadata symlink {} does not resolve to a regular file",
+                    metadata_path.display()
+                );
+            }
+            target
+        } else {
+            continue;
+        };
+        let content = fs::read_to_string(&metadata_read_path)?;
+        let metadata: ChartMetadata = serde_yaml::from_str(&content).map_err(|error| {
+            anyhow::anyhow!(
+                "invalid chart metadata {}: {error}",
+                metadata_path.display()
+            )
+        })?;
+        validate_chart_name(&metadata.name).map_err(|error| {
+            anyhow::anyhow!("invalid chart name in {}: {error}", metadata_path.display())
+        })?;
+        validate_chart_version(&metadata.version).map_err(|error| {
+            anyhow::anyhow!(
+                "invalid chart version in {}: {error}",
+                metadata_path.display()
+            )
+        })?;
+        if !names.insert(metadata.name.clone()) {
+            anyhow::bail!("duplicate chart name '{}' in local source", metadata.name);
+        }
+        charts.push(DiscoveredChart {
+            name: metadata.name,
+            version: metadata.version,
+        });
+    }
+
+    if charts.is_empty() {
+        anyhow::bail!(
+            "KUBARR_CHARTS_SOURCE_DIR contains no charts: {}",
+            root.display()
+        );
+    }
+    charts.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(charts)
+}
+
+fn validate_chart_name(name: &str) -> anyhow::Result<()> {
+    let safe = !name.is_empty()
+        && name.len() <= 253
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'.'
+        })
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && !name.contains("..");
+    if !safe {
+        anyhow::bail!("'{name}' is not a safe Helm/OCI chart name");
+    }
+    Ok(())
+}
+
+fn validate_chart_version(version: &str) -> anyhow::Result<()> {
+    let mut build_parts = version.split('+');
+    let version_without_build = build_parts.next().unwrap_or_default();
+    let build = build_parts.next();
+    let one_build = build_parts.next().is_none();
+    let mut prerelease_parts = version_without_build.splitn(2, '-');
+    let core = prerelease_parts.next().unwrap_or_default();
+    let prerelease = prerelease_parts.next();
+    let core_is_semver = core.split('.').count() == 3
+        && core.split('.').all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part == "0" || !part.starts_with('0'))
+        });
+    let identifiers_are_valid = |identifiers: &str, reject_leading_zero: bool| {
+        !identifiers.is_empty()
+            && identifiers.split('.').all(|identifier| {
+                !identifier.is_empty()
+                    && identifier
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    && !(reject_leading_zero
+                        && identifier.len() > 1
+                        && identifier.bytes().all(|byte| byte.is_ascii_digit())
+                        && identifier.starts_with('0'))
+            })
+    };
+    let safe = !version.is_empty()
+        && core_is_semver
+        && one_build
+        && prerelease.is_none_or(|value| identifiers_are_valid(value, true))
+        && build.is_none_or(|value| identifiers_are_valid(value, false));
+    if !safe {
+        anyhow::bail!("'{version}' is not a safe semantic chart version");
+    }
+    Ok(())
+}
+
+fn helm_pull_args(
+    chart_ref: &str,
+    version: &str,
+    destination: &str,
+    plain_http: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "pull".to_string(),
+        chart_ref.to_string(),
+        "--version".to_string(),
+        version.to_string(),
+        "--untar".to_string(),
+        "--destination".to_string(),
+        destination.to_string(),
+    ];
+    if plain_http {
+        args.push("--plain-http".to_string());
+    }
+    args
 }
 
 /// Periodic task wrapper that runs chart sync on an interval.
@@ -360,8 +620,7 @@ impl super::scheduler::PeriodicTask for ChartSyncTask {
     }
 
     async fn run(&self, _db: &DatabaseConnection) -> anyhow::Result<()> {
-        self.service.clone().sync_on_blocking_thread().await?;
-        self.service.refresh_available_chart_versions(_db).await
+        self.service.sync_and_refresh(_db).await
     }
 }
 
@@ -476,5 +735,285 @@ mod tests {
         let version = chart_version_from_yaml("name: openresty\nversion: 1.29.2+5.1\n")
             .expect("chart metadata");
         assert_eq!(version, "1.29.2+5.1");
+    }
+
+    fn write_chart(parent: &Path, directory: &str, name: &str, version: &str) {
+        let directory = parent.join(directory);
+        fs::create_dir_all(&directory).expect("chart directory");
+        fs::write(
+            directory.join("Chart.yaml"),
+            format!("apiVersion: v2\nname: {name}\nversion: {version}\n"),
+        )
+        .expect("chart metadata");
+    }
+
+    fn discovered(name: &str, version: &str) -> DiscoveredChart {
+        DiscoveredChart {
+            name: name.into(),
+            version: version.into(),
+        }
+    }
+
+    fn test_service() -> Arc<ChartSyncService> {
+        use crate::services::catalog::AppCatalog;
+        use std::collections::HashMap;
+        use tokio::sync::RwLock;
+
+        Arc::new(ChartSyncService::new(Arc::new(RwLock::new(
+            AppCatalog::with_apps(HashMap::new()),
+        ))))
+    }
+
+    #[tokio::test]
+    async fn serialized_sync_success_updates_last_synced() {
+        let service = test_service();
+        assert_eq!(service.last_synced().await, None);
+
+        service
+            .run_serialized(
+                service
+                    .sync_discovered_with(vec![discovered("alpha", "1.0.0")], |_| async { Ok(()) }),
+            )
+            .await
+            .expect("sync succeeds");
+
+        assert!(service.last_synced().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn serialized_sync_failure_is_aggregated_and_preserves_last_synced() {
+        let service = test_service();
+        service
+            .run_serialized(
+                service.sync_discovered_with(vec![discovered("initial", "1.0.0")], |_| async {
+                    Ok(())
+                }),
+            )
+            .await
+            .expect("initial sync");
+        let initial_timestamp = service.last_synced().await;
+
+        let error = service
+            .run_serialized(service.sync_discovered_with(
+                vec![discovered("alpha", "1.0.0"), discovered("beta", "2.0.0")],
+                |chart| async move { anyhow::bail!("injected failure for {}", chart.name) },
+            ))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("alpha 1.0.0"), "{message}");
+        assert!(message.contains("beta 2.0.0"), "{message}");
+        assert_eq!(service.last_synced().await, initial_timestamp);
+    }
+
+    #[tokio::test]
+    async fn concurrent_sync_transactions_execute_one_at_a_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::{Barrier, Notify};
+
+        let service = test_service();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let first_entered = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+
+        let first_service = service.clone();
+        let first_active = active.clone();
+        let first_max = max_active.clone();
+        let first_entered_task = first_entered.clone();
+        let first_release = release_first.clone();
+        let first = tokio::spawn(async move {
+            first_service
+                .run_serialized(first_service.sync_discovered_with(
+                    vec![discovered("first", "1.0.0")],
+                    move |_| {
+                        let active = first_active.clone();
+                        let max_active = first_max.clone();
+                        let entered = first_entered_task.clone();
+                        let release = first_release.clone();
+                        async move {
+                            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            max_active.fetch_max(count, Ordering::SeqCst);
+                            entered.notify_one();
+                            release.notified().await;
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                ))
+                .await
+        });
+        first_entered.notified().await;
+
+        let second_started = Arc::new(Barrier::new(2));
+        let second_service = service.clone();
+        let second_active = active.clone();
+        let second_max = max_active.clone();
+        let second_barrier = second_started.clone();
+        let second = tokio::spawn(async move {
+            second_barrier.wait().await;
+            second_service
+                .run_serialized(second_service.sync_discovered_with(
+                    vec![discovered("second", "1.0.0")],
+                    move |_| {
+                        let active = second_active.clone();
+                        let max_active = second_max.clone();
+                        async move {
+                            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            max_active.fetch_max(count, Ordering::SeqCst);
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                ))
+                .await
+        });
+        second_started.wait().await;
+        // Give the second transaction a deterministic opportunity to contend
+        // for the lock while the first pull remains blocked by the notification.
+        tokio::task::yield_now().await;
+        release_first.notify_one();
+
+        first.await.expect("first task").expect("first sync");
+        second.await.expect("second task").expect("second sync");
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn local_source_discovers_metadata_names_and_nested_charts() {
+        let source = tempfile::tempdir().expect("source");
+        write_chart(source.path(), "arbitrary-a", "alpha", "1.2.3");
+        write_chart(
+            source.path(),
+            "nested/arbitrary-b",
+            "beta",
+            "2.0.0-rc.1+build.7",
+        );
+        write_chart(source.path(), ".hidden/ignored", "ignored", "1.0.0");
+
+        let charts = discover_charts_from_local_source(source.path()).expect("discovery");
+        assert_eq!(
+            charts,
+            vec![
+                DiscoveredChart {
+                    name: "alpha".into(),
+                    version: "1.2.3".into(),
+                },
+                DiscoveredChart {
+                    name: "beta".into(),
+                    version: "2.0.0-rc.1+build.7".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn local_source_rejects_missing_empty_and_duplicate_catalogs() {
+        let source = tempfile::tempdir().expect("source");
+        assert!(discover_charts_from_local_source(&source.path().join("missing")).is_err());
+        assert!(discover_charts_from_local_source(source.path()).is_err());
+
+        write_chart(source.path(), "one", "duplicate", "1.0.0");
+        write_chart(source.path(), "nested/two", "duplicate", "2.0.0");
+        let error = discover_charts_from_local_source(source.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate chart name"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn local_source_rejects_missing_or_unsafe_metadata() {
+        for (metadata, expected) in [
+            ("apiVersion: v2\nversion: 1.0.0\n", "name"),
+            (
+                "apiVersion: v2\nname: ../escape\nversion: 1.0.0\n",
+                "chart name",
+            ),
+            (
+                "apiVersion: v2\nname: Uppercase\nversion: 1.0.0\n",
+                "chart name",
+            ),
+            ("apiVersion: v2\nname: valid\n", "version"),
+            (
+                "apiVersion: v2\nname: valid\nversion: latest\n",
+                "chart version",
+            ),
+            (
+                "apiVersion: v2\nname: valid\nversion: 1.2.3-\n",
+                "chart version",
+            ),
+        ] {
+            let source = tempfile::tempdir().expect("source");
+            fs::write(source.path().join("Chart.yaml"), metadata).expect("metadata");
+            let error = discover_charts_from_local_source(source.path()).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn helm_pull_plain_http_is_opt_in() {
+        let secure = helm_pull_args("oci://registry/chart", "1.0.0", "/cache", false);
+        assert!(!secure.iter().any(|arg| arg == "--plain-http"));
+        let plain = helm_pull_args("oci://registry/chart", "1.0.0", "/cache", true);
+        assert_eq!(plain.last().map(String::as_str), Some("--plain-http"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_source_reads_configmap_symlink_and_observes_data_swap() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source");
+        write_chart(source.path(), "..2026_a", "configmap-chart", "1.0.0");
+        write_chart(source.path(), "..2026_b", "configmap-chart", "2.0.0");
+        symlink("..2026_a", source.path().join("..data")).expect("initial ..data symlink");
+        symlink("..data/Chart.yaml", source.path().join("Chart.yaml"))
+            .expect("ConfigMap key symlink");
+
+        assert_eq!(
+            discover_charts_from_local_source(source.path()).expect("initial discovery"),
+            vec![DiscoveredChart {
+                name: "configmap-chart".into(),
+                version: "1.0.0".into(),
+            }]
+        );
+
+        fs::remove_file(source.path().join("..data")).expect("remove old ..data symlink");
+        symlink("..2026_b", source.path().join("..data")).expect("replacement ..data symlink");
+        assert_eq!(
+            discover_charts_from_local_source(source.path()).expect("discovery after swap"),
+            vec![DiscoveredChart {
+                name: "configmap-chart".into(),
+                version: "2.0.0".into(),
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_source_rejects_chart_metadata_symlink_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source");
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(
+            outside.path().join("Chart.yaml"),
+            "apiVersion: v2\nname: outside\nversion: 1.0.0\n",
+        )
+        .expect("outside metadata");
+        symlink(
+            outside.path().join("Chart.yaml"),
+            source.path().join("Chart.yaml"),
+        )
+        .expect("outside symlink");
+
+        let error = discover_charts_from_local_source(source.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("resolves outside KUBARR_CHARTS_SOURCE_DIR"),
+            "{error}"
+        );
     }
 }

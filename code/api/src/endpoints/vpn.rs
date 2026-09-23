@@ -5,12 +5,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use sea_orm::TransactionTrait;
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::middleware::permissions::{Authorized, VpnManage, VpnView};
-use crate::services::deployment::{DeploymentManager, DeploymentRequest};
-use crate::services::storage_config;
+use crate::services::app_manager::AppManager;
 use crate::services::vpn::{
     self, AppVpnConfigResponse, AssignVpnRequest, CreateVpnProviderRequest, SupportedProvider,
     UpdateVpnProviderRequest, VpnProviderResponse, VpnTestResult,
@@ -58,6 +58,12 @@ pub struct AppConfigsResponse {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SupportedProvidersResponse {
     pub providers: Vec<SupportedProvider>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RemoveVpnResponse {
+    pub message: String,
+    pub operation_id: String,
 }
 
 // ============================================================================
@@ -166,11 +172,7 @@ async fn delete_provider(
     _auth: Authorized<VpnManage>,
 ) -> Result<Json<serde_json::Value>> {
     let db = state.get_db().await?;
-    let k8s = state.k8s_client.read().await;
-    let client = k8s.as_ref().ok_or_else(|| {
-        crate::error::AppError::Internal("Kubernetes client not available".to_string())
-    })?;
-    vpn::delete_vpn_provider(&db, client, id).await?;
+    vpn::delete_vpn_provider(&db, id).await?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -261,41 +263,31 @@ async fn get_app_config(
 async fn assign_vpn(
     State(state): State<AppState>,
     Path(app_name): Path<String>,
-    _auth: Authorized<VpnManage>,
+    auth: Authorized<VpnManage>,
     Json(req): Json<AssignVpnRequest>,
 ) -> Result<Json<AppVpnConfigResponse>> {
     let db = state.get_db().await?;
-    // Save VPN config to database
-    let config = vpn::assign_vpn_to_app(&db, &app_name, req).await?;
-
-    // Trigger redeploy to apply VPN changes
-    let k8s = state.k8s_client.read().await;
-    if let Some(k8s_client) = k8s.as_ref() {
+    {
         let catalog = state.catalog.read().await;
-        let deployment_manager = DeploymentManager::with_db(k8s_client, &catalog, &db);
-        let deploy_request = DeploymentRequest {
-            app_name: app_name.clone(),
-            custom_config: std::collections::HashMap::new(),
-            reuse_values: true,
-            wait: true,
-        };
-        let storage = storage_config::get_storage_config_from_db(&db)
-            .await
-            .ok()
-            .flatten()
-            .map(|(config, _)| config);
-        match deployment_manager
-            .deploy_app(&deploy_request, storage.as_ref())
-            .await
-        {
-            Ok(status) => {
-                tracing::info!("Redeployed app {} with VPN: {}", app_name, status.message);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to redeploy app {} with VPN: {}", app_name, e);
-            }
+        let app = catalog.get_app(&app_name).ok_or_else(|| {
+            AppError::NotFound(format!("App '{}' not found in catalog", app_name))
+        })?;
+        if app.is_system {
+            return Err(AppError::BadRequest(format!(
+                "VPN is not supported for system app '{}'",
+                app_name
+            )));
         }
     }
+
+    let transaction = db.begin().await?;
+    let mut config = vpn::assign_vpn_to_app(&transaction, &app_name, req).await?;
+    let manager = AppManager::new(db, state.k8s_client.clone(), state.catalog.clone());
+    let operation = manager
+        .enqueue_update_in_transaction(&transaction, &app_name, Some(auth.user_id()))
+        .await?;
+    transaction.commit().await?;
+    config.operation_id = Some(operation.id);
 
     Ok(Json(config))
 }
@@ -315,48 +307,34 @@ async fn assign_vpn(
 async fn remove_vpn(
     State(state): State<AppState>,
     Path(app_name): Path<String>,
-    _auth: Authorized<VpnManage>,
-) -> Result<Json<serde_json::Value>> {
+    auth: Authorized<VpnManage>,
+) -> Result<Json<RemoveVpnResponse>> {
     let db = state.get_db().await?;
-    let k8s = state.k8s_client.read().await;
-    let client = k8s.as_ref().ok_or_else(|| {
-        crate::error::AppError::Internal("Kubernetes client not available".to_string())
-    })?;
-
-    // Remove VPN config from database
-    vpn::remove_vpn_from_app(&db, client, &app_name).await?;
-
-    // Trigger redeploy to remove VPN sidecar
-    let catalog = state.catalog.read().await;
-    let deployment_manager = DeploymentManager::with_db(client, &catalog, &db);
-    let deploy_request = DeploymentRequest {
-        app_name: app_name.clone(),
-        custom_config: std::collections::HashMap::new(),
-        reuse_values: true,
-        wait: true,
-    };
-    let storage = storage_config::get_storage_config_from_db(&db)
-        .await
-        .ok()
-        .flatten()
-        .map(|(config, _)| config);
-    match deployment_manager
-        .deploy_app(&deploy_request, storage.as_ref())
-        .await
     {
-        Ok(status) => {
-            tracing::info!(
-                "Redeployed app {} without VPN: {}",
-                app_name,
-                status.message
-            );
-        }
-        Err(e) => {
-            tracing::warn!("Failed to redeploy app {} without VPN: {}", app_name, e);
+        let catalog = state.catalog.read().await;
+        let app = catalog.get_app(&app_name).ok_or_else(|| {
+            AppError::NotFound(format!("App '{}' not found in catalog", app_name))
+        })?;
+        if app.is_system {
+            return Err(AppError::BadRequest(format!(
+                "VPN is not supported for system app '{}'",
+                app_name
+            )));
         }
     }
 
-    Ok(Json(serde_json::json!({ "success": true })))
+    let transaction = db.begin().await?;
+    vpn::remove_vpn_from_app(&transaction, &app_name).await?;
+    let manager = AppManager::new(db, state.k8s_client.clone(), state.catalog.clone());
+    let operation = manager
+        .enqueue_update_in_transaction(&transaction, &app_name, Some(auth.user_id()))
+        .await?;
+    transaction.commit().await?;
+
+    Ok(Json(RemoveVpnResponse {
+        message: format!("VPN removal queued for app '{}'", app_name),
+        operation_id: operation.id,
+    }))
 }
 
 /// Get the VPN forwarded port for an app (queries Gluetun control API)
@@ -459,8 +437,6 @@ async fn list_supported_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::vpn::{AppVpnConfigResponse, SupportedProvider, VpnProviderResponse};
-    use chrono::Utc;
 
     #[test]
     fn providers_response_ser_empty() {

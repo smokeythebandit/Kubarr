@@ -7,6 +7,39 @@ permissions:
   contents: read
 
 jobs:
+  acceptance-helpers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
+      - name: Checkout pinned charts
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: smokeythebandit/kubarr-charts
+          ref: 01e45468f233b03b4a7d70a320aec9075f77c213
+          path: acceptance-charts
+          persist-credentials: false
+
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2
+        with:
+          version: 4.3.0
+
+      - name: Set up acceptance helper Python dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/acceptance-helpers"
+          "$RUNNER_TEMP/acceptance-helpers/bin/pip" install PyYAML==6.0.3
+          echo "$RUNNER_TEMP/acceptance-helpers/bin" >> "$GITHUB_PATH"
+
+      - name: Offline acceptance safety and polling contracts
+        env:
+          KUBARR_ACCEPTANCE_CHARTS_DIR: ${{ github.workspace }}/acceptance-charts
+        run: |
+          bash tests/acceptance/test-helpers.sh
+          bash tests/acceptance/test-sonarr-api.sh
+          bash tests/acceptance/vpn/test-lab-helpers.sh
+          python3 -B -m unittest discover -s tests/acceptance/vpn -p 'test_*.py' -v
+
   backend:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -31,6 +64,12 @@ jobs:
 
       - name: Session-authenticated enqueue integration
         run: cargo test --locked --test apps_endpoint_tests queues_without_k8s
+        working-directory: code/api
+
+      - name: VPN assignment security and transaction contracts
+        run: |
+          cargo test --locked --test vpn_endpoint_tests
+          cargo test --locked --test vpn_service_tests
         working-directory: code/api
 
   cli:

@@ -12,9 +12,8 @@ use common::create_test_db_with_seed;
 
 use kubarr::models::vpn_provider::VpnType;
 use kubarr::services::vpn::{
-    get_supported_providers, AppVpnConfigResponse, AssignVpnRequest, CreateVpnProviderRequest,
-    OpenVpnCredentials, SupportedProvider, UpdateVpnProviderRequest, VpnCredentials,
-    VpnProviderResponse, VpnTestResult, WireGuardCredentials,
+    get_supported_providers, AssignVpnRequest, CreateVpnProviderRequest, OpenVpnCredentials,
+    UpdateVpnProviderRequest, VpnCredentials, VpnTestResult, WireGuardCredentials,
 };
 
 // ============================================================================
@@ -529,7 +528,7 @@ async fn test_list_providers_after_create() {
 }
 
 #[tokio::test]
-async fn test_get_vpn_deployment_config_disabled_provider_returns_none() {
+async fn test_get_vpn_deployment_config_disabled_provider_returns_error() {
     let db = create_test_db_with_seed().await;
 
     // Create a provider (enabled initially)
@@ -566,13 +565,49 @@ async fn test_get_vpn_deployment_config_disabled_provider_returns_none() {
     };
     active.update(&db).await.expect("disable provider");
 
-    // get_vpn_deployment_config should return None for a disabled provider
-    let config = kubarr::services::vpn::get_vpn_deployment_config(&db, "radarr")
-        .await
-        .expect("get_vpn_deployment_config must succeed");
+    let result = kubarr::services::vpn::get_vpn_deployment_config(&db, "radarr").await;
     assert!(
-        config.is_none(),
-        "Deployment config must be None when provider is disabled"
+        result.is_err(),
+        "An assigned disabled provider must fail deployment closed"
+    );
+}
+
+#[tokio::test]
+async fn test_delete_vpn_provider_rejects_assigned_provider() {
+    let db = create_test_db_with_seed().await;
+    let provider = kubarr::services::vpn::create_vpn_provider(
+        &db,
+        CreateVpnProviderRequest {
+            name: "In use".to_string(),
+            vpn_type: VpnType::WireGuard,
+            service_provider: None,
+            credentials: serde_json::json!({ "private_key": "key" }),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: "10.0.0.0/8".to_string(),
+        },
+    )
+    .await
+    .expect("create provider");
+    kubarr::services::vpn::assign_vpn_to_app(
+        &db,
+        "sonarr",
+        AssignVpnRequest {
+            vpn_provider_id: provider.id,
+            kill_switch_override: None,
+            port_forwarding: None,
+        },
+    )
+    .await
+    .expect("assign provider");
+
+    let result = kubarr::services::vpn::delete_vpn_provider(&db, provider.id).await;
+    assert!(result.is_err(), "an assigned provider must not be deleted");
+    assert!(
+        kubarr::services::vpn::get_vpn_provider(&db, provider.id)
+            .await
+            .is_ok(),
+        "rejected deletion must preserve the provider"
     );
 }
 

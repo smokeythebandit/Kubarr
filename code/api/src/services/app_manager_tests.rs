@@ -2,7 +2,8 @@
 use super::*;
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
-use tokio::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{Notify, RwLock};
 
 const APP: &str = "operation-test-app";
 
@@ -283,7 +284,6 @@ async fn sqlite_competing_claims_of_same_candidate_have_one_winner() {
 
 #[tokio::test]
 async fn competing_workers_execute_only_once() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     let manager = setup().await;
     let queued = manager
         .enqueue_operation(APP, OP_DELETE, HashMap::new(), None)
@@ -305,6 +305,84 @@ async fn competing_workers_execute_only_once() {
     let finished = operation(&manager, &queued.id).await;
     assert_eq!(finished.status, STATUS_SUCCEEDED);
     assert_eq!(finished.attempts, 1);
+}
+
+#[tokio::test]
+async fn cancelled_operation_loop_does_not_claim_queued_work() {
+    let manager = Arc::new(setup().await);
+    let queued = manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), None)
+        .await
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let calls = AtomicUsize::new(0);
+
+    manager
+        .run_operation_loop_with(Duration::from_millis(1), cancellation, |_| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok("unexpected execution".into())
+        })
+        .await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let untouched = operation(&manager, &queued.id).await;
+    assert_eq!(untouched.status, STATUS_QUEUED);
+    assert_eq!(untouched.attempts, 0);
+}
+
+#[tokio::test]
+async fn cancelled_operation_loop_drains_claimed_work_without_claiming_next() {
+    let manager = Arc::new(setup().await);
+    let first = manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), None)
+        .await
+        .unwrap();
+    let second = manager
+        .enqueue_operation(APP, OP_DELETE, HashMap::new(), None)
+        .await
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    let started = Arc::new(Notify::new());
+    let finish = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let task = tokio::spawn({
+        let manager = manager.clone();
+        let cancellation = cancellation.clone();
+        let started = started.clone();
+        let finish = finish.clone();
+        let calls = calls.clone();
+        async move {
+            manager
+                .run_operation_loop_with(Duration::from_millis(1), cancellation, move |_| {
+                    let started = started.clone();
+                    let finish = finish.clone();
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        finish.notified().await;
+                        Ok("Executed during shutdown".into())
+                    }
+                })
+                .await;
+        }
+    });
+
+    started.notified().await;
+    cancellation.cancel();
+    finish.notify_one();
+    task.await.unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        operation(&manager, &first.id).await.status,
+        STATUS_SUCCEEDED
+    );
+    let untouched = operation(&manager, &second.id).await;
+    assert_eq!(untouched.status, STATUS_QUEUED);
+    assert_eq!(untouched.attempts, 0);
 }
 
 #[tokio::test]
@@ -394,4 +472,98 @@ async fn reconciliation_state_write_preserves_requested_intent() {
         assert_eq!(current.observed_state, observed);
         assert_eq!(current.message.as_deref(), Some("Observed"));
     }
+}
+
+async fn write_observation(
+    manager: &AppManager,
+    observed_available: Option<&str>,
+    installed: Option<&str>,
+) {
+    manager
+        .upsert_state_with_chart_versions(
+            APP,
+            APP,
+            DESIRED_INSTALLED,
+            OBS_INSTALLED,
+            true,
+            Some("Observed".into()),
+            None,
+            false,
+            observed_available.map(str::to_owned),
+            installed.map(str::to_owned),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stale_observer_cannot_replace_authoritative_available_version() {
+    let manager = setup().await;
+    write_observation(&manager, Some("2.0.0"), Some("1.0.0")).await;
+
+    write_observation(&manager, Some("1.0.0"), Some("1.0.0")).await;
+
+    let current = state(&manager).await;
+    assert_eq!(current.installed_chart_version.as_deref(), Some("1.0.0"));
+    assert_eq!(current.available_chart_version.as_deref(), Some("2.0.0"));
+    assert!(current.update_available);
+}
+
+#[tokio::test]
+async fn successful_sync_remains_authoritative_during_stale_reconciliation() {
+    let manager = setup().await;
+    write_observation(&manager, Some("1.0.0"), Some("1.0.0")).await;
+    assert!(!state(&manager).await.update_available);
+
+    manager
+        .refresh_available_chart_versions_with(|name| {
+            assert_eq!(name, APP);
+            Some("2.0.0".into())
+        })
+        .await
+        .unwrap();
+    let synced = state(&manager).await;
+    assert_eq!(synced.available_chart_version.as_deref(), Some("2.0.0"));
+    assert!(synced.update_available);
+
+    write_observation(&manager, Some("1.0.0"), Some("1.0.0")).await;
+    let reconciled = state(&manager).await;
+    assert_eq!(reconciled.available_chart_version.as_deref(), Some("2.0.0"));
+    assert!(reconciled.update_available);
+}
+
+#[tokio::test]
+async fn successful_sync_missing_catalog_entry_preserves_existing_pin() {
+    let manager = setup().await;
+    write_observation(&manager, Some("2.0.0"), Some("1.0.0")).await;
+
+    manager
+        .refresh_available_chart_versions_with(|_| None)
+        .await
+        .unwrap();
+
+    let current = state(&manager).await;
+    assert_eq!(current.available_chart_version.as_deref(), Some("2.0.0"));
+    assert!(current.update_available);
+}
+
+#[tokio::test]
+async fn catalog_sync_preserves_queued_operation_intent() {
+    let manager = setup().await;
+    write_observation(&manager, Some("1.0.0"), Some("1.0.0")).await;
+    let queued = manager
+        .enqueue_operation(APP, OP_DELETE, HashMap::new(), None)
+        .await
+        .unwrap();
+
+    manager
+        .refresh_available_chart_versions_with(|_| Some("2.0.0".into()))
+        .await
+        .unwrap();
+
+    let current = state(&manager).await;
+    assert_eq!(current.desired_state, DESIRED_REMOVED);
+    assert_eq!(current.observed_state, OBS_DELETING);
+    assert_eq!(current.last_operation_id, Some(queued.id));
+    assert_eq!(current.available_chart_version.as_deref(), Some("2.0.0"));
 }

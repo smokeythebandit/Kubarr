@@ -50,3 +50,11 @@ docs/.vitepress/dist/
 
 # Playwright test results
 test-results/
+
+# Disposable-cluster logs, tool downloads, snapshots, and private kubeconfigs
+.acceptance-runs/
+.local-cluster/
+
+# Python acceptance helper bytecode
+__pycache__/
+*.py[cod]

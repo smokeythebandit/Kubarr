@@ -4,14 +4,14 @@ use std::process::Command;
 
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
-use k8s_openapi::api::core::v1::{Namespace, Service};
+use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
 use kube::api::{Api, DeleteParams, ListParams};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
 
 use crate::config::CONFIG;
 use crate::error::{AppError, Result};
-use crate::models::app_state;
+use crate::models::{app_state, app_vpn_config};
 use crate::services::catalog::{kubarr_system_component, lifecycle_for_app_name, AppCatalog};
 use crate::services::storage_config::{self, PersistedStorageConfig};
 use crate::services::vpn;
@@ -41,6 +41,12 @@ pub struct DeploymentStatus {
     pub status: String,
     pub message: String,
     pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ReleaseMetadata {
+    version: String,
+    status: String,
 }
 
 /// Deployment manager for applications
@@ -98,22 +104,54 @@ impl<'a> DeploymentManager<'a> {
     pub fn installed_chart_version(&self, app_name: &str) -> Option<String> {
         self.catalog.get_app(app_name)?;
         let lifecycle = lifecycle_for_app_name(app_name);
-        let output = Command::new("helm")
-            .args([
-                "get",
-                "metadata",
-                lifecycle.release_name.as_str(),
-                "-n",
-                lifecycle.release_namespace.as_str(),
-                "-o",
-                "json",
-            ])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        chart_version_from_metadata(&output.stdout)
+        installed_version_from_metadata(self.release_metadata(&lifecycle).ok().flatten())
+    }
+
+    fn release_metadata(
+        &self,
+        lifecycle: &crate::services::catalog::AppLifecycleConfig,
+    ) -> Result<Option<ReleaseMetadata>> {
+        self.release_metadata_with_command(lifecycle, |args| {
+            let output = Command::new("helm")
+                .args(args)
+                .output()
+                .map_err(|error| AppError::Internal(format!("Failed to run helm: {error}")))?;
+            if output.status.success() {
+                return Ok(Some(output.stdout));
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if helm_release_not_found(&stderr) {
+                Ok(None)
+            } else {
+                Err(AppError::Internal(format!(
+                    "Helm metadata command failed: {stderr}"
+                )))
+            }
+        })
+    }
+
+    fn release_metadata_with_command(
+        &self,
+        lifecycle: &crate::services::catalog::AppLifecycleConfig,
+        run_helm: impl FnOnce(&[&str]) -> Result<Option<Vec<u8>>>,
+    ) -> Result<Option<ReleaseMetadata>> {
+        let output = run_helm(&[
+            "get",
+            "metadata",
+            lifecycle.release_name.as_str(),
+            "-n",
+            lifecycle.release_namespace.as_str(),
+            "-o",
+            "json",
+        ])?;
+        output
+            .map(|bytes| {
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    AppError::Internal(format!("Invalid Helm release metadata: {error}"))
+                })
+            })
+            .transpose()
     }
 
     /// Deploy an application using Helm
@@ -137,6 +175,17 @@ impl<'a> DeploymentManager<'a> {
             AppError::NotFound(format!("App '{}' not found in catalog", request.app_name))
         })?;
 
+        validate_custom_config(&request.custom_config)?;
+
+        // Resolve VPN state before making any Kubernetes changes. An assigned
+        // VPN that cannot be resolved must fail closed rather than deploying
+        // the application without its network protection.
+        let vpn_config = match self.db {
+            Some(db) => vpn::get_vpn_deployment_config(db, &request.app_name).await?,
+            None => None,
+        };
+        let cleanup_unassigned_vpn_secret = self.db.is_some() && vpn_config.is_none();
+
         let chart_ref = self.get_chart_ref(&request.app_name);
         let lifecycle = lifecycle_for_app_name(&request.app_name);
         let release = lifecycle.release_name.as_str();
@@ -159,16 +208,12 @@ impl<'a> DeploymentManager<'a> {
         self.k8s.ensure_namespace(namespace).await?;
 
         // Keep Helm 3's client-side apply and readiness checks explicit under Helm 4.
-        let mut helm_args = vec![
-            "upgrade",
-            "--install",
-            "--server-side=false",
+        let mut helm_args = helm_upgrade_install_args(
             release,
             &chart_ref,
-            "-n",
             release_namespace,
-            "--create-namespace",
-        ];
+            CONFIG.charts.plain_http,
+        );
         if let Some(ref version) = chart_version {
             helm_args.extend(["--version", version]);
         }
@@ -211,47 +256,43 @@ impl<'a> DeploymentManager<'a> {
             );
         }
 
-        // Check for VPN configuration
-        if let Some(db) = self.db {
-            if let Ok(Some(vpn_config)) =
-                vpn::get_vpn_deployment_config(db, &request.app_name).await
-            {
-                // Create K8s secret with VPN credentials
-                match vpn::create_vpn_secret_for_app(self.k8s, db, &request.app_name).await {
-                    Ok(secret_name) => {
-                        tracing::info!(
-                            "Created VPN secret {} for app {}",
-                            secret_name,
-                            request.app_name
-                        );
-                        set_args.push("vpn.enabled=true".to_string());
-                        set_args.push(format!("vpn.secretName={}", secret_name));
-                        set_args.push(format!("vpn.killSwitch={}", vpn_config.kill_switch));
-                        if vpn_config.port_forwarding {
-                            set_args.push("vpn.portForwarding.enabled=true".to_string());
-                        }
-                        // Avoid Helm's comma-sensitive --set parser for the CIDR list.
-                        let path = std::env::temp_dir()
-                            .join(format!("kubarr-vpn-values-{}.yaml", uuid::Uuid::new_v4()));
-                        let values = serde_yaml::to_string(&serde_json::json!({
-                            "vpn": {
-                                "firewallOutboundSubnets": vpn_config.firewall_outbound_subnets
-                            }
-                        }))?;
-                        fs::write(&path, values).map_err(|error| {
-                            AppError::Internal(format!("Failed to write Helm values file: {error}"))
-                        })?;
-                        vpn_values_file = Some(path);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to create VPN secret for app {}: {}",
-                            request.app_name,
-                            e
-                        );
-                    }
+        if let Some(vpn_config) = vpn_config {
+            let db = self.db.ok_or_else(|| {
+                AppError::Internal("VPN configuration resolved without a database".to_string())
+            })?;
+            // Secret creation is part of the deployment boundary: never invoke
+            // Helm if credentials could not be installed.
+            let secret_name =
+                vpn::create_vpn_secret_for_app(self.k8s, db, &request.app_name).await?;
+            tracing::info!(
+                "Created VPN secret {} for app {}",
+                secret_name,
+                request.app_name
+            );
+            set_args.push("vpn.enabled=true".to_string());
+            set_args.push(format!("vpn.secretName={}", secret_name));
+            set_args.push(format!("vpn.killSwitch={}", vpn_config.kill_switch));
+            set_args.push(format!(
+                "vpn.portForwarding.enabled={}",
+                vpn_config.port_forwarding
+            ));
+            // Avoid Helm's comma-sensitive --set parser for the CIDR list.
+            let path = std::env::temp_dir()
+                .join(format!("kubarr-vpn-values-{}.yaml", uuid::Uuid::new_v4()));
+            let values = serde_yaml::to_string(&serde_json::json!({
+                "vpn": {
+                    "firewallOutboundSubnets": vpn_config.firewall_outbound_subnets
                 }
-            }
+            }))?;
+            fs::write(&path, values).map_err(|error| {
+                AppError::Internal(format!("Failed to write Helm values file: {error}"))
+            })?;
+            vpn_values_file = Some(path);
+        } else {
+            // These must be explicit even with --reuse-values, otherwise a
+            // previous assignment can leave the VPN sidecar enabled.
+            set_args.push("vpn.enabled=false".to_string());
+            set_args.push("vpn.secretName=".to_string());
         }
 
         // Add custom config
@@ -280,6 +321,11 @@ impl<'a> DeploymentManager<'a> {
         }
         result?;
 
+        if cleanup_unassigned_vpn_secret {
+            self.cleanup_unassigned_vpn_secret(&request.app_name, namespace)
+                .await?;
+        }
+
         Ok(DeploymentStatus {
             app_name: request.app_name.clone(),
             namespace: namespace.to_string(),
@@ -287,6 +333,37 @@ impl<'a> DeploymentManager<'a> {
             message: format!("Deploying {}", app_config.display_name),
             timestamp: Utc::now(),
         })
+    }
+
+    async fn cleanup_unassigned_vpn_secret(&self, app_name: &str, namespace: &str) -> Result<()> {
+        let Some(db) = self.db else {
+            return Ok(());
+        };
+
+        // The assignment may have changed while Helm was running. Never remove
+        // credentials needed by a newly queued assignment.
+        let assigned = app_vpn_config::Entity::find_by_id(app_name.to_string())
+            .one(db)
+            .await
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "VPN sidecar was removed, but failed to confirm Secret cleanup safety: {error}"
+                ))
+            })?
+            .is_some();
+        if assigned {
+            return Ok(());
+        }
+
+        let secret_name = format!("vpn-{app_name}");
+        let secrets: Api<Secret> = Api::namespaced(self.k8s.client().clone(), namespace);
+        match secrets.delete(&secret_name, &DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(error)) if error.code == 404 => Ok(()),
+            Err(error) => Err(AppError::Internal(format!(
+                "VPN sidecar was removed, but failed to delete managed Secret '{secret_name}' in namespace '{namespace}': {error}"
+            ))),
+        }
     }
 
     async fn managed_nfs_cluster_ip(&self) -> Result<String> {
@@ -393,6 +470,19 @@ impl<'a> DeploymentManager<'a> {
     }
 
     pub async fn app_health(&self, app_name: &str) -> Result<serde_json::Value> {
+        self.app_health_with_metadata_command(app_name, |lifecycle| {
+            self.release_metadata(lifecycle)
+        })
+        .await
+    }
+
+    async fn app_health_with_metadata_command(
+        &self,
+        app_name: &str,
+        get_metadata: impl FnOnce(
+            &crate::services::catalog::AppLifecycleConfig,
+        ) -> Result<Option<ReleaseMetadata>>,
+    ) -> Result<serde_json::Value> {
         if self.catalog.get_app(app_name).is_none() {
             return Err(AppError::NotFound(format!(
                 "App '{}' not found in catalog",
@@ -410,7 +500,12 @@ impl<'a> DeploymentManager<'a> {
             }));
         }
 
-        match (
+        // A ready workload can belong to the previous revision while Helm is
+        // still applying (or has failed) the current revision. Keep checking
+        // workload readiness, but never call such a release healthy.
+        let release_metadata = get_metadata(&lifecycle)?;
+
+        let workload_health = match (
             lifecycle.workload_kind.as_deref(),
             lifecycle.workload_name.as_deref(),
         ) {
@@ -432,7 +527,12 @@ impl<'a> DeploymentManager<'a> {
                 "message": "Static component is available"
             })),
             _ => self.check_namespace_health(namespace).await,
-        }
+        }?;
+
+        Ok(health_with_release_status(
+            workload_health,
+            release_metadata.as_ref(),
+        ))
     }
 
     pub async fn check_deployment_ready(
@@ -644,9 +744,37 @@ fn single_workload_health(kind: &str, name: &str, healthy: bool) -> serde_json::
     })
 }
 
-fn chart_version_from_metadata(metadata: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(metadata).ok()?;
-    value.get("version")?.as_str().map(str::to_owned)
+impl ReleaseMetadata {
+    fn is_deployed(&self) -> bool {
+        self.status.trim().eq_ignore_ascii_case("deployed")
+    }
+}
+
+fn installed_version_from_metadata(metadata: Option<ReleaseMetadata>) -> Option<String> {
+    metadata.and_then(|metadata| metadata.is_deployed().then_some(metadata.version))
+}
+
+fn health_with_release_status(
+    mut health: serde_json::Value,
+    metadata: Option<&ReleaseMetadata>,
+) -> serde_json::Value {
+    let Some(metadata) = metadata.filter(|metadata| !metadata.is_deployed()) else {
+        return health;
+    };
+
+    health["status"] = serde_json::Value::String("unhealthy".to_string());
+    health["healthy"] = serde_json::Value::Bool(false);
+    health["helm_status"] = serde_json::Value::String(metadata.status.clone());
+    health["message"] = serde_json::Value::String(format!(
+        "Helm release is {}; workload readiness does not mark the app healthy",
+        metadata.status
+    ));
+    health
+}
+
+fn helm_release_not_found(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("release: not found") || stderr.contains("release not found")
 }
 
 fn namespace_helm_values(namespace: &str) -> [String; 2] {
@@ -654,6 +782,67 @@ fn namespace_helm_values(namespace: &str) -> [String; 2] {
         format!("namespace.name={namespace}"),
         "namespace.create=false".to_string(),
     ]
+}
+
+fn validate_custom_config(custom_config: &HashMap<String, String>) -> Result<()> {
+    if let Some(key) = custom_config.keys().find(|key| is_vpn_helm_key(key)) {
+        return Err(AppError::BadRequest(format!(
+            "custom_config key '{key}' is managed by Kubarr; use VPN settings instead"
+        )));
+    }
+    if let Some((key, _)) = custom_config
+        .iter()
+        .find(|(_, value)| value_injects_vpn_helm_assignment(value))
+    {
+        return Err(AppError::BadRequest(format!(
+            "custom_config key '{key}' contains a managed VPN assignment; use VPN settings instead"
+        )));
+    }
+    Ok(())
+}
+
+fn is_vpn_helm_key(key: &str) -> bool {
+    // Helm accepts both dotted paths and list-index paths. A comma can begin a
+    // second assignment in --set, so inspect each unescaped assignment too.
+    key.split(',').any(|part| {
+        let part = part.trim_start();
+        part == "vpn" || part.starts_with("vpn.") || part.starts_with("vpn[")
+    })
+}
+
+fn value_injects_vpn_helm_assignment(value: &str) -> bool {
+    // Helm's --set parser treats commas as assignment separators, including in
+    // list-like values. Be conservative around escaped commas too: accepting a
+    // literal is less important than allowing a managed VPN override.
+    value.split(',').skip(1).any(|segment| {
+        let segment = segment.trim_start().trim_start_matches('{').trim_start();
+        let Some((key, _)) = segment.split_once('=') else {
+            return false;
+        };
+        is_vpn_helm_key(key.trim())
+    })
+}
+
+fn helm_upgrade_install_args<'a>(
+    release: &'a str,
+    chart_ref: &'a str,
+    release_namespace: &'a str,
+    plain_http: bool,
+) -> Vec<&'a str> {
+    let mut args = vec![
+        "upgrade",
+        "--install",
+        "--server-side=false",
+        release,
+        chart_ref,
+        "-n",
+        release_namespace,
+        "--create-namespace",
+    ];
+    if plain_http {
+        args.push("--plain-http");
+    }
+    args
 }
 
 #[cfg(test)]
@@ -776,33 +965,72 @@ mod tests {
     }
 
     #[test]
-    fn chart_version_from_metadata_preserves_semver() {
+    fn release_metadata_preserves_semver() {
         for version in ["1.29.2", "1.29.2-rc.1", "1.29.2+5.1", "1.29.2-rc.1+5.1"] {
             let metadata = serde_json::to_vec(&serde_json::json!({
                 "chart": "my-hyphenated-chart",
                 "version": version,
+                "status": "deployed",
                 "appVersion": "9.0.0",
                 "revision": 7
             }))
             .unwrap();
-            assert_eq!(
-                chart_version_from_metadata(&metadata).as_deref(),
-                Some(version)
-            );
+            let parsed: ReleaseMetadata = serde_json::from_slice(&metadata).unwrap();
+            assert!(parsed.is_deployed());
+            assert_eq!(parsed.version, version);
         }
     }
 
     #[test]
-    fn chart_version_from_metadata_rejects_missing_or_invalid_version() {
+    fn release_metadata_rejects_missing_or_invalid_deployed_version() {
         for metadata in [
             "not json",
             "{}",
             r#"{"version": null}"#,
             r#"{"version": 3}"#,
+            r#"{"version": "1.29.2"}"#,
+            r#"{"version": "1.29.2", "status": "pending-upgrade"}"#,
             r#"{"chart": "radarr-1.29.2", "manifest": "helm.sh/chart: radarr-1.29.2"}"#,
         ] {
-            assert_eq!(chart_version_from_metadata(metadata.as_bytes()), None);
+            let parsed = serde_json::from_slice::<ReleaseMetadata>(metadata.as_bytes());
+            assert!(
+                !parsed
+                    .map(|metadata| metadata.is_deployed())
+                    .unwrap_or(false),
+                "unexpectedly accepted metadata: {metadata}"
+            );
         }
+    }
+
+    #[test]
+    fn installed_version_requires_deployed_release() {
+        for status in ["pending-install", "pending-upgrade", "failed", "superseded"] {
+            assert_eq!(
+                installed_version_from_metadata(Some(ReleaseMetadata {
+                    version: "1.29.2-rc.1+5.1".to_string(),
+                    status: status.to_string(),
+                })),
+                None,
+                "status {status} must not count as installed"
+            );
+        }
+        assert_eq!(
+            installed_version_from_metadata(Some(ReleaseMetadata {
+                version: "1.29.2-rc.1+5.1".to_string(),
+                status: "deployed".to_string(),
+            }))
+            .as_deref(),
+            Some("1.29.2-rc.1+5.1")
+        );
+    }
+
+    #[test]
+    fn helm_metadata_not_found_is_distinct_from_command_failure() {
+        assert!(helm_release_not_found("Error: release: not found"));
+        assert!(helm_release_not_found("RELEASE NOT FOUND"));
+        assert!(!helm_release_not_found(
+            "Error: Kubernetes cluster unreachable"
+        ));
     }
 
     #[test]
@@ -814,5 +1042,13 @@ mod tests {
                 "namespace.create=false".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn upgrade_install_plain_http_is_opt_in() {
+        let secure = helm_upgrade_install_args("app", "oci://registry/app", "app", false);
+        assert!(!secure.contains(&"--plain-http"));
+        let plain = helm_upgrade_install_args("app", "oci://registry/app", "app", true);
+        assert_eq!(plain.last(), Some(&"--plain-http"));
     }
 }

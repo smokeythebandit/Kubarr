@@ -1,0 +1,156 @@
+name: VPN Acceptance
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      image-tag:
+        description: Use images already built in the calling workflow run
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: inputs.image-tag == ''
+    uses: ./.github/workflows/build.yml
+    with:
+      image-tag: vpn-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+
+  vpn-acceptance:
+    needs: build
+    if: >-
+      ${{ !cancelled() &&
+      ((inputs.image-tag == '' && needs.build.result == 'success') ||
+       (inputs.image-tag != '' && needs.build.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      IMAGE_TAG: ${{ inputs.image-tag != '' && inputs.image-tag || format('vpn-acceptance-{0}-{1}', github.run_id, github.run_attempt) }}
+      CHARTS_REV: 01e45468f233b03b4a7d70a320aec9075f77c213
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
+      - name: Checkout pinned charts
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: smokeythebandit/kubarr-charts
+          ref: ${{ env.CHARTS_REV }}
+          path: acceptance-charts
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: code/cli
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+        with:
+          version: 10.34.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: code/frontend/pnpm-lock.yaml
+
+      - name: Install frontend VPN acceptance dependencies
+        working-directory: code/frontend
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Build installer CLI
+        run: cargo build --locked --manifest-path code/cli/Cargo.toml
+
+      - name: Install pinned Kubernetes tools
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          chmod +x "$HOME/.local/bin/kind"
+          curl -fsSLo "$HOME/.local/bin/kubectl" https://dl.k8s.io/release/v1.35.8/bin/linux/amd64/kubectl
+          chmod +x "$HOME/.local/bin/kubectl"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2
+        with:
+          version: 4.3.0
+
+      - name: Set up acceptance helper Python dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/acceptance-helpers"
+          "$RUNNER_TEMP/acceptance-helpers/bin/pip" install PyYAML==6.0.3
+          echo "$RUNNER_TEMP/acceptance-helpers/bin" >> "$GITHUB_PATH"
+
+      - name: Validate VPN acceptance helpers
+        run: |
+          bash -n tests/acceptance/app-lifecycle.sh tests/acceptance/vpn/*.sh
+          python3 -m unittest tests/acceptance/vpn/test_redact_output.py
+          bash tests/acceptance/vpn/test-lab-helpers.sh
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck tests/acceptance/app-lifecycle.sh tests/acceptance/vpn/*.sh
+          fi
+
+      - name: Download current runtime images
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: kubarr-*
+          merge-multiple: true
+
+      - name: Load runtime image archives
+        run: |
+          for image in kubarr-backend kubarr-frontend kubarr-worker; do
+            gunzip -c "$image.tar.gz" | docker load
+          done
+
+      - name: Prepare ephemeral CI host kernel support
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes curl jq iproute2
+          sudo modprobe wireguard
+          sudo modprobe nfs
+          sudo modprobe nfsd
+          grep -qw wireguard /proc/modules
+          grep -qw nfs /proc/filesystems
+          grep -qw nfsd /proc/filesystems
+
+          # This runner is ephemeral; the local harness never changes host sysctls automatically.
+          current_instances=$(sysctl -n fs.inotify.max_user_instances)
+          if (( current_instances < 2048 )); then
+            sudo sysctl -w fs.inotify.max_user_instances=2048
+          fi
+
+      - name: Run controlled WireGuard acceptance lab
+        env:
+          KUBARR_ACCEPTANCE_DISPOSABLE: "1"
+          KUBARR_VPN_ACCEPTANCE_DISPOSABLE: "1"
+          KUBARR_ACCEPTANCE_VPN_LAB: "1"
+          KUBARR_ACCEPTANCE_IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          KUBARR_ACCEPTANCE_CHARTS_REV: ${{ env.CHARTS_REV }}
+          KUBARR_ACCEPTANCE_CHARTS_DIR: ${{ github.workspace }}/acceptance-charts
+          KUBARR_ACCEPTANCE_RUN_ID: wg-${{ github.run_id }}-${{ github.run_attempt }}
+          KUBARR_ACCEPTANCE_WORK_DIR: ${{ runner.temp }}/kubarr-vpn-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          VPN_ACCEPTANCE_LOG: ${{ runner.temp }}/vpn-acceptance-${{ github.run_id }}-${{ github.run_attempt }}.log
+        run: |
+          set -o pipefail
+          tests/acceptance/app-lifecycle.sh | tee "$VPN_ACCEPTANCE_LOG"
+
+      - name: Upload sanitized VPN acceptance log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vpn-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vpn-acceptance-${{ github.run_id }}-${{ github.run_attempt }}.log
+          if-no-files-found: ignore
+          retention-days: 7

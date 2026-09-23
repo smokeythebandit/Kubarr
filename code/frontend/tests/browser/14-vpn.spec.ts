@@ -154,9 +154,9 @@ test('assigns an installed app with a kill switch override and removes the assig
   await page.getByRole('button', { name: 'Assign VPN', exact: true }).click();
   const row = page.getByRole('row').filter({ hasText: 'radarr' });
   await expect(row.getByRole('cell')).toHaveText(['radarr', 'Fixture VPN', 'OFF(override)', '']);
-  await expect(page.getByText('Apps are automatically redeployed when VPN settings change.')).toBeVisible();
+  await expect(page.getByText('Assigning or removing VPN queues an app redeploy. Later provider edits apply on the app\'s next redeploy.')).toBeVisible();
   page.once('dialog', async dialog => {
-    expect(dialog.message()).toBe('Remove VPN from radarr? The app will be redeployed without the VPN sidecar.');
+    expect(dialog.message()).toBe('Remove VPN from radarr? This will queue a redeploy without the VPN sidecar.');
     await dialog.accept();
   });
   await row.getByTitle('Remove VPN').click();

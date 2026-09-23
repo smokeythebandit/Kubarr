@@ -22,12 +22,17 @@ use axum::{
     http::{header, Request, StatusCode},
 };
 use http_body_util::BodyExt;
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, Statement};
 use tower::util::ServiceExt;
 
 mod common;
 use common::{build_test_app_state_with_db, create_test_db_with_seed, create_test_user_with_role};
 
 use kubarr::endpoints::create_router;
+use kubarr::models::vpn_provider::VpnType;
+use kubarr::models::{app_operation, app_state, app_vpn_config};
+use kubarr::services::catalog::{AppCatalog, AppConfig, ResourceRequirements};
+use kubarr::services::vpn::CreateVpnProviderRequest;
 
 // ============================================================================
 // JWT key initialization
@@ -186,6 +191,33 @@ fn openvpn_provider_body(name: &str) -> String {
         }
     })
     .to_string()
+}
+
+async fn set_test_catalog(state: &kubarr::state::AppState) {
+    let app = |name: &str, is_system: bool| AppConfig {
+        name: name.to_string(),
+        display_name: name.to_string(),
+        description: "test app".to_string(),
+        icon: String::new(),
+        container_image: "example/test:latest".to_string(),
+        default_port: 8080,
+        resource_requirements: ResourceRequirements {
+            cpu_request: "10m".to_string(),
+            cpu_limit: "100m".to_string(),
+            memory_request: "32Mi".to_string(),
+            memory_limit: "64Mi".to_string(),
+        },
+        volumes: Vec::new(),
+        environment_variables: std::collections::HashMap::new(),
+        category: "test".to_string(),
+        is_system,
+        is_hidden: false,
+        is_browseable: true,
+    };
+    *state.catalog.write().await = AppCatalog::with_apps(std::collections::HashMap::from([
+        ("sonarr".to_string(), app("sonarr", false)),
+        ("kubarr-backend".to_string(), app("kubarr-backend", true)),
+    ]));
 }
 
 // ============================================================================
@@ -892,11 +924,7 @@ async fn test_delete_provider_requires_auth() {
 }
 
 #[tokio::test]
-async fn test_delete_provider_returns_500_without_k8s() {
-    // delete_vpn_provider requires a Kubernetes client to clean up secrets.
-    // The test AppState has k8s_client=None so the handler must return 500
-    // (or any non-panic response). We just verify the endpoint is reachable
-    // and does not panic.
+async fn test_delete_unassigned_provider_does_not_require_k8s() {
     ensure_jwt_keys().await;
 
     let db = create_test_db_with_seed().await;
@@ -924,22 +952,18 @@ async fn test_delete_provider_returns_500_without_k8s() {
     let created: serde_json::Value = serde_json::from_str(&create_body).unwrap();
     let id = created["id"].as_i64().unwrap();
 
-    // Attempt to delete — without K8s this will 500
     let uri = format!("/api/vpn/providers/{}", id);
     let (status, _) = authenticated_delete(create_router(state), &uri, &cookie).await;
 
     assert_eq!(
         status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "DELETE /api/vpn/providers/{{id}} without K8s must return 500"
+        StatusCode::OK,
+        "Deleting an unassigned provider must not require Kubernetes"
     );
 }
 
 #[tokio::test]
 async fn test_delete_provider_not_found_returns_error() {
-    // Attempting to delete a provider that does not exist. Without K8s the handler
-    // errors early at the "K8s not available" check (before DB lookup), so we
-    // expect 500.  We verify no panic occurs.
     ensure_jwt_keys().await;
 
     let db = create_test_db_with_seed().await;
@@ -964,12 +988,204 @@ async fn test_delete_provider_not_found_returns_error() {
     let (status, _) =
         authenticated_delete(create_router(state), "/api/vpn/providers/99999", &cookie).await;
 
-    // With k8s_client=None the handler returns 500 before it reaches the DB not-found
     assert_eq!(
         status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "DELETE on non-existent provider without K8s must return 500"
+        StatusCode::NOT_FOUND,
+        "DELETE on a non-existent provider must return 404"
     );
+}
+
+#[tokio::test]
+async fn test_vpn_assignment_and_removal_enqueue_atomic_updates_without_k8s() {
+    ensure_jwt_keys().await;
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "vpnlifecycleadmin",
+        "vpnlifecycleadmin@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let provider = kubarr::services::vpn::create_vpn_provider(
+        &db,
+        CreateVpnProviderRequest {
+            name: "Lifecycle VPN".to_string(),
+            vpn_type: VpnType::WireGuard,
+            service_provider: Some("custom".to_string()),
+            credentials: serde_json::json!({ "private_key": "key" }),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: "10.0.0.0/8".to_string(),
+        },
+    )
+    .await
+    .expect("create provider");
+    let state = build_test_app_state_with_db(db.clone()).await;
+    set_test_catalog(&state).await;
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "vpnlifecycleadmin",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("login cookie");
+    let request = serde_json::to_string(&serde_json::json!({
+        "vpn_provider_id": provider.id,
+        "port_forwarding": true
+    }))
+    .unwrap();
+
+    for (app_name, expected) in [
+        ("missing", StatusCode::NOT_FOUND),
+        ("kubarr-backend", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, _) = authenticated_put(
+            create_router(state.clone()),
+            &format!("/api/vpn/apps/{app_name}"),
+            &cookie,
+            &request,
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
+    assert_eq!(app_vpn_config::Entity::find().count(&db).await.unwrap(), 0);
+    assert_eq!(app_operation::Entity::find().count(&db).await.unwrap(), 0);
+
+    let (status, body) = authenticated_put(
+        create_router(state.clone()),
+        "/api/vpn/apps/sonarr",
+        &cookie,
+        &request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "assignment failed: {body}");
+    let assigned: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let assign_operation_id = assigned["operation_id"].as_str().expect("operation id");
+    assert_eq!(assigned["vpn_provider_id"], provider.id);
+    assert!(assigned["port_forwarding"].as_bool().unwrap());
+    let operation = app_operation::Entity::find_by_id(assign_operation_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("queued assignment operation");
+    assert_eq!(operation.operation, "update");
+    assert_eq!(operation.status, "queued");
+    let app_state = app_state::Entity::find_by_id("sonarr")
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("app state");
+    assert_eq!(
+        app_state.last_operation_id.as_deref(),
+        Some(assign_operation_id)
+    );
+
+    let (status, body) =
+        authenticated_delete(create_router(state), "/api/vpn/apps/sonarr", &cookie).await;
+    assert_eq!(status, StatusCode::OK, "removal failed: {body}");
+    let removed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(removed["message"].as_str().is_some());
+    let remove_operation_id = removed["operation_id"].as_str().expect("operation id");
+    assert_ne!(remove_operation_id, assign_operation_id);
+    assert!(app_vpn_config::Entity::find_by_id("sonarr")
+        .one(&db)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(app_operation::Entity::find().count(&db).await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn test_unauthorized_vpn_assignment_does_not_mutate_database() {
+    let db = create_test_db_with_seed().await;
+    let provider = kubarr::services::vpn::create_vpn_provider(
+        &db,
+        CreateVpnProviderRequest {
+            name: "Protected VPN".to_string(),
+            vpn_type: VpnType::WireGuard,
+            service_provider: None,
+            credentials: serde_json::json!({ "private_key": "key" }),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: "10.0.0.0/8".to_string(),
+        },
+    )
+    .await
+    .expect("create provider");
+    let state = build_test_app_state_with_db(db.clone()).await;
+    set_test_catalog(&state).await;
+    let response = create_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/vpn/apps/sonarr")
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "vpn_provider_id": provider.id }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(app_vpn_config::Entity::find().count(&db).await.unwrap(), 0);
+    assert_eq!(app_operation::Entity::find().count(&db).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_vpn_assignment_rolls_back_when_enqueue_fails() {
+    ensure_jwt_keys().await;
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "vpnrollbackadmin",
+        "vpnrollbackadmin@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let provider = kubarr::services::vpn::create_vpn_provider(
+        &db,
+        CreateVpnProviderRequest {
+            name: "Rollback VPN".to_string(),
+            vpn_type: VpnType::WireGuard,
+            service_provider: None,
+            credentials: serde_json::json!({ "private_key": "key" }),
+            enabled: true,
+            kill_switch: true,
+            firewall_outbound_subnets: "10.0.0.0/8".to_string(),
+        },
+    )
+    .await
+    .expect("create provider");
+    let state = build_test_app_state_with_db(db.clone()).await;
+    set_test_catalog(&state).await;
+    let (_, cookie) = do_login(
+        create_router(state.clone()),
+        "vpnrollbackadmin",
+        "password123",
+    )
+    .await;
+    let cookie = cookie.expect("login cookie");
+
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "DROP TABLE app_states".to_string(),
+    ))
+    .await
+    .expect("drop app_states to force queue failure");
+
+    let (status, _) = authenticated_put(
+        create_router(state),
+        "/api/vpn/apps/sonarr",
+        &cookie,
+        &serde_json::json!({ "vpn_provider_id": provider.id }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(app_vpn_config::Entity::find().count(&db).await.unwrap(), 0);
+    assert_eq!(app_operation::Entity::find().count(&db).await.unwrap(), 0);
 }
 
 // ============================================================================

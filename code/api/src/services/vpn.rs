@@ -11,7 +11,10 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, PostParams};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
+    TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, Result};
@@ -136,6 +139,8 @@ pub struct AppVpnConfigResponse {
     pub port_forwarding: bool,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 /// Supported VPN service provider info
@@ -317,26 +322,26 @@ pub async fn update_vpn_provider(
 }
 
 /// Delete a VPN provider
-pub async fn delete_vpn_provider(db: &DbConn, k8s: &K8sClient, id: i64) -> Result<()> {
-    // Get all apps using this provider
-    let app_configs = AppVpnConfig::find()
-        .filter(app_vpn_config::Column::VpnProviderId.eq(id))
-        .all(db)
-        .await?;
+pub async fn delete_vpn_provider(db: &DbConn, id: i64) -> Result<()> {
+    let transaction = db.begin().await?;
+    VpnProvider::find_by_id(id)
+        .one(&transaction)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("VPN provider {} not found", id)))?;
 
-    // Delete K8s secrets for all associated apps
-    for config in &app_configs {
-        if let Err(e) = delete_vpn_secret_for_app(k8s, &config.app_name).await {
-            tracing::warn!(
-                "Failed to delete VPN secret for app {}: {}",
-                config.app_name,
-                e
-            );
-        }
+    let assigned_apps = AppVpnConfig::find()
+        .filter(app_vpn_config::Column::VpnProviderId.eq(id))
+        .count(&transaction)
+        .await?;
+    if assigned_apps != 0 {
+        return Err(AppError::BadRequest(format!(
+            "VPN provider {} is assigned to {} app(s); remove VPN from those apps first",
+            id, assigned_apps
+        )));
     }
 
-    // Delete the provider (cascade will delete app_vpn_configs)
-    VpnProvider::delete_by_id(id).exec(db).await?;
+    VpnProvider::delete_by_id(id).exec(&transaction).await?;
+    transaction.commit().await?;
 
     Ok(())
 }
@@ -366,6 +371,7 @@ pub async fn list_app_vpn_configs(db: &DbConn) -> Result<Vec<AppVpnConfigRespons
                 port_forwarding: config.port_forwarding,
                 created_at: config.created_at,
                 updated_at: config.updated_at,
+                operation_id: None,
             });
         }
     }
@@ -401,6 +407,7 @@ pub async fn get_app_vpn_config(
             port_forwarding: config.port_forwarding,
             created_at: config.created_at,
             updated_at: config.updated_at,
+            operation_id: None,
         }))
     } else {
         Ok(None)
@@ -408,11 +415,14 @@ pub async fn get_app_vpn_config(
 }
 
 /// Assign VPN to an app
-pub async fn assign_vpn_to_app(
-    db: &DbConn,
+pub async fn assign_vpn_to_app<C>(
+    db: &C,
     app_name: &str,
     req: AssignVpnRequest,
-) -> Result<AppVpnConfigResponse> {
+) -> Result<AppVpnConfigResponse>
+where
+    C: ConnectionTrait,
+{
     // Verify provider exists and is enabled
     let provider = VpnProvider::find_by_id(req.vpn_provider_id)
         .one(db)
@@ -469,17 +479,15 @@ pub async fn assign_vpn_to_app(
         port_forwarding: config.port_forwarding,
         created_at: config.created_at,
         updated_at: config.updated_at,
+        operation_id: None,
     })
 }
 
 /// Remove VPN from an app
-pub async fn remove_vpn_from_app(db: &DbConn, k8s: &K8sClient, app_name: &str) -> Result<()> {
-    // Delete K8s secret
-    if let Err(e) = delete_vpn_secret_for_app(k8s, app_name).await {
-        tracing::warn!("Failed to delete VPN secret for app {}: {}", app_name, e);
-    }
-
-    // Delete config
+pub async fn remove_vpn_from_app<C>(db: &C, app_name: &str) -> Result<()>
+where
+    C: ConnectionTrait,
+{
     AppVpnConfig::delete_by_id(app_name).exec(db).await?;
 
     Ok(())
@@ -605,7 +613,10 @@ pub async fn get_vpn_deployment_config(
             })?;
 
         if !provider.enabled {
-            return Ok(None);
+            return Err(AppError::BadRequest(format!(
+                "VPN provider {} assigned to app '{}' is disabled",
+                provider.id, app_name
+            )));
         }
 
         let kill_switch = config.kill_switch_override.unwrap_or(provider.kill_switch);
@@ -1801,6 +1812,7 @@ mod tests_request_response_serde {
             port_forwarding: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            operation_id: None,
         };
         let json = serde_json::to_string(&r).expect("ser");
         assert!(json.contains("\"app_name\":\"sonarr\""));
@@ -2301,7 +2313,7 @@ mod tests_db {
     }
 
     #[tokio::test]
-    async fn get_vpn_deployment_config_disabled_provider_returns_none() {
+    async fn get_vpn_deployment_config_disabled_provider_returns_error() {
         let db = make_db().await;
         let provider = insert_wg_provider(&db, "testvpn").await;
 
@@ -2327,8 +2339,10 @@ mod tests_db {
             .await
             .expect("disable");
 
-        let result = get_vpn_deployment_config(&db, "sonarr").await.expect("get");
-        assert!(result.is_none());
+        let error = get_vpn_deployment_config(&db, "sonarr")
+            .await
+            .expect_err("a disabled assigned provider must fail closed");
+        assert!(matches!(error, AppError::BadRequest(_)));
     }
 
     #[tokio::test]

@@ -17,6 +17,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:browser": "playwright test --config playwright.browser.config.ts",
+    "test:real": "playwright test --config playwright.real.config.ts",
+    "test:acceptance": "playwright test --config playwright.real.config.ts",
     "test:typecheck": "tsc --project tsconfig.tests.json",
     "prepare": "husky"
   },

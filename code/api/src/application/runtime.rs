@@ -2,11 +2,14 @@
 //!
 //! Handles initialization for the Kubarr backend.
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::Router;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
@@ -43,34 +46,52 @@ pub async fn run() -> anyhow::Result<()> {
 pub async fn run_worker() -> anyhow::Result<()> {
     init_tracing();
 
+    // Register signal listeners before initialization so termination is not lost
+    // while startup performs network or database work.
+    let shutdown = shutdown_signal()?;
+    let cancellation = CancellationToken::new();
+    let signal_cancellation = cancellation.clone();
+    let signal_task = tokio::spawn(async move {
+        shutdown.await;
+        tracing::info!("Kubarr worker shutdown signal received");
+        signal_cancellation.cancel();
+    });
+
     tracing::info!("Starting Kubarr worker v{}", env!("CARGO_PKG_VERSION"));
 
     let k8s_client = init_kubernetes().await;
     let catalog = init_catalog();
     let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
-    if let Err(e) = chart_sync.sync().await {
+    let conn = init_database(&k8s_client).await?;
+    if let Err(e) = chart_sync.sync_and_refresh(&conn).await {
         tracing::warn!("Initial worker chart sync failed: {}", e);
     }
     tokio::spawn({
         let chart_sync = chart_sync.clone();
+        let conn = conn.clone();
+        let cancellation = cancellation.clone();
         async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(CONFIG.charts.sync_interval))
-                    .await;
-                if let Err(e) = chart_sync.sync().await {
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(CONFIG.charts.sync_interval)) => {}
+                }
+                if cancellation.is_cancelled() {
+                    break;
+                }
+                if let Err(e) = chart_sync.sync_and_refresh(&conn).await {
                     tracing::warn!("Periodic worker chart sync failed: {}", e);
                 }
             }
         }
     });
-    let conn = init_database(&k8s_client).await?;
     let domain_reconciler = Arc::new(DomainReconciler::new(conn.clone(), k8s_client.clone()));
     let manager = Arc::new(AppManager::new(conn, k8s_client, catalog));
 
     let poll_interval = env_duration("KUBARR_WORKER_POLL_INTERVAL_SECONDS", 5);
     let reconcile_interval = env_duration("KUBARR_WORKER_RECONCILE_INTERVAL_SECONDS", 30);
     let domain_reconcile_interval = env_duration("KUBARR_DOMAIN_RECONCILE_INTERVAL_SECONDS", 60);
-    manager.run_worker(poll_interval, reconcile_interval).await;
+    let worker_tasks = manager.run_worker(poll_interval, reconcile_interval, cancellation.clone());
     domain_reconciler.run(domain_reconcile_interval);
 
     tracing::info!(
@@ -80,9 +101,39 @@ pub async fn run_worker() -> anyhow::Result<()> {
         "Kubarr worker started"
     );
 
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Kubarr worker shutting down");
+    cancellation.cancelled().await;
+    tracing::info!("Kubarr worker draining in-flight work");
+    worker_tasks.wait().await;
+    signal_task.await?;
+    tracing::info!("Kubarr worker shutdown complete");
     Ok(())
+}
+
+type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+fn shutdown_signal() -> anyhow::Result<ShutdownSignal> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        Ok(Box::pin(async move {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
+        }))
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(Box::pin(async {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                tracing::error!(%error, "Failed to listen for shutdown signal");
+            }
+        }))
+    }
 }
 
 fn env_duration(name: &str, default_seconds: u64) -> std::time::Duration {
@@ -109,19 +160,20 @@ async fn init_services() -> anyhow::Result<AppState> {
     let k8s_client = init_kubernetes().await;
     let catalog = init_catalog();
 
-    // Create chart sync service. Run the initial sync in the background so
-    // slow registry/network calls cannot block the health endpoint on startup.
     let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
+    let conn = init_database(&k8s_client).await?;
+
+    // Run the initial sync in the background so slow registry/network calls cannot
+    // block startup, but persist a successful result to the shared database.
     tokio::spawn({
         let chart_sync = chart_sync.clone();
+        let conn = conn.clone();
         async move {
-            if let Err(e) = chart_sync.sync_on_blocking_thread().await {
+            if let Err(e) = chart_sync.sync_and_refresh(&conn).await {
                 tracing::warn!("Initial chart sync failed: {}", e);
             }
         }
     });
-
-    let conn = init_database(&k8s_client).await?;
 
     let audit = AuditService::new();
     let notification = NotificationService::new();

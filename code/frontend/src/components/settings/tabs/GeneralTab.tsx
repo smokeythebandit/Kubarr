@@ -52,6 +52,9 @@ export function GeneralTab({
               </div>
             </div>
             <button
+              role="switch"
+              aria-label="Allow Open Registration"
+              aria-checked={systemSettings.registration_enabled?.value === 'true'}
               onClick={() => onToggleSetting('registration_enabled')}
               disabled={savingSettings}
               className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-800 ${
@@ -78,6 +81,9 @@ export function GeneralTab({
               </div>
             </div>
             <button
+              role="switch"
+              aria-label="Require Admin Approval"
+              aria-checked={systemSettings.registration_require_approval?.value === 'true'}
               onClick={() => onToggleSetting('registration_require_approval')}
               disabled={savingSettings}
               className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-800 ${
@@ -124,6 +130,9 @@ export function GeneralTab({
                   </div>
                 </div>
                 <button
+                  role="switch"
+                  aria-label={`${provider.name} OAuth`}
+                  aria-checked={provider.enabled}
                   onClick={() => onToggleOAuthProvider(provider.id, !provider.enabled)}
                   disabled={!provider.client_id && !provider.enabled}
                   title={!provider.client_id && !provider.enabled ? 'Configure credentials first' : ''}
