@@ -366,7 +366,7 @@ async fn test_clear_audit_logs_succeeds_as_admin() {
     };
     let cookie = cookie.expect("Login must set a session cookie");
 
-    let clear_body = serde_json::json!({ "days": 0 }).to_string();
+    let clear_body = serde_json::json!({ "days": 30 }).to_string();
     let response = create_router(state)
         .oneshot(
             Request::builder()
@@ -464,4 +464,57 @@ async fn test_clear_audit_logs_with_default_days() {
         StatusCode::OK,
         "POST /api/audit/clear without days must use default (90) and return 200"
     );
+}
+
+#[tokio::test]
+async fn test_invalid_retention_is_bad_request_without_deleting_or_logging() {
+    use kubarr::models::audit_log;
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    ensure_jwt_keys().await;
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "retentionadmin",
+        "retention@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db.clone()).await;
+    let (status, cookie) = do_login(
+        create_router(state.clone()),
+        "retentionadmin",
+        "password123",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie = cookie.unwrap();
+    audit_log::ActiveModel {
+        timestamp: Set(chrono::Utc::now() - chrono::Duration::days(40)),
+        action: Set("old".into()),
+        resource_type: Set("system".into()),
+        success: Set(true),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let before = audit_log::Entity::find().all(&db).await.unwrap();
+    for days in [-1, 0, 3651] {
+        let response = create_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/audit/clear")
+                    .method("POST")
+                    .header("Cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({"days": days}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(audit_log::Entity::find().all(&db).await.unwrap(), before);
+    }
 }

@@ -1,12 +1,14 @@
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{header, HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use chrono::{Duration, Utc};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::config::CONFIG;
@@ -15,11 +17,83 @@ use crate::middleware::auth::{
     ACTIVE_SESSION_COOKIE, MAX_SESSIONS, SESSION_COOKIE_BASE, SESSION_COOKIE_NAME,
 };
 use crate::models::prelude::*;
-use crate::models::{role, session, two_factor_recovery_code, user, user_role};
+use crate::models::{
+    audit_log::{AuditAction, ResourceType},
+    role, session, two_factor_recovery_code, user, user_role,
+};
 use crate::services::{
     create_session_token, decode_session_token, verify_password, verify_recovery_code, verify_totp,
 };
 use crate::state::AppState;
+
+fn audit_context(
+    headers: &HeaderMap,
+    peer: Option<ConnectInfo<std::net::SocketAddr>>,
+) -> (Option<String>, Option<String>) {
+    // This is the immediate TCP peer (possibly a gateway pod), not necessarily
+    // the originating client. Forwarded headers are not authenticated here.
+    let ip = peer.map(|ConnectInfo(addr)| addr.ip().to_string());
+    let agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.chars().take(255).collect());
+    (ip, agent)
+}
+
+async fn audit_failure(
+    state: &AppState,
+    action: AuditAction,
+    actor: Option<&user::Model>,
+    reason: &'static str,
+    ip: &Option<String>,
+    agent: &Option<String>,
+) {
+    if state
+        .audit
+        .log(
+            action,
+            ResourceType::Session,
+            actor.map(|u| u.id.to_string()),
+            actor.map(|u| u.id),
+            actor.map(|u| u.username.clone()),
+            Some(serde_json::json!({"reason": reason})),
+            ip.clone(),
+            agent.clone(),
+            false,
+            None,
+        )
+        .await
+        .is_err()
+    {
+        tracing::warn!("Failed to persist authentication failure audit event");
+    }
+}
+
+async fn audit_success(
+    tx: &sea_orm::DatabaseTransaction,
+    action: AuditAction,
+    user_id: i64,
+    username: &str,
+    ip: &Option<String>,
+    agent: &Option<String>,
+    details: Option<&'static str>,
+) -> Result<()> {
+    crate::services::audit::log_on_transaction(
+        tx,
+        action,
+        ResourceType::Session,
+        Some(user_id.to_string()),
+        Some(user_id),
+        Some(username.to_owned()),
+        details.map(|method| serde_json::json!({"method": method})),
+        ip.clone(),
+        agent.clone(),
+        true,
+        None,
+    )
+    .await?;
+    Ok(())
+}
 
 /// Create auth routes for session management
 pub fn auth_routes(state: AppState) -> Router {
@@ -224,10 +298,12 @@ fn find_available_slot(existing: &[(usize, i64, String)], user_id: i64) -> usize
 )]
 async fn login(
     State(state): State<AppState>,
+    peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> Result<Response> {
     let db = state.get_db().await?;
+    let (ip_address, user_agent) = audit_context(&headers, peer.map(|Extension(info)| info));
 
     // Find user by username or email
     let found_user = User::find()
@@ -237,14 +313,43 @@ async fn login(
                 .or(user::Column::Email.eq(&request.username)),
         )
         .one(&db)
-        .await?
-        .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
+        .await?;
+    let Some(found_user) = found_user else {
+        audit_failure(
+            &state,
+            AuditAction::LoginFailed,
+            None,
+            "invalid_credentials",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
+        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+    };
 
     // Check if user is active and approved
     if !found_user.is_active {
+        audit_failure(
+            &state,
+            AuditAction::LoginFailed,
+            Some(&found_user),
+            "account_disabled",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
         return Err(AppError::Unauthorized("Account is disabled".to_string()));
     }
     if !found_user.is_approved {
+        audit_failure(
+            &state,
+            AuditAction::LoginFailed,
+            Some(&found_user),
+            "approval_required",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
         return Err(AppError::Unauthorized(
             "Account is pending approval".to_string(),
         ));
@@ -252,11 +357,29 @@ async fn login(
 
     // Verify password
     if !verify_password(&request.password, &found_user.hashed_password) {
+        audit_failure(
+            &state,
+            AuditAction::LoginFailed,
+            Some(&found_user),
+            "invalid_credentials",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
         return Err(AppError::Unauthorized("Invalid credentials".to_string()));
     }
 
     // If role requires 2FA but user hasn't set it up, block login
     if !found_user.totp_enabled && role_requires_2fa(&db, found_user.id).await {
+        audit_failure(
+            &state,
+            AuditAction::TwoFactorFailed,
+            Some(&found_user),
+            "setup_required",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
         return Err(AppError::BadRequest(
             "Two-factor authentication setup required".to_string(),
         ));
@@ -264,15 +387,35 @@ async fn login(
 
     // Check TOTP if enabled
     if found_user.totp_enabled {
-        let totp_code = request.totp_code.as_ref().ok_or_else(|| {
-            AppError::BadRequest("Two-factor authentication code required".to_string())
-        })?;
+        let Some(totp_code) = request.totp_code.as_ref() else {
+            audit_failure(
+                &state,
+                AuditAction::TwoFactorFailed,
+                Some(&found_user),
+                "totp_required",
+                &ip_address,
+                &user_agent,
+            )
+            .await;
+            return Err(AppError::BadRequest(
+                "Two-factor authentication code required".to_string(),
+            ));
+        };
 
         let totp_secret = found_user.totp_secret.as_ref().ok_or_else(|| {
             AppError::Internal("TOTP enabled but no secret configured".to_string())
         })?;
 
         if !verify_totp(totp_secret, totp_code, &found_user.email)? {
+            audit_failure(
+                &state,
+                AuditAction::TwoFactorFailed,
+                Some(&found_user),
+                "invalid_totp",
+                &ip_address,
+                &user_agent,
+            )
+            .await;
             return Err(AppError::Unauthorized("Invalid TOTP code".to_string()));
         }
     }
@@ -282,32 +425,43 @@ async fn login(
     let now = Utc::now();
     let expires_at = now + Duration::days(7);
 
-    // Extract user agent and IP from headers
-    let user_agent = headers
-        .get(header::USER_AGENT)
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.chars().take(255).collect::<String>());
-
-    let ip_address = headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string());
-
     let session = session::ActiveModel {
         id: Set(session_id.clone()),
         user_id: Set(found_user.id),
-        user_agent: Set(user_agent),
-        ip_address: Set(ip_address),
+        user_agent: Set(user_agent.clone()),
+        ip_address: Set(ip_address.clone()),
         created_at: Set(now),
         expires_at: Set(expires_at),
         last_accessed_at: Set(now),
         is_revoked: Set(false),
     };
-    session.insert(&db).await?;
-
-    // Create minimal session token (JWT containing only session ID)
+    // Generate the token before committing the new session.
     let session_token = create_session_token(&session_id)?;
+    let tx = db.begin().await?;
+    session.insert(&tx).await?;
+    if found_user.totp_enabled {
+        audit_success(
+            &tx,
+            AuditAction::TwoFactorVerified,
+            found_user.id,
+            &found_user.username,
+            &ip_address,
+            &user_agent,
+            Some("totp"),
+        )
+        .await?;
+    }
+    audit_success(
+        &tx,
+        AuditAction::Login,
+        found_user.id,
+        &found_user.username,
+        &ip_address,
+        &user_agent,
+        None,
+    )
+    .await?;
+    tx.commit().await?;
 
     // Find available slot for this session
     let existing_sessions = get_existing_sessions(&state, &headers).await;
@@ -360,14 +514,38 @@ async fn login(
         (status = 200, body = serde_json::Value)
     )
 )]
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response> {
+async fn logout(
+    State(state): State<AppState>,
+    peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
+    headers: HeaderMap,
+) -> Result<Response> {
     // Try to get and revoke the current session
     if let Some(token) = extract_session_token(&headers) {
         if let Ok(claims) = decode_session_token(&token) {
             // Revoke the session in the database
             if let Ok(db) = state.get_db().await {
-                let _ = Session::delete_by_id(&claims.sid).exec(&db).await;
-                tracing::info!(session_id = claims.sid, "Session revoked on logout");
+                let current = Session::find_by_id(&claims.sid).one(&db).await?;
+                if let Some(current) =
+                    current.filter(|s| !s.is_revoked && s.expires_at > Utc::now())
+                {
+                    let actor = User::find_by_id(current.user_id).one(&db).await?;
+                    if let Some(actor) = actor {
+                        let (ip, agent) = audit_context(&headers, peer.map(|Extension(info)| info));
+                        let tx = db.begin().await?;
+                        Session::delete_by_id(&claims.sid).exec(&tx).await?;
+                        audit_success(
+                            &tx,
+                            AuditAction::Logout,
+                            actor.id,
+                            &actor.username,
+                            &ip,
+                            &agent,
+                            None,
+                        )
+                        .await?;
+                        tx.commit().await?;
+                    }
+                }
             }
         }
     }
@@ -444,6 +622,7 @@ async fn list_sessions(
 )]
 async fn revoke_session(
     State(state): State<AppState>,
+    peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
@@ -482,10 +661,32 @@ async fn revoke_session(
         ));
     }
 
-    // Delete the session
-    Session::delete_by_id(&session_id).exec(&db).await?;
+    // The target ID is a secret: record only the owning user and a fixed
+    // operation label. Commit the deletion and its audit row atomically.
+    let (ip, agent) = audit_context(&headers, peer.map(|Extension(info)| info));
+    let actor = User::find_by_id(current_session.user_id)
+        .one(&db)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
+    let tx = db.begin().await?;
+    Session::delete_by_id(&session_id).exec(&tx).await?;
+    crate::services::audit::log_on_transaction(
+        &tx,
+        AuditAction::Logout,
+        ResourceType::Session,
+        Some(actor.id.to_string()),
+        Some(actor.id),
+        Some(actor.username),
+        Some(serde_json::json!({"operation": "session_revoked", "target_user_id": target_session.user_id})),
+        ip,
+        agent,
+        true,
+        None,
+    )
+    .await?;
+    tx.commit().await?;
 
-    tracing::info!(session_id = session_id, "Session revoked by user");
+    tracing::info!(user_id = current_session.user_id, "Session revoked by user");
 
     Ok(Json(serde_json::json!({"message": "Session revoked"})))
 }
@@ -514,10 +715,12 @@ async fn role_requires_2fa(db: &sea_orm::DatabaseConnection, user_id: i64) -> bo
 )]
 async fn recover_with_code(
     State(state): State<AppState>,
+    peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     Json(request): Json<RecoveryLoginRequest>,
 ) -> Result<Response> {
     let db = state.get_db().await?;
+    let (ip_address, user_agent) = audit_context(&headers, peer.map(|Extension(info)| info));
 
     // Find user by username or email
     let found_user = User::find()
@@ -527,13 +730,42 @@ async fn recover_with_code(
                 .or(user::Column::Email.eq(&request.username)),
         )
         .one(&db)
-        .await?
-        .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
+        .await?;
+    let Some(found_user) = found_user else {
+        audit_failure(
+            &state,
+            AuditAction::LoginFailed,
+            None,
+            "invalid_credentials",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
+        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+    };
 
     if !found_user.is_active {
+        audit_failure(
+            &state,
+            AuditAction::LoginFailed,
+            Some(&found_user),
+            "account_disabled",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
         return Err(AppError::Unauthorized("Account is disabled".to_string()));
     }
     if !found_user.is_approved {
+        audit_failure(
+            &state,
+            AuditAction::LoginFailed,
+            Some(&found_user),
+            "approval_required",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
         return Err(AppError::Unauthorized(
             "Account is pending approval".to_string(),
         ));
@@ -541,11 +773,29 @@ async fn recover_with_code(
 
     // Verify password
     if !verify_password(&request.password, &found_user.hashed_password) {
+        audit_failure(
+            &state,
+            AuditAction::LoginFailed,
+            Some(&found_user),
+            "invalid_credentials",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
         return Err(AppError::Unauthorized("Invalid credentials".to_string()));
     }
 
     // Recovery only applies when 2FA is enabled
     if !found_user.totp_enabled {
+        audit_failure(
+            &state,
+            AuditAction::TwoFactorFailed,
+            Some(&found_user),
+            "setup_required",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
         return Err(AppError::BadRequest(
             "Two-factor authentication is not enabled for this account".to_string(),
         ));
@@ -567,21 +817,34 @@ async fn recover_with_code(
         .iter()
         .find(|rc| verify_recovery_code(&request.recovery_code, &rc.code_hash));
 
-    let matched_code = matching
-        .ok_or_else(|| AppError::Unauthorized("Invalid recovery code".to_string()))?
-        .clone();
+    let Some(matched_code) = matching.cloned() else {
+        audit_failure(
+            &state,
+            AuditAction::TwoFactorFailed,
+            Some(&found_user),
+            "invalid_totp",
+            &ip_address,
+            &user_agent,
+        )
+        .await;
+        return Err(AppError::Unauthorized("Invalid recovery code".to_string()));
+    };
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_token = create_session_token(&session_id)?;
+    let tx = db.begin().await?;
 
     // Mark the code as used
     let now = Utc::now();
     let mut code_model: two_factor_recovery_code::ActiveModel = matched_code.into();
     code_model.used_at = Set(Some(now));
-    code_model.update(&db).await?;
+    code_model.update(&tx).await?;
 
     // Check how many unused codes remain
     let remaining = TwoFactorRecoveryCode::find()
         .filter(two_factor_recovery_code::Column::UserId.eq(user_id))
         .filter(two_factor_recovery_code::Column::UsedAt.is_null())
-        .count(&db)
+        .count(&tx)
         .await?;
 
     if remaining == 0 {
@@ -591,12 +854,12 @@ async fn recover_with_code(
         user_model.totp_secret = Set(None);
         user_model.totp_verified_at = Set(None);
         user_model.updated_at = Set(now);
-        user_model.update(&db).await?;
+        user_model.update(&tx).await?;
 
         // Clean up all (used) recovery codes
         TwoFactorRecoveryCode::delete_many()
             .filter(two_factor_recovery_code::Column::UserId.eq(user_id))
-            .exec(&db)
+            .exec(&tx)
             .await?;
 
         tracing::info!(
@@ -606,33 +869,42 @@ async fn recover_with_code(
     }
 
     // Create session record in database
-    let session_id = uuid::Uuid::new_v4().to_string();
     let expires_at = now + chrono::Duration::days(7);
-
-    let user_agent = headers
-        .get(header::USER_AGENT)
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.chars().take(255).collect::<String>());
-
-    let ip_address = headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string());
 
     let session = session::ActiveModel {
         id: Set(session_id.clone()),
         user_id: Set(user_id),
-        user_agent: Set(user_agent),
-        ip_address: Set(ip_address),
+        user_agent: Set(user_agent.clone()),
+        ip_address: Set(ip_address.clone()),
         created_at: Set(now),
         expires_at: Set(expires_at),
         last_accessed_at: Set(now),
         is_revoked: Set(false),
     };
-    session.insert(&db).await?;
-
-    let session_token = create_session_token(&session_id)?;
+    session.insert(&tx).await?;
+    // Consumption, verification event, login event and the new session all
+    // commit together; failure to audit must not spend a recovery code.
+    audit_success(
+        &tx,
+        AuditAction::TwoFactorVerified,
+        user_id,
+        &username,
+        &ip_address,
+        &user_agent,
+        Some("recovery_code"),
+    )
+    .await?;
+    audit_success(
+        &tx,
+        AuditAction::Login,
+        user_id,
+        &username,
+        &ip_address,
+        &user_agent,
+        Some("recovery_code"),
+    )
+    .await?;
+    tx.commit().await?;
 
     let existing_sessions = get_existing_sessions(&state, &headers).await;
     let slot = find_available_slot(&existing_sessions, user_id);

@@ -6,13 +6,14 @@ use axum::{
 use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::endpoints::extractors::{get_user_app_access, get_user_permissions};
 use crate::error::{AppError, Result};
 use crate::middleware::{Authenticated, Authorized, UsersManage, UsersResetPassword, UsersView};
+use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::models::prelude::*;
 use crate::models::{invite, role, two_factor_recovery_code, user, user_preferences, user_role};
 use crate::services::{
@@ -195,6 +196,31 @@ pub struct InviteResponse {
 // Helper Functions
 // ============================================================================
 
+async fn audit_user_on_transaction(
+    txn: &sea_orm::DatabaseTransaction,
+    actor: &user::Model,
+    action: AuditAction,
+    resource_type: ResourceType,
+    target_id: i64,
+    details: Option<serde_json::Value>,
+) -> Result<()> {
+    crate::services::audit::log_on_transaction(
+        txn,
+        action,
+        resource_type,
+        Some(target_id.to_string()),
+        Some(actor.id),
+        Some(actor.username.clone()),
+        details,
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn get_user_with_roles(state: &AppState, user_id: i64) -> Result<UserResponse> {
     let db = state.get_db().await?;
     let found_user = User::find_by_id(user_id)
@@ -372,8 +398,18 @@ async fn update_own_profile(
     }
     user_model.updated_at = Set(now);
 
-    user_model.update(&db).await?;
-
+    let txn = db.begin().await?;
+    user_model.update(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::UserUpdated,
+        ResourceType::User,
+        user_id,
+        Some(serde_json::json!({"fields": ["profile"]})),
+    )
+    .await?;
+    txn.commit().await?;
     let response = get_user_with_roles(&state, user_id).await?;
     Ok(Json(response))
 }
@@ -438,7 +474,18 @@ async fn delete_own_account(
     }
 
     // Delete the user (cascade will handle related records)
-    user_record.delete(&db).await?;
+    let txn = db.begin().await?;
+    user_record.delete(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::UserDeleted,
+        ResourceType::User,
+        user_id,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(
         serde_json::json!({"message": "Account deleted successfully"}),
@@ -496,8 +543,9 @@ async fn update_my_preferences(
     let now = Utc::now();
     let user_id = auth.user_id();
 
+    let txn = db.begin().await?;
     // Check if preferences exist
-    let existing = UserPreferences::find_by_id(user_id).one(&db).await?;
+    let existing = UserPreferences::find_by_id(user_id).one(&txn).await?;
 
     if let Some(existing_prefs) = existing {
         // Update existing preferences
@@ -505,7 +553,7 @@ async fn update_my_preferences(
             let mut active_model: user_preferences::ActiveModel = existing_prefs.into();
             active_model.theme = Set(theme.clone());
             active_model.updated_at = Set(now);
-            active_model.update(&db).await?;
+            active_model.update(&txn).await?;
         }
     } else {
         // Insert new preferences
@@ -515,16 +563,26 @@ async fn update_my_preferences(
             theme: Set(theme.to_string()),
             updated_at: Set(now),
         };
-        new_prefs.insert(&db).await?;
+        new_prefs.insert(&txn).await?;
     }
 
     // Return updated preferences
-    let preferences = UserPreferences::find_by_id(user_id).one(&db).await?;
+    let preferences = UserPreferences::find_by_id(user_id).one(&txn).await?;
 
     let theme = preferences
         .map(|p| p.theme)
         .unwrap_or_else(|| "system".to_string());
 
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::UserUpdated,
+        ResourceType::User,
+        user_id,
+        Some(serde_json::json!({"fields": ["preferences"]})),
+    )
+    .await?;
+    txn.commit().await?;
     Ok(Json(PreferencesResponse { theme }))
 }
 
@@ -569,7 +627,7 @@ async fn list_pending_users(
 )]
 async fn create_user(
     State(state): State<AppState>,
-    _auth: Authorized<UsersManage>,
+    auth: Authorized<UsersManage>,
     Json(data): Json<CreateUserRequest>,
 ) -> Result<Json<UserResponse>> {
     let db = state.get_db().await?;
@@ -608,7 +666,8 @@ async fn create_user(
         ..Default::default()
     };
 
-    let created_user = new_user.insert(&db).await?;
+    let txn = db.begin().await?;
+    let created_user = new_user.insert(&txn).await?;
 
     // Assign roles
     for role_id in &data.role_ids {
@@ -616,9 +675,36 @@ async fn create_user(
             user_id: Set(created_user.id),
             role_id: Set(*role_id),
         };
-        user_role_model.insert(&db).await?;
+        user_role_model.insert(&txn).await?;
     }
 
+    for role_id in data
+        .role_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        audit_user_on_transaction(
+            &txn,
+            auth.user(),
+            AuditAction::RoleAssigned,
+            ResourceType::Role,
+            role_id,
+            Some(serde_json::json!({"target_user_id": created_user.id})),
+        )
+        .await?;
+    }
+
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::UserCreated,
+        ResourceType::User,
+        created_user.id,
+        Some(serde_json::json!({"role_ids": data.role_ids})),
+    )
+    .await?;
+    txn.commit().await?;
     let response = get_user_with_roles(&state, created_user.id).await?;
     Ok(Json(response))
 }
@@ -658,7 +744,7 @@ async fn get_user(
 async fn update_user(
     State(state): State<AppState>,
     Path(user_id): Path<i64>,
-    _auth: Authorized<UsersManage>,
+    auth: Authorized<UsersManage>,
     Json(data): Json<UpdateUserRequest>,
 ) -> Result<Json<UserResponse>> {
     let db = state.get_db().await?;
@@ -668,6 +754,15 @@ async fn update_user(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    let changed_fields: Vec<&str> = [
+        data.email.as_ref().map(|_| "email"),
+        data.is_active.map(|_| "is_active"),
+        data.is_approved.map(|_| "is_approved"),
+        data.role_ids.as_ref().map(|_| "role_ids"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let now = Utc::now();
     let mut user_model: user::ActiveModel = existing_user.into();
 
@@ -683,14 +778,26 @@ async fn update_user(
     }
     user_model.updated_at = Set(now);
 
-    user_model.update(&db).await?;
+    let txn = db.begin().await?;
+    let old_role_ids: std::collections::BTreeSet<i64> = if data.role_ids.is_some() {
+        UserRole::find()
+            .filter(user_role::Column::UserId.eq(user_id))
+            .all(&txn)
+            .await?
+            .into_iter()
+            .map(|binding| binding.role_id)
+            .collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    user_model.update(&txn).await?;
 
     // Update roles if provided
     if let Some(role_ids) = &data.role_ids {
         // Delete existing roles
         UserRole::delete_many()
             .filter(user_role::Column::UserId.eq(user_id))
-            .exec(&db)
+            .exec(&txn)
             .await?;
 
         // Add new roles
@@ -699,10 +806,43 @@ async fn update_user(
                 user_id: Set(user_id),
                 role_id: Set(*role_id),
             };
-            user_role_model.insert(&db).await?;
+            user_role_model.insert(&txn).await?;
+        }
+
+        let new_role_ids: std::collections::BTreeSet<i64> = role_ids.iter().copied().collect();
+        for role_id in old_role_ids.difference(&new_role_ids) {
+            audit_user_on_transaction(
+                &txn,
+                auth.user(),
+                AuditAction::RoleUnassigned,
+                ResourceType::Role,
+                *role_id,
+                Some(serde_json::json!({"target_user_id": user_id})),
+            )
+            .await?;
+        }
+        for role_id in new_role_ids.difference(&old_role_ids) {
+            audit_user_on_transaction(
+                &txn,
+                auth.user(),
+                AuditAction::RoleAssigned,
+                ResourceType::Role,
+                *role_id,
+                Some(serde_json::json!({"target_user_id": user_id})),
+            )
+            .await?;
         }
     }
-
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::UserUpdated,
+        ResourceType::User,
+        user_id,
+        Some(serde_json::json!({"fields": changed_fields, "role_ids": data.role_ids})),
+    )
+    .await?;
+    txn.commit().await?;
     let response = get_user_with_roles(&state, user_id).await?;
     Ok(Json(response))
 }
@@ -721,7 +861,7 @@ async fn update_user(
 async fn approve_user(
     State(state): State<AppState>,
     Path(user_id): Path<i64>,
-    _auth: Authorized<UsersManage>,
+    auth: Authorized<UsersManage>,
 ) -> Result<Json<UserResponse>> {
     let db = state.get_db().await?;
     let existing_user = User::find_by_id(user_id)
@@ -735,8 +875,18 @@ async fn approve_user(
     user_model.is_active = Set(true);
     user_model.updated_at = Set(now);
 
-    user_model.update(&db).await?;
-
+    let txn = db.begin().await?;
+    user_model.update(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::UserApproved,
+        ResourceType::User,
+        user_id,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
     let response = get_user_with_roles(&state, user_id).await?;
     Ok(Json(response))
 }
@@ -755,7 +905,7 @@ async fn approve_user(
 async fn reject_user(
     State(state): State<AppState>,
     Path(user_id): Path<i64>,
-    _auth: Authorized<UsersManage>,
+    auth: Authorized<UsersManage>,
 ) -> Result<Json<serde_json::Value>> {
     let db = state.get_db().await?;
     let existing_user = User::find_by_id(user_id)
@@ -763,7 +913,18 @@ async fn reject_user(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    existing_user.delete(&db).await?;
+    let txn = db.begin().await?;
+    existing_user.delete(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::UserDeleted,
+        ResourceType::User,
+        user_id,
+        Some(serde_json::json!({"reason": "rejected"})),
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(
         serde_json::json!({"message": "User rejected and deleted"}),
@@ -796,7 +957,18 @@ async fn delete_user(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    existing_user.delete(&db).await?;
+    let txn = db.begin().await?;
+    existing_user.delete(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::UserDeleted,
+        ResourceType::User,
+        user_id,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(serde_json::json!({"message": "User deleted"})))
 }
@@ -884,7 +1056,18 @@ async fn create_invite(
         ..Default::default()
     };
 
-    let created_invite = new_invite.insert(&db).await?;
+    let txn = db.begin().await?;
+    let created_invite = new_invite.insert(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::InviteCreated,
+        ResourceType::Invite,
+        created_invite.id,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(InviteResponse {
         id: created_invite.id,
@@ -912,7 +1095,7 @@ async fn create_invite(
 async fn delete_invite(
     State(state): State<AppState>,
     Path(invite_id): Path<i64>,
-    _auth: Authorized<UsersManage>,
+    auth: Authorized<UsersManage>,
 ) -> Result<Json<serde_json::Value>> {
     let db = state.get_db().await?;
     let existing_invite = Invite::find_by_id(invite_id)
@@ -920,7 +1103,18 @@ async fn delete_invite(
         .await?
         .ok_or_else(|| AppError::NotFound("Invite not found".to_string()))?;
 
-    existing_invite.delete(&db).await?;
+    let txn = db.begin().await?;
+    existing_invite.delete(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::InviteDeleted,
+        ResourceType::Invite,
+        invite_id,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(serde_json::json!({"message": "Invite deleted"})))
 }
@@ -960,6 +1154,21 @@ async fn change_own_password(
 
     // Verify current password
     if !verify_password(&data.current_password, &user_record.hashed_password) {
+        state
+            .audit
+            .log(
+                AuditAction::PasswordChanged,
+                ResourceType::User,
+                Some(auth.user_id().to_string()),
+                Some(auth.user_id()),
+                Some(auth.user().username.clone()),
+                None,
+                None,
+                None,
+                false,
+                Some("verification_failed".to_string()),
+            )
+            .await?;
         return Err(AppError::BadRequest(
             "Current password is incorrect".to_string(),
         ));
@@ -972,7 +1181,18 @@ async fn change_own_password(
     let mut user_model: user::ActiveModel = user_record.into();
     user_model.hashed_password = Set(hashed);
     user_model.updated_at = Set(now);
-    user_model.update(&db).await?;
+    let txn = db.begin().await?;
+    user_model.update(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::PasswordChanged,
+        ResourceType::User,
+        auth.user_id(),
+        None,
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(
         serde_json::json!({"message": "Password changed successfully"}),
@@ -1025,7 +1245,18 @@ async fn admin_reset_password(
     let mut user_model: user::ActiveModel = user_record.into();
     user_model.hashed_password = Set(hashed);
     user_model.updated_at = Set(now);
-    user_model.update(&db).await?;
+    let txn = db.begin().await?;
+    user_model.update(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::PasswordChanged,
+        ResourceType::User,
+        user_id,
+        Some(serde_json::json!({"admin_reset": true})),
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(
         serde_json::json!({"message": "Password reset successfully"}),
@@ -1088,7 +1319,18 @@ async fn setup_2fa(
     let mut user_model: user::ActiveModel = user_record.into();
     user_model.totp_secret = Set(Some(secret.clone()));
     user_model.updated_at = Set(now);
-    user_model.update(&db).await?;
+    let txn = db.begin().await?;
+    user_model.update(&txn).await?;
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::UserUpdated,
+        ResourceType::User,
+        auth.user_id(),
+        Some(serde_json::json!({"fields": ["2fa_setup"]})),
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(TwoFactorSetupResponse {
         secret,
@@ -1144,12 +1386,13 @@ async fn enable_2fa(
     user_model.totp_enabled = Set(true);
     user_model.totp_verified_at = Set(Some(now));
     user_model.updated_at = Set(now);
-    user_model.update(&db).await?;
+    let txn = db.begin().await?;
+    user_model.update(&txn).await?;
 
     // Delete any existing recovery codes for this user (in case of re-enable)
     TwoFactorRecoveryCode::delete_many()
         .filter(two_factor_recovery_code::Column::UserId.eq(user_id))
-        .exec(&db)
+        .exec(&txn)
         .await?;
 
     // Generate and store 8 recovery codes
@@ -1162,8 +1405,19 @@ async fn enable_2fa(
             created_at: Set(now),
             ..Default::default()
         };
-        recovery_code_model.insert(&db).await?;
+        recovery_code_model.insert(&txn).await?;
     }
+
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::TwoFactorEnabled,
+        ResourceType::User,
+        user_id,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(TwoFactorEnableResponse {
         message: "Two-factor authentication enabled successfully".to_string(),
@@ -1219,14 +1473,25 @@ async fn disable_2fa(
     user_model.totp_secret = Set(None);
     user_model.totp_verified_at = Set(None);
     user_model.updated_at = Set(now);
-    user_model.update(&db).await?;
+    let txn = db.begin().await?;
+    user_model.update(&txn).await?;
 
     // Delete all recovery codes for this user
     TwoFactorRecoveryCode::delete_many()
         .filter(two_factor_recovery_code::Column::UserId.eq(user_id))
-        .exec(&db)
+        .exec(&txn)
         .await?;
 
+    audit_user_on_transaction(
+        &txn,
+        auth.user(),
+        AuditAction::TwoFactorDisabled,
+        ResourceType::User,
+        user_id,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
     Ok(Json(serde_json::json!({
         "message": "Two-factor authentication disabled"
     })))

@@ -1,5 +1,6 @@
 //! Real migrated SQLite and worker control flow; only external execution is faked.
 use super::*;
+use crate::models::{audit_log, audit_outbox};
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,6 +47,479 @@ async fn state(manager: &AppManager) -> app_state::Model {
         .await
         .unwrap()
         .unwrap()
+}
+
+async fn audits(manager: &AppManager) -> Vec<audit_log::Model> {
+    audit_log::Entity::find()
+        .order_by_asc(audit_log::Column::Id)
+        .all(&manager.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn audit_enqueue_and_terminal_correlate_without_exposing_config_or_errors() {
+    for (kind, action) in [
+        (OP_INSTALL, "app_installed"),
+        (OP_UPDATE, "app_configured"),
+        (OP_DELETE, "app_uninstalled"),
+        (OP_RESTART, "app_restarted"),
+    ] {
+        for succeeds in [true, false] {
+            let manager = setup().await;
+            let queued = manager
+                .enqueue_operation(
+                    APP,
+                    kind,
+                    HashMap::from([("password".into(), "secret-123".into())]),
+                    Some(4242),
+                )
+                .await
+                .unwrap();
+            let logs = audits(&manager).await;
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].action, "app_configured");
+            assert_eq!(logs[0].user_id, Some(4242));
+            assert_eq!(logs[0].username, None); // deleted user retains its ID
+            assert_eq!(logs[0].resource_id.as_deref(), Some(APP));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(logs[0].details.as_ref().unwrap())
+                    .unwrap(),
+                serde_json::json!({"operation_id":queued.id,"operation":kind,"phase":"queued"})
+            );
+            manager
+                .process_next_operation_with(|_| async move {
+                    if succeeds {
+                        Ok("done".into())
+                    } else {
+                        Err(AppError::Internal(
+                            "secret-123 helm --set password=secret-123".into(),
+                        ))
+                    }
+                })
+                .await
+                .unwrap();
+            let logs = audits(&manager).await;
+            assert_eq!(logs.len(), 2);
+            assert_eq!(logs[1].action, action);
+            assert_eq!(logs[1].user_id, Some(4242));
+            assert_eq!(logs[1].success, succeeds);
+            assert_eq!(
+                logs[1].error_message.as_deref(),
+                (!succeeds).then_some("app_operation_failed")
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(logs[1].details.as_ref().unwrap())
+                    .unwrap(),
+                serde_json::json!({"operation_id":queued.id,"attempts":1,"phase":"completed"})
+            );
+            assert!(!format!("{:?}", logs).contains("secret-123"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn audit_insert_failure_rolls_back_enqueue_but_terminal_is_durable() {
+    let manager = setup().await;
+    manager
+        .db
+        .execute_unprepared("DROP TABLE audit_logs")
+        .await
+        .unwrap();
+    assert!(manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), None)
+        .await
+        .is_err());
+    assert!(app_operation::Entity::find()
+        .all(&manager.db)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(app_state::Entity::find()
+        .all(&manager.db)
+        .await
+        .unwrap()
+        .is_empty());
+    let manager = setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), None)
+        .await
+        .unwrap();
+    manager
+        .db
+        .execute_unprepared("DROP TABLE audit_logs")
+        .await
+        .unwrap();
+    let calls = AtomicUsize::new(0);
+    manager
+        .process_next_operation_with(|_| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok("external deployment finished".into())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        operation(&manager, &queued.id).await.status,
+        STATUS_SUCCEEDED
+    );
+    assert!(audit_outbox::Entity::find_by_id(&queued.id)
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .processed_at
+        .is_none());
+    manager
+        .process_next_operation_with(|_| async { panic!("cannot repeat external deployment") })
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(manager.drain_audit_outbox().await.is_err());
+    assert_eq!(
+        operation(&manager, &queued.id).await.status,
+        STATUS_SUCCEEDED
+    );
+    restore_audit_table(&manager).await;
+    manager.drain_audit_outbox().await.unwrap();
+    manager.drain_audit_outbox().await.unwrap();
+    let logs = audits(&manager).await;
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].action, "app_installed");
+    assert!(logs[0].success);
+    assert!(audit_outbox::Entity::find_by_id(&queued.id)
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .processed_at
+        .is_some());
+}
+
+async fn restore_audit_table(manager: &AppManager) {
+    manager
+        .db
+        .execute_unprepared(
+            "CREATE TABLE audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, user_id INTEGER,
+        username TEXT, action TEXT NOT NULL, resource_type TEXT NOT NULL,
+        resource_id TEXT, details TEXT, ip_address TEXT, user_agent TEXT,
+        success BOOLEAN NOT NULL, error_message TEXT)",
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn failed_operation_outbox_replays_once_after_audit_outage() {
+    let manager = setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_DELETE, HashMap::new(), None)
+        .await
+        .unwrap();
+    manager
+        .db
+        .execute_unprepared("DROP TABLE audit_logs")
+        .await
+        .unwrap();
+    manager
+        .process_next_operation_with(|_| async {
+            Err(AppError::Internal("password=private".into()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(operation(&manager, &queued.id).await.status, STATUS_FAILED);
+    let pending = audit_outbox::Entity::find_by_id(&queued.id)
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.error_label.as_deref(), Some("app_operation_failed"));
+    assert!(!format!("{pending:?}").contains("private"));
+    restore_audit_table(&manager).await;
+    manager.drain_audit_outbox().await.unwrap();
+    manager.drain_audit_outbox().await.unwrap();
+    let logs = audits(&manager).await;
+    assert_eq!(logs.len(), 1);
+    assert!(!logs[0].success);
+    assert_eq!(
+        logs[0].error_message.as_deref(),
+        Some("app_operation_failed")
+    );
+}
+
+#[tokio::test]
+async fn stale_running_recovers_as_indeterminate_without_reexecuting() {
+    let manager = setup().await;
+    let old = manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), Some(731))
+        .await
+        .unwrap();
+    let recent = manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), None)
+        .await
+        .unwrap();
+    let claimed_old = manager
+        .claim_operation(operation(&manager, &old.id).await)
+        .await
+        .unwrap()
+        .unwrap();
+    manager
+        .claim_operation(operation(&manager, &recent.id).await)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut stale: app_operation::ActiveModel = claimed_old.into();
+    stale.updated_at = Set(Utc::now() - chrono::Duration::minutes(16));
+    stale.update(&manager.db).await.unwrap();
+    manager.recover_stale_operations().await.unwrap();
+    manager.recover_stale_operations().await.unwrap();
+    assert_eq!(operation(&manager, &old.id).await.status, STATUS_FAILED);
+    assert_eq!(
+        operation(&manager, &old.id).await.error.as_deref(),
+        Some(INTERRUPTED_LABEL)
+    );
+    assert_eq!(operation(&manager, &recent.id).await.status, STATUS_RUNNING);
+    let pending = audit_outbox::Entity::find_by_id(&old.id)
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.outcome, "indeterminate");
+    assert!(!pending.success);
+    assert_eq!(pending.created_by, Some(731));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&pending.details).unwrap(),
+        serde_json::json!({"operation_id":old.id,"attempts":1,"phase":"indeterminate"})
+    );
+    manager.drain_audit_outbox().await.unwrap();
+    manager.drain_audit_outbox().await.unwrap();
+    let logs = audits(&manager).await;
+    assert_eq!(logs.len(), 3); // two enqueue events, one interruption
+    assert_eq!(logs[2].error_message.as_deref(), Some(INTERRUPTED_LABEL));
+    assert!(audit_outbox::Entity::find_by_id(&recent.id)
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .is_none());
+    manager
+        .process_next_operation_with(|_| async { panic!("cannot replay running work") })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn heartbeat_keeps_long_running_external_work_out_of_stale_recovery() {
+    let manager = Arc::new(setup().await);
+    let queued = manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), None)
+        .await
+        .unwrap();
+    let started = Arc::new(Notify::new());
+    let finish = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn({
+        let manager = manager.clone();
+        let started = started.clone();
+        let finish = finish.clone();
+        let calls = calls.clone();
+        async move {
+            manager
+                .process_next_operation_with_heartbeat(
+                    move |_| async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        finish.notified().await;
+                        Ok("external work finished".into())
+                    },
+                    Duration::from_millis(10),
+                )
+                .await
+        }
+    });
+    started.notified().await;
+    let mut stale: app_operation::ActiveModel = operation(&manager, &queued.id).await.into();
+    stale.updated_at = Set(Utc::now() - chrono::Duration::minutes(16));
+    stale.update(&manager.db).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if operation(&manager, &queued.id).await.updated_at
+                > Utc::now() - chrono::Duration::minutes(15)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("heartbeat should refresh the running row");
+    manager.recover_stale_operations().await.unwrap();
+    assert_eq!(operation(&manager, &queued.id).await.status, STATUS_RUNNING);
+    assert!(audit_outbox::Entity::find_by_id(&queued.id)
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .is_none());
+
+    finish.notify_one();
+    task.await.unwrap().unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let completed = operation(&manager, &queued.id).await;
+    assert_eq!(completed.status, STATUS_SUCCEEDED);
+    assert_eq!(completed.finished_at, Some(completed.updated_at));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(operation(&manager, &queued.id).await, completed);
+    let outbox = audit_outbox::Entity::find_by_id(&queued.id)
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outbox.outcome, STATUS_SUCCEEDED);
+    assert!(!outbox.details.contains("indeterminate"));
+}
+
+#[tokio::test]
+async fn terminal_cas_allows_only_one_outbox_row() {
+    let manager = setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_RESTART, HashMap::new(), None)
+        .await
+        .unwrap();
+    manager
+        .claim_operation(operation(&manager, &queued.id).await)
+        .await
+        .unwrap()
+        .unwrap();
+    let (first, second) = tokio::join!(
+        manager.finish_operation(&queued.id, STATUS_SUCCEEDED, Some("done".into()), None),
+        manager.finish_operation(&queued.id, STATUS_FAILED, None, None)
+    );
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    assert_eq!(
+        operation(&manager, &queued.id).await.status,
+        if first.is_ok() {
+            STATUS_SUCCEEDED
+        } else {
+            STATUS_FAILED
+        }
+    );
+    assert_eq!(
+        audit_outbox::Entity::find()
+            .all(&manager.db)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn queued_and_completed_audit_use_existing_actor_username() {
+    let manager = setup().await;
+    let now = Utc::now();
+    let actor = user::ActiveModel {
+        username: Set("operator".into()),
+        email: Set("operator@example.test".into()),
+        hashed_password: Set("never-audit-this".into()),
+        is_active: Set(true),
+        is_approved: Set(true),
+        totp_secret: Set(None),
+        totp_enabled: Set(false),
+        totp_verified_at: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&manager.db)
+    .await
+    .unwrap();
+    let queued = manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), Some(actor.id))
+        .await
+        .unwrap();
+    manager
+        .process_next_operation_with(|_| async { Ok("done".into()) })
+        .await
+        .unwrap();
+    let logs = audits(&manager).await;
+    assert_eq!(logs.len(), 2);
+    for log in logs {
+        assert_eq!(log.username.as_deref(), Some("operator"));
+        assert_eq!(log.user_id, Some(actor.id));
+        assert_eq!(log.resource_id.as_deref(), Some(APP));
+        assert!(log.details.unwrap().contains(&queued.id));
+    }
+}
+
+#[tokio::test]
+async fn outbox_preserves_username_if_actor_is_deleted_before_delivery() {
+    let manager = setup().await;
+    let now = Utc::now();
+    let actor = user::ActiveModel {
+        username: Set("former_operator".into()),
+        email: Set("former@example.test".into()),
+        hashed_password: Set("not-in-audit".into()),
+        is_active: Set(true),
+        is_approved: Set(true),
+        totp_secret: Set(None),
+        totp_enabled: Set(false),
+        totp_verified_at: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&manager.db)
+    .await
+    .unwrap();
+    let queued = manager
+        .enqueue_operation(APP, OP_RESTART, HashMap::new(), Some(actor.id))
+        .await
+        .unwrap();
+    manager
+        .db
+        .execute_unprepared("DROP TABLE audit_logs")
+        .await
+        .unwrap();
+    manager
+        .process_next_operation_with(|_| async { Ok("done".into()) })
+        .await
+        .unwrap();
+    user::Entity::delete_by_id(actor.id)
+        .exec(&manager.db)
+        .await
+        .unwrap();
+    restore_audit_table(&manager).await;
+    manager.drain_audit_outbox().await.unwrap();
+    let event = audits(&manager).await.pop().unwrap();
+    assert_eq!(event.user_id, Some(actor.id));
+    assert_eq!(event.username.as_deref(), Some("former_operator"));
+    assert!(event.details.unwrap().contains(&queued.id));
+}
+
+#[tokio::test]
+async fn caller_transaction_update_audit_failure_can_roll_back_operation_and_state() {
+    let manager = setup().await;
+    manager
+        .db
+        .execute_unprepared("DROP TABLE audit_logs")
+        .await
+        .unwrap();
+    let transaction = manager.db.begin().await.unwrap();
+    assert!(manager
+        .enqueue_update_in_transaction(&transaction, APP, None)
+        .await
+        .is_err());
+    transaction.rollback().await.unwrap();
+    assert!(app_operation::Entity::find()
+        .all(&manager.db)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(app_state::Entity::find()
+        .all(&manager.db)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

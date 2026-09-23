@@ -562,6 +562,12 @@ fn format_event_title(action: &AuditAction) -> String {
         AuditAction::AppRestarted => "App Restarted".to_string(),
         AuditAction::AppConfigured => "App Configured".to_string(),
         AuditAction::AppAccessed => "App Accessed".to_string(),
+        // VPN management
+        AuditAction::VpnProviderCreated => "VPN Provider Created".to_string(),
+        AuditAction::VpnProviderUpdated => "VPN Provider Updated".to_string(),
+        AuditAction::VpnProviderDeleted => "VPN Provider Deleted".to_string(),
+        AuditAction::VpnAssigned => "VPN Assigned".to_string(),
+        AuditAction::VpnRemoved => "VPN Removed".to_string(),
         // System
         AuditAction::SystemSettingChanged => "System Setting Changed".to_string(),
         AuditAction::InviteCreated => "Invite Link Created".to_string(),
@@ -729,6 +735,12 @@ fn format_event_body(
                 format!("User {} accessed {}", user, detail)
             }
         }
+        // VPN management: details may contain provider credentials, so never include them.
+        AuditAction::VpnProviderCreated => format!("User {} created a VPN provider", user),
+        AuditAction::VpnProviderUpdated => format!("User {} changed VPN provider settings", user),
+        AuditAction::VpnProviderDeleted => format!("User {} deleted a VPN provider", user),
+        AuditAction::VpnAssigned => format!("User {} assigned VPN to an app", user),
+        AuditAction::VpnRemoved => format!("User {} removed VPN from an app", user),
         // System
         AuditAction::SystemSettingChanged => {
             if detail.is_empty() {

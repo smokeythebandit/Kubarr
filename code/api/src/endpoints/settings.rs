@@ -7,11 +7,12 @@ use axum::{
 };
 use chrono::Utc;
 use once_cell::sync::Lazy;
-use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, Result};
 use crate::middleware::permissions::{Authorized, SettingsManage, SettingsView};
+use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::models::prelude::*;
 use crate::models::system_setting;
 use crate::state::AppState;
@@ -167,7 +168,7 @@ async fn get_setting(
 async fn update_setting(
     State(state): State<AppState>,
     Path(key): Path<String>,
-    _auth: Authorized<SettingsManage>,
+    auth: Authorized<SettingsManage>,
     Json(data): Json<SettingUpdate>,
 ) -> Result<Json<SettingResponse>> {
     let db = state.get_db().await?;
@@ -179,14 +180,15 @@ async fn update_setting(
     let now = Utc::now();
 
     // Check if setting exists
-    let existing = SystemSetting::find_by_id(&key).one(&db).await?;
+    let txn = db.begin().await?;
+    let existing = SystemSetting::find_by_id(&key).one(&txn).await?;
 
     let setting = if let Some(existing_setting) = existing {
         // Update existing
         let mut setting_model: system_setting::ActiveModel = existing_setting.into();
         setting_model.value = Set(data.value.clone());
         setting_model.updated_at = Set(now);
-        setting_model.update(&db).await?
+        setting_model.update(&txn).await?
     } else {
         // Insert new
         let new_setting = system_setting::ActiveModel {
@@ -195,8 +197,25 @@ async fn update_setting(
             description: Set(Some(description.to_string())),
             updated_at: Set(now),
         };
-        new_setting.insert(&db).await?
+        new_setting.insert(&txn).await?
     };
+
+    // Values are deliberately omitted: only the validated setting key is audited.
+    crate::services::audit::log_on_transaction(
+        &txn,
+        AuditAction::SystemSettingChanged,
+        ResourceType::System,
+        Some(key),
+        Some(auth.user_id()),
+        Some(auth.user().username.clone()),
+        None,
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
 
     Ok(Json(SettingResponse {
         key: setting.key,

@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { Shield, AlertTriangle, CheckCircle, XCircle, Key, Clock, User, Globe, RefreshCw } from 'lucide-react';
-import { securityApi, SECURITY_ACTIONS } from '../api/security';
+import { securityApi } from '../api/security';
 import { auditApi, AuditLog } from '../api/audit';
 
 function formatTimeAgo(dateString: string): string {
@@ -20,23 +21,23 @@ function formatTimeAgo(dateString: string): string {
 
 function getActionIcon(action: string) {
   switch (action) {
-    case 'Login':
+    case 'login':
       return <CheckCircle size={16} className="text-green-500" />;
-    case 'LoginFailed':
+    case 'login_failed':
       return <XCircle size={16} className="text-red-500" />;
-    case 'Logout':
+    case 'logout':
       return <User size={16} className="text-gray-500" />;
-    case 'TwoFactorEnabled':
+    case '2fa_enabled':
       return <Shield size={16} className="text-green-500" />;
-    case 'TwoFactorDisabled':
+    case '2fa_disabled':
       return <Shield size={16} className="text-yellow-500" />;
-    case 'TwoFactorVerified':
+    case '2fa_verified':
       return <Key size={16} className="text-green-500" />;
-    case 'TwoFactorFailed':
+    case '2fa_failed':
       return <Key size={16} className="text-red-500" />;
-    case 'PasswordChanged':
+    case 'password_changed':
       return <Key size={16} className="text-blue-500" />;
-    case 'TokenRefresh':
+    case 'token_refresh':
       return <RefreshCw size={16} className="text-gray-400" />;
     default:
       return <Clock size={16} className="text-gray-400" />;
@@ -45,15 +46,15 @@ function getActionIcon(action: string) {
 
 function getActionLabel(action: string): string {
   const labels: Record<string, string> = {
-    Login: 'Successful login',
-    LoginFailed: 'Failed login attempt',
-    Logout: 'User logged out',
-    TokenRefresh: 'Session refreshed',
-    TwoFactorEnabled: '2FA enabled',
-    TwoFactorDisabled: '2FA disabled',
-    TwoFactorVerified: '2FA verified',
-    TwoFactorFailed: '2FA verification failed',
-    PasswordChanged: 'Password changed',
+    login: 'Successful login',
+    login_failed: 'Failed login attempt',
+    logout: 'User logged out',
+    token_refresh: 'Session refreshed',
+    '2fa_enabled': '2FA enabled',
+    '2fa_disabled': '2FA disabled',
+    '2fa_verified': '2FA verified',
+    '2fa_failed': '2FA verification failed',
+    password_changed: 'Password changed',
   };
   return labels[action] || action;
 }
@@ -115,42 +116,32 @@ function SecurityEventRow({ log }: { log: AuditLog }) {
 }
 
 export default function SecurityPage() {
-  const { data: stats, isLoading: statsLoading, error: statsError } = useQuery({
+  const { data: stats, isLoading: statsLoading, error: statsError, refetch: refetchStats } = useQuery({
     queryKey: ['audit-stats'],
     queryFn: () => auditApi.getStats(),
     refetchInterval: 30000,
   });
 
-  const { data: securityLogs, isLoading: logsLoading } = useQuery({
+  const { data: securityLogs, isLoading: logsLoading, error: logsError, refetch: refetchLogs } = useQuery({
     queryKey: ['security-events'],
-    queryFn: async () => {
-      const response = await auditApi.getLogs({ per_page: 50 });
-      return response.logs.filter(log =>
-        SECURITY_ACTIONS.includes(log.action as typeof SECURITY_ACTIONS[number])
-      );
-    },
+    queryFn: securityApi.getRecentSecurityEvents,
     refetchInterval: 30000,
-  });
-
-  const { data: twoFactorStats } = useQuery({
-    queryKey: ['2fa-stats'],
-    queryFn: () => securityApi.getTwoFactorStats(),
-    refetchInterval: 60000,
   });
 
   const isLoading = statsLoading || logsLoading;
 
-  if (statsError) {
+  if (statsError || logsError) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-center">
           <AlertTriangle size={48} className="mx-auto text-red-500 mb-4" />
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
             Failed to load security data
           </h2>
           <p className="text-gray-500 dark:text-gray-400">
-            Please try refreshing the page.
-          </p>
+             Audit statistics or security events could not be loaded. Please try again.
+           </p>
+           <button onClick={() => { void refetchStats(); void refetchLogs(); }} className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-md">Retry</button>
         </div>
       </div>
     );
@@ -160,8 +151,6 @@ export default function SecurityPage() {
   const totalEvents = stats?.total_events || 0;
   const eventsToday = stats?.events_today || 0;
   const recentFailures = stats?.recent_failures || [];
-  const twoFactorEnabled = twoFactorStats?.enabled_count || 0;
-  const twoFactorTotal = twoFactorStats?.total_users || 0;
 
   return (
     <div className="space-y-6">
@@ -176,10 +165,14 @@ export default function SecurityPage() {
             </p>
           </div>
         </div>
+        <div className="flex items-center gap-4">
+          <Link to="/settings?section=audit" className="text-sm text-blue-600 dark:text-blue-400 hover:underline">View audit logs</Link>
+          <button onClick={() => { void refetchStats(); void refetchLogs(); }} aria-label="Refresh security data" className="text-blue-600 dark:text-blue-400"><RefreshCw size={20} /></button>
+        </div>
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatCard
           title="Events Today"
           value={isLoading ? '...' : eventsToday}
@@ -187,7 +180,7 @@ export default function SecurityPage() {
           color="text-blue-600 dark:text-blue-400"
         />
         <StatCard
-          title="Failed Attempts"
+          title="Failed Events"
           value={isLoading ? '...' : failedEvents}
           icon={<AlertTriangle size={20} />}
           color={failedEvents > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-400'}
@@ -198,12 +191,6 @@ export default function SecurityPage() {
           icon={<Shield size={20} />}
           color="text-gray-600 dark:text-gray-400"
         />
-        <StatCard
-          title="2FA Enabled"
-          value={isLoading ? '...' : `${twoFactorEnabled}/${twoFactorTotal}`}
-          icon={<Key size={20} />}
-          color={twoFactorEnabled > 0 ? 'text-green-600 dark:text-green-400' : 'text-yellow-600 dark:text-yellow-400'}
-        />
       </div>
 
       {/* Recent Failures Alert */}
@@ -212,9 +199,9 @@ export default function SecurityPage() {
           <div className="flex items-start gap-3">
             <AlertTriangle size={20} className="text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
             <div>
-              <h3 className="font-semibold text-red-800 dark:text-red-300">Recent Failed Attempts</h3>
+               <h3 className="font-semibold text-red-800 dark:text-red-300">Recent Failed Events</h3>
               <p className="text-sm text-red-700 dark:text-red-400 mt-1">
-                {recentFailures.length} failed authentication attempt{recentFailures.length !== 1 ? 's' : ''} detected recently.
+                 {recentFailures.length} failed event{recentFailures.length !== 1 ? 's' : ''} detected recently.
               </p>
               <ul className="mt-2 space-y-1">
                 {recentFailures.slice(0, 3).map((failure, idx) => (

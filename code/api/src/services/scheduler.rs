@@ -4,12 +4,69 @@
 //! Add new tasks by implementing the `PeriodicTask` trait.
 
 use async_trait::async_trait;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, TransactionTrait};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
 
+use super::audit::{clear_old_logs_with, log_on_transaction};
 use super::chart_sync::{ChartSyncService, ChartSyncTask};
+use crate::models::audit_log::{AuditAction, ResourceType};
+
+const DEFAULT_AUDIT_RETENTION_DAYS: i64 = 90;
+
+// Parse once at startup; never let invalid configuration disable retention or
+// accidentally turn it into a zero-day purge.
+fn parse_audit_retention_days(value: Option<&str>) -> i64 {
+    match value {
+        None => DEFAULT_AUDIT_RETENTION_DAYS,
+        Some(raw) => match raw.parse::<i64>() {
+            Ok(days @ 1..=3650) => days,
+            _ => {
+                tracing::warn!("Invalid KUBARR_AUDIT_RETENTION_DAYS; using 90 days");
+                DEFAULT_AUDIT_RETENTION_DAYS
+            }
+        },
+    }
+}
+
+/// Daily retention cleanup, with its own audit record in the same transaction.
+pub struct AuditRetentionTask {
+    days: i64,
+}
+
+#[async_trait]
+impl PeriodicTask for AuditRetentionTask {
+    fn name(&self) -> &'static str {
+        "audit_retention"
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(24 * 60 * 60)
+    }
+
+    async fn run(&self, db: &DatabaseConnection) -> anyhow::Result<()> {
+        let txn = db.begin().await?;
+        let deleted = clear_old_logs_with(&txn, self.days).await?;
+        log_on_transaction(
+            &txn,
+            AuditAction::SystemSettingChanged,
+            ResourceType::System,
+            None,
+            None,
+            None,
+            Some(serde_json::json!({"operation": "automatic_audit_retention", "days": self.days, "deleted": deleted})),
+            None,
+            None,
+            true,
+            None,
+        )
+        .await?;
+        txn.commit().await?;
+        tracing::info!(deleted, "Audit retention completed");
+        Ok(())
+    }
+}
 
 /// Trait for periodic background tasks
 #[async_trait]
@@ -26,8 +83,17 @@ pub trait PeriodicTask: Send + Sync {
 
 /// Start all periodic tasks
 pub fn start_scheduler(db: Arc<DatabaseConnection>, chart_sync: Arc<ChartSyncService>) {
+    let days = match std::env::var("KUBARR_AUDIT_RETENTION_DAYS") {
+        Ok(value) => parse_audit_retention_days(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_audit_retention_days(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!("Invalid KUBARR_AUDIT_RETENTION_DAYS; using 90 days");
+            DEFAULT_AUDIT_RETENTION_DAYS
+        }
+    };
     let tasks: Vec<Box<dyn PeriodicTask>> = vec![
         Box::new(SessionCleanupTask),
+        Box::new(AuditRetentionTask { days }),
         Box::new(ChartSyncTask {
             service: chart_sync,
         }),
@@ -85,6 +151,64 @@ mod tests {
     #[test]
     fn session_cleanup_task_name() {
         assert_eq!(SessionCleanupTask.name(), "session_cleanup");
+    }
+
+    #[test]
+    fn audit_retention_configuration_and_interval() {
+        assert_eq!(parse_audit_retention_days(None), 90);
+        for (raw, expected) in [
+            ("1", 1),
+            ("3650", 3650),
+            ("90", 90),
+            ("0", 90),
+            ("-1", 90),
+            ("3651", 90),
+            ("bad", 90),
+            ("", 90),
+        ] {
+            assert_eq!(parse_audit_retention_days(Some(raw)), expected);
+        }
+        let task = AuditRetentionTask { days: 90 };
+        assert_eq!(task.name(), "audit_retention");
+        assert_eq!(task.interval(), Duration::from_secs(86400));
+    }
+
+    #[tokio::test]
+    async fn audit_retention_deletes_only_expired_rows_and_records_event() {
+        use crate::models::audit_log;
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .unwrap();
+        for (days, action) in [(100, "old"), (2, "recent")] {
+            audit_log::ActiveModel {
+                timestamp: Set(Utc::now() - chrono::Duration::days(days)),
+                action: Set(action.into()),
+                resource_type: Set("system".into()),
+                success: Set(true),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .unwrap();
+        }
+        let task = AuditRetentionTask { days: 90 };
+        task.run(&db).await.unwrap();
+        let logs = audit_log::Entity::find().all(&db).await.unwrap();
+        assert_eq!(logs.len(), 2);
+        assert!(logs.iter().any(|row| row.action == "recent"));
+        let event = logs
+            .iter()
+            .find(|row| row.action == "system_setting_changed")
+            .unwrap();
+        assert_eq!(event.user_id, None);
+        assert_eq!(event.resource_type, "system");
+        assert!(event.success);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(event.details.as_ref().unwrap()).unwrap(),
+            serde_json::json!({"operation": "automatic_audit_retention", "days": 90, "deleted": 1})
+        );
     }
 
     /// Verify start_scheduler spawns tasks without panicking

@@ -7,7 +7,8 @@ use axum::{
 use crate::error::Result;
 use crate::middleware::permissions::{AuditManage, AuditView, Authorized};
 use crate::services::audit::{
-    clear_old_logs, get_audit_logs, get_audit_stats, AuditLogQuery, AuditLogResponse, AuditStats,
+    clear_old_logs_audited, get_audit_logs, get_audit_stats, AuditLogQuery, AuditLogResponse,
+    AuditStats,
 };
 use crate::state::AppState;
 
@@ -66,6 +67,7 @@ pub struct ClearLogsRequest {
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct ClearLogsResponse {
     pub deleted: u64,
+    pub audit_event_id: i64,
     pub message: String,
 }
 
@@ -80,15 +82,17 @@ pub struct ClearLogsResponse {
 )]
 async fn clear_audit_logs(
     State(state): State<AppState>,
-    _auth: Authorized<AuditManage>,
+    auth: Authorized<AuditManage>,
     Json(request): Json<ClearLogsRequest>,
 ) -> Result<Json<ClearLogsResponse>> {
     let db = state.get_db().await?;
     let days = request.days.unwrap_or(90); // Default to 90 days retention
-    let deleted = clear_old_logs(&db, days).await?;
+    let (deleted, audit_event_id) =
+        clear_old_logs_audited(&db, days, auth.user_id(), auth.user().username.clone()).await?;
 
     Ok(Json(ClearLogsResponse {
         deleted,
+        audit_event_id,
         message: format!(
             "Deleted {} audit log entries older than {} days",
             deleted, days
@@ -116,6 +120,7 @@ mod tests {
     fn clear_logs_response_ser() {
         let r = ClearLogsResponse {
             deleted: 42,
+            audit_event_id: 1,
             message: "Deleted 42 audit log entries older than 90 days".to_string(),
         };
         let json = serde_json::to_string(&r).expect("ser");
@@ -127,6 +132,7 @@ mod tests {
     fn clear_logs_response_zero_deleted() {
         let r = ClearLogsResponse {
             deleted: 0,
+            audit_event_id: 1,
             message: "No entries deleted".to_string(),
         };
         let json = serde_json::to_string(&r).expect("ser");

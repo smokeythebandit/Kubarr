@@ -50,6 +50,7 @@ type SettingsSection = 'dashboard' | 'general' | 'users' | 'pending' | 'invites'
 
 const SettingsPage: React.FC = () => {
   const { isAdmin, hasPermission } = useAuth();
+  const canViewAudit = isAdmin || hasPermission('audit.view');
   const [searchParams, setSearchParams] = useSearchParams();
   const [users, setUsers] = useState<User[]>([]);
   const [pendingUsers, setPendingUsers] = useState<User[]>([]);
@@ -109,6 +110,9 @@ const SettingsPage: React.FC = () => {
   const [auditPage, setAuditPage] = useState(1);
   const [auditTotalPages, setAuditTotalPages] = useState(1);
   const [auditTotal, setAuditTotal] = useState(0);
+  const [auditPerPage, setAuditPerPage] = useState(20);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditStatsError, setAuditStatsError] = useState<string | null>(null);
   const [auditFilter, setAuditFilter] = useState<AuditLogQuery>({ per_page: 20 });
   const [clearingLogs, setClearingLogs] = useState(false);
 
@@ -142,7 +146,7 @@ const SettingsPage: React.FC = () => {
 
   // Load audit data when section is active
   useEffect(() => {
-    if (isAdmin && activeSection === 'audit') {
+    if (canViewAudit && activeSection === 'audit') {
       loadAuditLogs();
       loadAuditStats();
     }
@@ -150,7 +154,7 @@ const SettingsPage: React.FC = () => {
       loadAuditStats();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin, activeSection, auditPage, auditFilter]);
+  }, [isAdmin, canViewAudit, activeSection, auditPage, auditFilter]);
 
   // Load notification data when section is active
   useEffect(() => {
@@ -286,14 +290,24 @@ const SettingsPage: React.FC = () => {
   };
 
   const loadAuditLogs = async () => {
+    if (auditFilter.from && auditFilter.to &&
+        new Date(auditFilter.to).getTime() < new Date(auditFilter.from).getTime()) {
+      setAuditLogs([]);
+      setAuditError('To must be on or after From.');
+      setAuditLoading(false);
+      return;
+    }
     try {
       setAuditLoading(true);
+      setAuditError(null);
       const response = await auditApi.getLogs({ ...auditFilter, page: auditPage });
       setAuditLogs(response.logs);
       setAuditTotalPages(response.total_pages);
       setAuditTotal(response.total);
+      setAuditPerPage(response.per_page);
     } catch (err: unknown) {
-      console.error('Failed to load audit logs:', err);
+      setAuditLogs([]);
+      setAuditError((err as ApiErr).response?.data?.detail || 'Failed to load audit logs');
     } finally {
       setAuditLoading(false);
     }
@@ -301,10 +315,12 @@ const SettingsPage: React.FC = () => {
 
   const loadAuditStats = async () => {
     try {
+      setAuditStatsError(null);
       const stats = await auditApi.getStats();
       setAuditStats(stats);
     } catch (err: unknown) {
-      console.error('Failed to load audit stats:', err);
+      setAuditStats(null);
+      setAuditStatsError((err as ApiErr).response?.data?.detail || 'Failed to load audit statistics');
     }
   };
 
@@ -325,7 +341,7 @@ const SettingsPage: React.FC = () => {
     }
   };
 
-  const handleAuditFilterChange = (key: keyof AuditLogQuery, value: string | boolean | undefined) => {
+  const handleAuditFilterChange = (key: keyof AuditLogQuery, value: string | number | boolean | undefined) => {
     setAuditPage(1);
     setAuditFilter(prev => ({ ...prev, [key]: value === '' ? undefined : value }));
   };
@@ -634,7 +650,7 @@ const SettingsPage: React.FC = () => {
   //   }
   // };
 
-  if (!isAdmin) {
+  if (!isAdmin && !(activeSection === 'audit' && canViewAudit && viewMode === 'list')) {
     return (
       <div className="max-w-7xl mx-auto px-4 py-8">
         <div className="bg-red-100 dark:bg-red-900 border border-red-300 dark:border-red-700 text-red-800 dark:text-white px-4 py-3 rounded">
@@ -644,11 +660,11 @@ const SettingsPage: React.FC = () => {
     );
   }
 
-  const systemItems = [
+  const systemItems = isAdmin ? [
     { id: 'dashboard' as SettingsSection, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'notifications' as SettingsSection, label: 'Notifications', icon: Bell },
     { id: 'audit' as SettingsSection, label: 'Audit Logs', icon: FileText },
-  ];
+  ] : [{ id: 'audit' as SettingsSection, label: 'Audit Logs', icon: FileText }];
 
   const networkingItems = [
     { id: 'domains' as SettingsSection, label: 'Domains', icon: Globe },
@@ -736,7 +752,7 @@ const SettingsPage: React.FC = () => {
           </div>
 
           {/* Networking Section */}
-          <div className="mb-4">
+          {isAdmin && <div className="mb-4">
             <div className="px-3 py-2 text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
               Networking
             </div>
@@ -759,10 +775,10 @@ const SettingsPage: React.FC = () => {
                 </button>
               );
             })}
-          </div>
+          </div>}
 
           {/* Access Management Section */}
-          <div className="mb-2">
+          {isAdmin && <div className="mb-2">
             <div className="px-3 py-2 text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
               Access Management
             </div>
@@ -794,7 +810,7 @@ const SettingsPage: React.FC = () => {
                 </button>
               );
             })}
-          </div>
+          </div>}
         </nav>
       </div>
 
@@ -825,13 +841,13 @@ const SettingsPage: React.FC = () => {
           </div>
         )}
 
-        {loading ? (
+        {isAdmin && loading ? (
           <div className="flex justify-center items-center py-12">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
           </div>
         ) : (
           <>
-            {activeSection === 'dashboard' && (
+            {isAdmin && activeSection === 'dashboard' && (
               <DashboardTab
                 usersCount={users.length}
                 pendingUsersCount={pendingUsers.length}
@@ -844,7 +860,7 @@ const SettingsPage: React.FC = () => {
               />
             )}
 
-            {activeSection === 'general' && (
+            {isAdmin && activeSection === 'general' && (
               <GeneralTab
                 systemSettings={systemSettings}
                 savingSettings={savingSettings}
@@ -861,7 +877,7 @@ const SettingsPage: React.FC = () => {
               />
             )}
 
-            {activeSection === 'users' && viewMode === 'list' && (
+            {isAdmin && activeSection === 'users' && viewMode === 'list' && (
               <UsersTab
                 users={users}
                 onCreateUser={() => setViewMode('create')}
@@ -871,7 +887,7 @@ const SettingsPage: React.FC = () => {
               />
             )}
 
-            {activeSection === 'pending' && viewMode === 'list' && (
+            {isAdmin && activeSection === 'pending' && viewMode === 'list' && (
               <PendingUsersTab
                 pendingUsers={pendingUsers}
                 onApproveUser={handleApproveUser}
@@ -880,7 +896,7 @@ const SettingsPage: React.FC = () => {
               />
             )}
 
-            {activeSection === 'invites' && viewMode === 'list' && (
+            {isAdmin && activeSection === 'invites' && viewMode === 'list' && (
               <InvitesTab
                 invites={invites}
                 creatingInvite={creatingInvite}
@@ -893,7 +909,7 @@ const SettingsPage: React.FC = () => {
               />
             )}
 
-            {activeSection === 'permissions' && <PermissionsTab />}
+            {isAdmin && activeSection === 'permissions' && <PermissionsTab />}
 
             {activeSection === 'audit' && (
               <AuditTab
@@ -903,8 +919,13 @@ const SettingsPage: React.FC = () => {
                 auditPage={auditPage}
                 auditTotalPages={auditTotalPages}
                 auditTotal={auditTotal}
+                auditPerPage={auditPerPage}
+                auditError={auditError}
+                auditStatsError={auditStatsError}
                 auditFilter={auditFilter}
                 clearingLogs={clearingLogs}
+                canManage={hasPermission('audit.manage')}
+                onRefresh={() => { void loadAuditLogs(); void loadAuditStats(); }}
                 onClearOldLogs={handleClearOldLogs}
                 onAuditFilterChange={handleAuditFilterChange}
                 setAuditPage={setAuditPage}
@@ -913,7 +934,7 @@ const SettingsPage: React.FC = () => {
               />
             )}
 
-            {activeSection === 'notifications' && (
+            {isAdmin && activeSection === 'notifications' && (
               <NotificationsTab
                 notificationChannels={notificationChannels}
                 notificationEvents={notificationEvents}
@@ -939,20 +960,20 @@ const SettingsPage: React.FC = () => {
             )}
 
             {/* VPN Section */}
-            {activeSection === 'vpn' && <VpnTab />}
+            {isAdmin && activeSection === 'vpn' && <VpnTab />}
 
-            {activeSection === 'domains' && (
+            {isAdmin && activeSection === 'domains' && (
               <DomainsTab
                 apps={apps}
               />
             )}
 
-            {activeSection === 'ddns' && <DdnsTab />}
+            {isAdmin && activeSection === 'ddns' && <DdnsTab />}
 
-            {activeSection === 'letsencrypt' && <LetsEncryptTab />}
+            {isAdmin && activeSection === 'letsencrypt' && <LetsEncryptTab />}
 
             {/* Create/Edit User Forms */}
-            {viewMode === 'create' && (
+            {isAdmin && viewMode === 'create' && (
               <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
                 <UserForm
                   roles={roles}
@@ -963,7 +984,7 @@ const SettingsPage: React.FC = () => {
               </div>
             )}
 
-            {viewMode === 'edit' && selectedUser && (
+            {isAdmin && viewMode === 'edit' && selectedUser && (
               <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
                 <UserForm
                   user={selectedUser}

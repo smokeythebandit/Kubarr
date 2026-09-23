@@ -88,6 +88,10 @@ pub async fn run_worker() -> anyhow::Result<()> {
     let domain_reconciler = Arc::new(DomainReconciler::new(conn.clone(), k8s_client.clone()));
     let manager = Arc::new(AppManager::new(conn, k8s_client, catalog));
 
+    // Only aged claims are recovered: a recent claim might belong to a still
+    // draining predecessor during deployment. Recovery never invokes Helm again.
+    manager.recover_stale_operations().await?;
+
     let poll_interval = env_duration("KUBARR_WORKER_POLL_INTERVAL_SECONDS", 5);
     let reconcile_interval = env_duration("KUBARR_WORKER_RECONCILE_INTERVAL_SECONDS", 30);
     let domain_reconcile_interval = env_duration("KUBARR_DOMAIN_RECONCILE_INTERVAL_SECONDS", 60);
@@ -323,7 +327,14 @@ async fn serve(app: Router) -> anyhow::Result<()> {
     tracing::info!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Attach the actual socket peer to requests. Behind OpenResty this is the
+    // gateway's IP, not the original client; never infer a client IP from
+    // untrusted forwarded headers.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

@@ -62,6 +62,16 @@ jobs:
         run: cargo test --locked --test app_operations_tests
         working-directory: code/api
 
+      - name: Audit security and contract tests
+        run: |
+          cargo test --locked --test auth_audit_tests
+          cargo test --locked --test admin_audit_tests
+          cargo test --locked --test audit_contract_tests
+          cargo test --locked --test app_audit_tests
+          cargo test --locked --test vpn_audit_tests
+          cargo test --locked --test audit_endpoint_tests
+        working-directory: code/api
+
       - name: Session-authenticated enqueue integration
         run: cargo test --locked --test apps_endpoint_tests queues_without_k8s
         working-directory: code/api
@@ -70,6 +80,37 @@ jobs:
         run: |
           cargo test --locked --test vpn_endpoint_tests
           cargo test --locked --test vpn_service_tests
+        working-directory: code/api
+
+  postgres-audit-migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: kubarr_test
+          POSTGRES_PASSWORD: testonly_audit_pg
+          POSTGRES_DB: audit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kubarr_test -d audit_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: code/api
+      - name: PostgreSQL audit migration and write regression
+        env:
+          AUDIT_TEST_POSTGRES_URL: postgres://kubarr_test:testonly_audit_pg@localhost:5432/audit_test
+        run: cargo test --locked --test audit_postgres_migration_tests
         working-directory: code/api
 
   cli:

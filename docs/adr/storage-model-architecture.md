@@ -170,7 +170,7 @@ Used for dynamic configuration (storage path, OAuth2 settings, JWT keys) without
 
 5. **Unbounded cache growth** - Neither cache implementation has a maximum size limit. While `NetworkMetricsCache` is practically bounded by the number of Kubernetes namespaces, `EndpointCache` has no such natural bound. There is no LRU eviction, no max-entries cap, and no memory pressure monitoring.
 
-6. **Audit log growth** - No automatic retention policy. `clear_old_logs()` exists but must be called manually via the admin API. Without scheduled cleanup, the audit_log table grows indefinitely, compounding the `get_audit_stats` memory issue above.
+6. **Audit log growth** - Automatic retention runs every 24 hours after the scheduler starts (no immediate first run), deleting rows older than 90 days by default. `KUBARR_AUDIT_RETENTION_DAYS` can set 1–3650 days at startup; invalid values warn and fall back to 90 days. Each cleanup and its system audit event commit together. Admins can still clear logs manually via the API.
 
 ### Architectural Limitations
 

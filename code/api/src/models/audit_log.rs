@@ -63,6 +63,13 @@ pub enum AuditAction {
     AppConfigured,
     AppAccessed,
 
+    // VPN management
+    VpnProviderCreated,
+    VpnProviderUpdated,
+    VpnProviderDeleted,
+    VpnAssigned,
+    VpnRemoved,
+
     // System
     SystemSettingChanged,
     InviteCreated,
@@ -103,6 +110,11 @@ impl std::fmt::Display for AuditAction {
             AuditAction::AppRestarted => write!(f, "app_restarted"),
             AuditAction::AppConfigured => write!(f, "app_configured"),
             AuditAction::AppAccessed => write!(f, "app_accessed"),
+            AuditAction::VpnProviderCreated => write!(f, "vpn_provider_created"),
+            AuditAction::VpnProviderUpdated => write!(f, "vpn_provider_updated"),
+            AuditAction::VpnProviderDeleted => write!(f, "vpn_provider_deleted"),
+            AuditAction::VpnAssigned => write!(f, "vpn_assigned"),
+            AuditAction::VpnRemoved => write!(f, "vpn_removed"),
             AuditAction::SystemSettingChanged => write!(f, "system_setting_changed"),
             AuditAction::InviteCreated => write!(f, "invite_created"),
             AuditAction::InviteUsed => write!(f, "invite_used"),
@@ -118,6 +130,7 @@ pub enum ResourceType {
     User,
     Role,
     App,
+    Vpn,
     System,
     Invite,
     Session,
@@ -129,6 +142,7 @@ impl std::fmt::Display for ResourceType {
             ResourceType::User => write!(f, "user"),
             ResourceType::Role => write!(f, "role"),
             ResourceType::App => write!(f, "app"),
+            ResourceType::Vpn => write!(f, "vpn"),
             ResourceType::System => write!(f, "system"),
             ResourceType::Invite => write!(f, "invite"),
             ResourceType::Session => write!(f, "session"),
@@ -185,6 +199,20 @@ mod tests {
         assert_eq!(AuditAction::AppRestarted.to_string(), "app_restarted");
         assert_eq!(AuditAction::AppConfigured.to_string(), "app_configured");
         assert_eq!(AuditAction::AppAccessed.to_string(), "app_accessed");
+    }
+
+    #[test]
+    fn vpn_audit_values() {
+        for (action, expected) in [
+            (AuditAction::VpnProviderCreated, "vpn_provider_created"),
+            (AuditAction::VpnProviderUpdated, "vpn_provider_updated"),
+            (AuditAction::VpnProviderDeleted, "vpn_provider_deleted"),
+            (AuditAction::VpnAssigned, "vpn_assigned"),
+            (AuditAction::VpnRemoved, "vpn_removed"),
+        ] {
+            assert_eq!(action.to_string(), expected);
+        }
+        assert_eq!(ResourceType::Vpn.to_string(), "vpn");
     }
 
     #[test]

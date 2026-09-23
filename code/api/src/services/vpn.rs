@@ -223,8 +223,8 @@ pub async fn get_vpn_provider(db: &DbConn, id: i64) -> Result<VpnProviderRespons
 }
 
 /// Create a new VPN provider
-pub async fn create_vpn_provider(
-    db: &DbConn,
+pub async fn create_vpn_provider<C: ConnectionTrait>(
+    db: &C,
     req: CreateVpnProviderRequest,
 ) -> Result<VpnProviderResponse> {
     // Validate credentials based on VPN type
@@ -264,8 +264,8 @@ pub async fn create_vpn_provider(
 }
 
 /// Update a VPN provider
-pub async fn update_vpn_provider(
-    db: &DbConn,
+pub async fn update_vpn_provider<C: ConnectionTrait>(
+    db: &C,
     id: i64,
     req: UpdateVpnProviderRequest,
 ) -> Result<VpnProviderResponse> {
@@ -324,14 +324,22 @@ pub async fn update_vpn_provider(
 /// Delete a VPN provider
 pub async fn delete_vpn_provider(db: &DbConn, id: i64) -> Result<()> {
     let transaction = db.begin().await?;
+    delete_vpn_provider_in_transaction(&transaction, id).await?;
+    transaction.commit().await?;
+
+    Ok(())
+}
+
+/// Delete a provider using the caller's transaction, including the assignment guard.
+pub async fn delete_vpn_provider_in_transaction<C: ConnectionTrait>(db: &C, id: i64) -> Result<()> {
     VpnProvider::find_by_id(id)
-        .one(&transaction)
+        .one(db)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("VPN provider {} not found", id)))?;
 
     let assigned_apps = AppVpnConfig::find()
         .filter(app_vpn_config::Column::VpnProviderId.eq(id))
-        .count(&transaction)
+        .count(db)
         .await?;
     if assigned_apps != 0 {
         return Err(AppError::BadRequest(format!(
@@ -340,8 +348,7 @@ pub async fn delete_vpn_provider(db: &DbConn, id: i64) -> Result<()> {
         )));
     }
 
-    VpnProvider::delete_by_id(id).exec(&transaction).await?;
-    transaction.commit().await?;
+    VpnProvider::delete_by_id(id).exec(db).await?;
 
     Ok(())
 }

@@ -26,6 +26,8 @@ mod m20260226_000025_create_app_operations;
 mod m20260226_000026_create_app_states;
 mod m20260226_000027_create_domain_management;
 mod m20260226_000028_remove_obsolete_domain_settings;
+mod m20260226_000029_create_app_audit_outbox;
+mod m20260226_000030_audit_details_text;
 
 pub struct Migrator;
 
@@ -59,6 +61,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260226_000026_create_app_states::Migration),
             Box::new(m20260226_000027_create_domain_management::Migration),
             Box::new(m20260226_000028_remove_obsolete_domain_settings::Migration),
+            Box::new(m20260226_000029_create_app_audit_outbox::Migration),
+            Box::new(m20260226_000030_audit_details_text::Migration),
         ]
     }
 }

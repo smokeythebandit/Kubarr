@@ -1,13 +1,13 @@
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    sea_query::Expr, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::db::DbConn;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::models::audit_log::{self, AuditAction, ResourceType};
 
 /// Audit service for logging system events
@@ -44,30 +44,26 @@ impl AuditService {
         let db = match db_guard.as_ref() {
             Some(db) => db,
             None => {
-                tracing::warn!("Audit service: database not initialized, skipping log");
-                return Ok(());
+                return Err(AppError::ServiceUnavailable(
+                    "Audit database not initialized".to_string(),
+                ));
             }
         };
 
-        let now = chrono::Utc::now();
-        let details_str = details.map(|d| d.to_string());
-
-        let log_entry = audit_log::ActiveModel {
-            timestamp: Set(now),
-            user_id: Set(user_id),
-            username: Set(username),
-            action: Set(action.to_string()),
-            resource_type: Set(resource_type.to_string()),
-            resource_id: Set(resource_id),
-            details: Set(details_str),
-            ip_address: Set(ip_address),
-            user_agent: Set(user_agent),
-            success: Set(success),
-            error_message: Set(error_message),
-            ..Default::default()
-        };
-
-        log_entry.insert(db).await?;
+        log_on_transaction(
+            db,
+            action,
+            resource_type,
+            resource_id,
+            user_id,
+            username,
+            details,
+            ip_address,
+            user_agent,
+            success,
+            error_message,
+        )
+        .await?;
         Ok(())
     }
 
@@ -129,6 +125,259 @@ impl AuditService {
     }
 }
 
+const MAX_DETAILS_BYTES: usize = 8192;
+// Audit actor and resource columns remain VARCHAR(255) in PostgreSQL.
+// Bound every free-form field by bytes so valid requests cannot fail at commit.
+const MAX_FIELD_BYTES: usize = 255;
+const REDACTED: &str = "[REDACTED]";
+
+fn limited(value: String, max: usize) -> String {
+    if value.len() <= max {
+        return value;
+    }
+    let mut end = max;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn sensitive(key: &str) -> bool {
+    let key = key.to_ascii_lowercase().replace(['-', '_', ' '], "");
+    [
+        "password",
+        "passwd",
+        "token",
+        "secret",
+        "credential",
+        "privatekey",
+        "apikey",
+        "invitecode",
+        "totp",
+        "recoverycode",
+        "cookie",
+        "authorization",
+        "authheader",
+        "session",
+        "bearer",
+        "accesskey",
+    ]
+    .iter()
+    .any(|word| key.contains(word))
+}
+
+// Audit details are not a general-purpose JSON dump. Only typed identifiers and
+// explicitly enumerated labels may survive; key-name matching alone cannot stop
+// a password pasted into e.g. `name`, `reason`, or a nested arbitrary string.
+fn allowed_label(key: &str, value: &str) -> bool {
+    match key {
+        "operation" => matches!(
+            value,
+            "audit_clear"
+                | "automatic_audit_retention"
+                | "session_revoked"
+                | "install"
+                | "update"
+                | "delete"
+                | "restart"
+        ),
+        "phase" => matches!(
+            value,
+            "queued" | "completed" | "failed" | "indeterminate" | "requested_access"
+        ),
+        "fields" => matches!(
+            value,
+            "profile"
+                | "preferences"
+                | "email"
+                | "is_active"
+                | "is_approved"
+                | "role_ids"
+                | "2fa_setup"
+                | "name"
+                | "service_provider"
+                | "credentials"
+                | "enabled"
+                | "kill_switch"
+                | "firewall_outbound_subnets"
+        ),
+        "reason" => matches!(
+            value,
+            "rejected"
+                | "invalid_credentials"
+                | "account_disabled"
+                | "approval_required"
+                | "setup_required"
+                | "totp_required"
+                | "invalid_totp"
+        ),
+        "method" => matches!(value, "totp" | "recovery_code" | "password"),
+        "changed" => matches!(value, "apps" | "permissions"),
+        "operation_id" => uuid::Uuid::parse_str(value).is_ok(),
+        _ => false,
+    }
+}
+
+fn allowed_detail_key(key: &str) -> bool {
+    matches!(
+        key,
+        "operation"
+            | "phase"
+            | "fields"
+            | "reason"
+            | "method"
+            | "changed"
+            | "operation_id"
+            | "days"
+            | "deleted"
+            | "attempts"
+            | "provider_id"
+            | "target_user_id"
+            | "role_ids"
+            | "enabled"
+            | "admin_reset"
+    )
+}
+
+fn app_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+fn vpn_app_action(action: &AuditAction, resource_type: &ResourceType) -> bool {
+    matches!(resource_type, ResourceType::Vpn)
+        && matches!(action, AuditAction::VpnAssigned | AuditAction::VpnRemoved)
+}
+
+fn sanitize(value: &mut serde_json::Value, key: &str, vpn_app_name: bool) {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Keys are attacker-controlled too. Drop unknown keys rather than
+            // persisting a pasted secret as a JSON property name.
+            map.retain(|key, _| {
+                (allowed_detail_key(key) || (vpn_app_name && key == "app_name")) && !sensitive(key)
+            });
+            for (key, child) in map {
+                let allow_slug = vpn_app_name && key == "app_name" && child.is_string();
+                sanitize(child, key, allow_slug);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                sanitize(child, key, false);
+            }
+        }
+        serde_json::Value::String(s) => {
+            if !(vpn_app_name && key == "app_name" && app_slug(s)) && !allowed_label(key, s) {
+                *s = REDACTED.into();
+            }
+        }
+        serde_json::Value::Number(_)
+            if !matches!(
+                key,
+                "days" | "deleted" | "attempts" | "provider_id" | "target_user_id" | "role_ids"
+            ) =>
+        {
+            *value = serde_json::Value::String(REDACTED.into());
+        }
+        serde_json::Value::Bool(_) if !matches!(key, "enabled" | "admin_reset") => {
+            *value = serde_json::Value::String(REDACTED.into());
+        }
+        _ => {}
+    }
+}
+
+fn safe_error_label(label: &str) -> bool {
+    matches!(
+        label,
+        "invalid_credentials"
+            | "account_disabled"
+            | "approval_required"
+            | "totp_required"
+            | "invalid_totp"
+            | "setup_required"
+            | "verification_failed"
+            | "app_operation_failed"
+            | "outcome_indeterminate_after_worker_interruption"
+    )
+}
+
+fn safe_resource_id(action: &AuditAction, resource_type: &ResourceType, id: String) -> String {
+    let valid = match resource_type {
+        // App identities are catalog slugs; never accept arbitrary paths or headers.
+        ResourceType::App => app_slug(&id),
+        ResourceType::Vpn if vpn_app_action(action, resource_type) => app_slug(&id),
+        ResourceType::System => matches!(
+            id.as_str(),
+            "registration_enabled" | "registration_require_approval"
+        ),
+        _ => id.parse::<i64>().is_ok() && id.len() <= 20,
+    };
+    if valid {
+        id
+    } else {
+        REDACTED.into()
+    }
+}
+
+/// Write an audit event on an existing connection/transaction. Callers can commit their
+/// business change and this insert together; errors must abort the surrounding transaction.
+#[allow(clippy::too_many_arguments)]
+pub async fn log_on_transaction<C: ConnectionTrait>(
+    db: &C,
+    action: AuditAction,
+    resource_type: ResourceType,
+    resource_id: Option<String>,
+    user_id: Option<i64>,
+    username: Option<String>,
+    details: Option<serde_json::Value>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    success: bool,
+    error_message: Option<String>,
+) -> Result<audit_log::Model> {
+    let details = details.map(|mut value| {
+        sanitize(&mut value, "", vpn_app_action(&action, &resource_type));
+        let encoded = value.to_string();
+        if encoded.len() > MAX_DETAILS_BYTES {
+            "\"[TRUNCATED]\"".to_string()
+        } else {
+            encoded
+        }
+    });
+    let log_entry = audit_log::ActiveModel {
+        timestamp: Set(chrono::Utc::now()),
+        user_id: Set(user_id),
+        username: Set(username.map(|s| limited(s, MAX_FIELD_BYTES))),
+        action: Set(action.to_string()),
+        resource_type: Set(resource_type.to_string()),
+        resource_id: Set(resource_id.map(|s| safe_resource_id(&action, &resource_type, s))),
+        details: Set(details),
+        ip_address: Set(ip_address.map(|s| {
+            if s.parse::<std::net::IpAddr>().is_ok() {
+                s
+            } else {
+                REDACTED.into()
+            }
+        })),
+        // A User-Agent header is fully attacker-controlled and can contain credentials.
+        user_agent: Set(user_agent.map(|_| REDACTED.into())),
+        success: Set(success),
+        error_message: Set(error_message.map(|s| {
+            if safe_error_label(&s) {
+                s
+            } else {
+                REDACTED.into()
+            }
+        })),
+        ..Default::default()
+    };
+    Ok(log_entry.insert(db).await?)
+}
+
 /// Query parameters for fetching audit logs
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct AuditLogQuery {
@@ -156,8 +405,10 @@ pub struct AuditLogResponse {
 /// Get audit logs with filtering and pagination
 pub async fn get_audit_logs(db: &DbConn, query: AuditLogQuery) -> Result<AuditLogResponse> {
     let page = query.page.unwrap_or(1).max(1);
-    let per_page = query.per_page.unwrap_or(50).min(100);
-    let offset = (page - 1) * per_page;
+    let per_page = query.per_page.unwrap_or(50).clamp(1, 100);
+    let offset = (page - 1)
+        .checked_mul(per_page)
+        .ok_or_else(|| AppError::BadRequest("Page offset is too large".into()))?;
 
     let mut select = audit_log::Entity::find();
 
@@ -187,13 +438,12 @@ pub async fn get_audit_logs(db: &DbConn, query: AuditLogQuery) -> Result<AuditLo
     }
 
     if let Some(search) = &query.search {
-        let search_pattern = format!("%{}%", search);
         select = select.filter(
             audit_log::Column::Username
-                .contains(&search_pattern)
-                .or(audit_log::Column::Action.contains(&search_pattern))
-                .or(audit_log::Column::ResourceId.contains(&search_pattern))
-                .or(audit_log::Column::Details.contains(&search_pattern)),
+                .contains(search)
+                .or(audit_log::Column::Action.contains(search))
+                .or(audit_log::Column::ResourceId.contains(search))
+                .or(audit_log::Column::Details.contains(search)),
         );
     }
 
@@ -208,7 +458,7 @@ pub async fn get_audit_logs(db: &DbConn, query: AuditLogQuery) -> Result<AuditLo
         .all(db)
         .await?;
 
-    let total_pages = (total as f64 / per_page as f64).ceil() as u64;
+    let total_pages = total / per_page + u64::from(total % per_page != 0);
 
     Ok(AuditLogResponse {
         logs,
@@ -238,8 +488,6 @@ pub struct ActionCount {
 }
 
 pub async fn get_audit_stats(db: &DbConn) -> Result<AuditStats> {
-    use sea_orm::QuerySelect;
-
     let total_events = audit_log::Entity::find().count(db).await?;
 
     let successful_events = audit_log::Entity::find()
@@ -276,22 +524,28 @@ pub async fn get_audit_stats(db: &DbConn) -> Result<AuditStats> {
         .all(db)
         .await?;
 
-    // For top actions, we'll do a simple approach since SeaORM grouping is complex
-    // Fetch all logs to count actions (select all columns to avoid partial model issues)
-    let all_logs = audit_log::Entity::find().all(db).await?;
-
-    let mut action_counts: std::collections::HashMap<String, u64> =
-        std::collections::HashMap::new();
-    for log in all_logs {
-        *action_counts.entry(log.action.clone()).or_insert(0) += 1;
+    #[derive(FromQueryResult)]
+    struct GroupedAction {
+        action: String,
+        count: i64,
     }
-
-    let mut top_actions: Vec<ActionCount> = action_counts
+    let grouped: Vec<GroupedAction> = audit_log::Entity::find()
+        .select_only()
+        .column(audit_log::Column::Action)
+        .column_as(Expr::col(audit_log::Column::Id).count(), "count")
+        .group_by(audit_log::Column::Action)
+        .order_by_desc(Expr::col(audit_log::Column::Id).count())
+        .limit(10)
+        .into_model::<GroupedAction>()
+        .all(db)
+        .await?;
+    let top_actions = grouped
         .into_iter()
-        .map(|(action, count)| ActionCount { action, count })
+        .map(|row| ActionCount {
+            action: row.action,
+            count: row.count as u64,
+        })
         .collect();
-    top_actions.sort_by_key(|entry| std::cmp::Reverse(entry.count));
-    top_actions.truncate(10);
 
     Ok(AuditStats {
         total_events,
@@ -306,6 +560,13 @@ pub async fn get_audit_stats(db: &DbConn) -> Result<AuditStats> {
 
 /// Clear old audit logs (retention policy)
 pub async fn clear_old_logs(db: &DbConn, days: i64) -> Result<u64> {
+    clear_old_logs_with(db, days).await
+}
+
+/// Delete expired audit rows on a connection or an existing transaction.
+/// Use a transaction when the deletion must be recorded atomically.
+pub async fn clear_old_logs_with<C: ConnectionTrait>(db: &C, days: i64) -> Result<u64> {
+    validate_retention(days)?;
     let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
 
     let result = audit_log::Entity::delete_many()
@@ -316,10 +577,118 @@ pub async fn clear_old_logs(db: &DbConn, days: i64) -> Result<u64> {
     Ok(result.rows_affected)
 }
 
+fn validate_retention(days: i64) -> Result<()> {
+    if !(1..=3650).contains(&days) {
+        return Err(AppError::BadRequest(
+            "Retention days must be between 1 and 3650".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Atomically delete expired rows and write an attributed audit event; no deletion
+/// persists if the audit insert fails. The new event is never eligible for deletion.
+pub async fn clear_old_logs_audited(
+    db: &DbConn,
+    days: i64,
+    user_id: i64,
+    username: String,
+) -> Result<(u64, i64)> {
+    validate_retention(days)?;
+    let txn = db.begin().await?;
+    let deleted = clear_old_logs_with(&txn, days).await?;
+    let event = log_on_transaction(
+        &txn,
+        AuditAction::SystemSettingChanged,
+        ResourceType::System,
+        None,
+        Some(user_id),
+        Some(username),
+        Some(serde_json::json!({"operation": "audit_clear", "days": days, "deleted": deleted})),
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
+    Ok((deleted, event.id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn vpn_resource_ids_are_slugs_only_for_assignment_and_removal() {
+        for action in [AuditAction::VpnAssigned, AuditAction::VpnRemoved] {
+            assert_eq!(
+                safe_resource_id(&action, &ResourceType::Vpn, "sonarr-2".into()),
+                "sonarr-2"
+            );
+            for invalid in ["", "Sonarr", "a/b", "secret pasted", "é", &"a".repeat(65)] {
+                assert_eq!(
+                    safe_resource_id(&action, &ResourceType::Vpn, invalid.into()),
+                    REDACTED
+                );
+            }
+        }
+        assert_eq!(
+            safe_resource_id(
+                &AuditAction::VpnProviderCreated,
+                &ResourceType::Vpn,
+                "42".into()
+            ),
+            "42"
+        );
+        assert_eq!(
+            safe_resource_id(
+                &AuditAction::VpnProviderCreated,
+                &ResourceType::Vpn,
+                "sonarr".into()
+            ),
+            REDACTED
+        );
+        assert_eq!(
+            safe_resource_id(
+                &AuditAction::VpnAssigned,
+                &ResourceType::User,
+                "sonarr".into()
+            ),
+            REDACTED
+        );
+    }
+
+    #[test]
+    fn vpn_app_name_details_are_scoped_and_validated() {
+        for action in [AuditAction::VpnAssigned, AuditAction::VpnRemoved] {
+            let mut details = serde_json::json!({"app_name": "sonarr-2", "name": "pasted-secret", "unknown": "pasted-secret"});
+            sanitize(
+                &mut details,
+                "",
+                vpn_app_action(&action, &ResourceType::Vpn),
+            );
+            assert_eq!(details, serde_json::json!({"app_name": "sonarr-2"}));
+            for invalid in ["", "Sonarr", "a/b", "pasted secret", "é", &"a".repeat(65)] {
+                let mut details = serde_json::json!({"app_name": invalid});
+                sanitize(
+                    &mut details,
+                    "",
+                    vpn_app_action(&action, &ResourceType::Vpn),
+                );
+                assert_eq!(details["app_name"], REDACTED);
+            }
+        }
+        for (action, resource_type) in [
+            (AuditAction::VpnProviderCreated, ResourceType::Vpn),
+            (AuditAction::VpnAssigned, ResourceType::App),
+        ] {
+            let mut details = serde_json::json!({"app_name": "sonarr", "provider_id": 42});
+            sanitize(&mut details, "", vpn_app_action(&action, &resource_type));
+            assert_eq!(details, serde_json::json!({"provider_id": 42}));
+        }
+    }
 
     fn make_audit_model() -> crate::models::audit_log::Model {
         crate::models::audit_log::Model {
@@ -434,8 +803,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn log_without_db_is_noop() {
-        // No db set → should return Ok silently
+    async fn log_without_db_is_error() {
         let svc = AuditService::new();
         let result = svc
             .log(
@@ -451,7 +819,7 @@ mod tests {
                 None,
             )
             .await;
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(AppError::ServiceUnavailable(_))));
     }
 
     #[tokio::test]
@@ -536,7 +904,7 @@ mod tests {
         let logs = Entity::find().all(&db).await.expect("find");
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].success, false);
-        assert_eq!(logs[0].error_message.as_deref(), Some("invalid password"));
+        assert_eq!(logs[0].error_message.as_deref(), Some("[REDACTED]"));
     }
 
     // -------------------------------------------------------------------------

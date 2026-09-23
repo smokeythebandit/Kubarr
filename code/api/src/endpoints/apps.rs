@@ -574,8 +574,19 @@ async fn log_app_access(
 ) -> Result<Json<serde_json::Value>> {
     use crate::models::audit_log::ResourceType;
 
-    // Log the access in audit trail
-    let _ = state
+    if state.catalog.read().await.get_app(&app_name).is_none() {
+        return Err(AppError::NotFound(format!("App '{}' not found", app_name)));
+    }
+    let db = state.get_db().await?;
+    let permissions = crate::endpoints::extractors::get_user_permissions(&db, auth.user_id()).await;
+    if !permissions
+        .iter()
+        .any(|permission| permission == "app.*" || permission == &format!("app.{app_name}"))
+    {
+        return Err(AppError::Forbidden("App access denied".into()));
+    }
+    // The client reports an intent to open the app, not proof that the proxy served it.
+    state
         .audit
         .log(
             AuditAction::AppAccessed,
@@ -583,13 +594,13 @@ async fn log_app_access(
             Some(app_name.clone()),
             Some(auth.user_id()),
             Some(auth.user().username.clone()),
-            Some(serde_json::json!({ "app": app_name })),
+            Some(serde_json::json!({ "phase": "requested_access" })),
             None,
             None,
             true,
             None,
         )
-        .await;
+        .await?;
 
     Ok(Json(serde_json::json!({
         "success": true,

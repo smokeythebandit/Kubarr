@@ -4,11 +4,14 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, ModelTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, ModelTrait, QueryFilter, Set, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, Result};
 use crate::middleware::permissions::{Authorized, RolesManage, RolesView};
+use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::models::prelude::*;
 use crate::models::{role, role_app_permission, role_permission};
 use crate::state::AppState;
@@ -83,6 +86,30 @@ pub struct PermissionInfo {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+async fn audit_role_action(
+    txn: &sea_orm::DatabaseTransaction,
+    actor: &crate::models::user::Model,
+    action: AuditAction,
+    role_id: i64,
+    details: Option<serde_json::Value>,
+) -> Result<()> {
+    crate::services::audit::log_on_transaction(
+        txn,
+        action,
+        ResourceType::Role,
+        Some(role_id.to_string()),
+        Some(actor.id),
+        Some(actor.username.clone()),
+        details,
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    Ok(())
+}
 
 async fn get_role_with_apps(state: &AppState, role_id: i64) -> Result<RoleWithAppsResponse> {
     let db = state.get_db().await?;
@@ -175,7 +202,7 @@ async fn get_role(
 )]
 async fn create_role(
     State(state): State<AppState>,
-    _auth: Authorized<RolesManage>,
+    auth: Authorized<RolesManage>,
     Json(data): Json<CreateRoleRequest>,
 ) -> Result<Json<RoleWithAppsResponse>> {
     let db = state.get_db().await?;
@@ -201,7 +228,8 @@ async fn create_role(
         ..Default::default()
     };
 
-    let created_role = new_role.insert(&db).await?;
+    let txn = db.begin().await?;
+    let created_role = new_role.insert(&txn).await?;
 
     // Add app permissions
     for app_name in &data.app_names {
@@ -210,9 +238,17 @@ async fn create_role(
             app_name: Set(app_name.clone()),
             ..Default::default()
         };
-        permission.insert(&db).await?;
+        permission.insert(&txn).await?;
     }
-
+    audit_role_action(
+        &txn,
+        auth.user(),
+        AuditAction::RoleCreated,
+        created_role.id,
+        Some(serde_json::json!({"name": created_role.name})),
+    )
+    .await?;
+    txn.commit().await?;
     let response = get_role_with_apps(&state, created_role.id).await?;
     Ok(Json(response))
 }
@@ -229,7 +265,7 @@ async fn create_role(
 async fn update_role(
     State(state): State<AppState>,
     Path(role_id): Path<i64>,
-    _auth: Authorized<RolesManage>,
+    auth: Authorized<RolesManage>,
     Json(data): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleWithAppsResponse>> {
     let db = state.get_db().await?;
@@ -275,8 +311,17 @@ async fn update_role(
         role_model.requires_2fa = Set(requires_2fa);
     }
 
-    role_model.update(&db).await?;
-
+    let txn = db.begin().await?;
+    let updated = role_model.update(&txn).await?;
+    audit_role_action(
+        &txn,
+        auth.user(),
+        AuditAction::RoleUpdated,
+        role_id,
+        Some(serde_json::json!({"name": updated.name})),
+    )
+    .await?;
+    txn.commit().await?;
     let response = get_role_with_apps(&state, role_id).await?;
     Ok(Json(response))
 }
@@ -292,7 +337,7 @@ async fn update_role(
 async fn delete_role(
     State(state): State<AppState>,
     Path(role_id): Path<i64>,
-    _auth: Authorized<RolesManage>,
+    auth: Authorized<RolesManage>,
 ) -> Result<Json<serde_json::Value>> {
     let db = state.get_db().await?;
     let existing_role = Role::find_by_id(role_id)
@@ -306,7 +351,10 @@ async fn delete_role(
         ));
     }
 
-    existing_role.delete(&db).await?;
+    let txn = db.begin().await?;
+    existing_role.delete(&txn).await?;
+    audit_role_action(&txn, auth.user(), AuditAction::RoleDeleted, role_id, None).await?;
+    txn.commit().await?;
 
     Ok(Json(serde_json::json!({"message": "Role deleted"})))
 }
@@ -323,7 +371,7 @@ async fn delete_role(
 async fn set_role_apps(
     State(state): State<AppState>,
     Path(role_id): Path<i64>,
-    _auth: Authorized<RolesManage>,
+    auth: Authorized<RolesManage>,
     Json(data): Json<SetRoleApps>,
 ) -> Result<Json<RoleWithAppsResponse>> {
     let db = state.get_db().await?;
@@ -334,9 +382,10 @@ async fn set_role_apps(
         .ok_or_else(|| AppError::NotFound("Role not found".to_string()))?;
 
     // Delete existing permissions
+    let txn = db.begin().await?;
     RoleAppPermission::delete_many()
         .filter(role_app_permission::Column::RoleId.eq(role_id))
-        .exec(&db)
+        .exec(&txn)
         .await?;
 
     // Add new permissions
@@ -346,9 +395,17 @@ async fn set_role_apps(
             app_name: Set(app_name.clone()),
             ..Default::default()
         };
-        permission.insert(&db).await?;
+        permission.insert(&txn).await?;
     }
-
+    audit_role_action(
+        &txn,
+        auth.user(),
+        AuditAction::RoleUpdated,
+        role_id,
+        Some(serde_json::json!({"changed": "apps"})),
+    )
+    .await?;
+    txn.commit().await?;
     let response = get_role_with_apps(&state, role_id).await?;
     Ok(Json(response))
 }
@@ -528,7 +585,7 @@ async fn get_role_permissions(
 async fn set_role_permissions(
     State(state): State<AppState>,
     Path(role_id): Path<i64>,
-    _auth: Authorized<RolesManage>,
+    auth: Authorized<RolesManage>,
     Json(data): Json<SetRolePermissions>,
 ) -> Result<Json<RoleWithAppsResponse>> {
     let db = state.get_db().await?;
@@ -550,10 +607,12 @@ async fn set_role_permissions(
         }
     }
 
+    // Replace both kinds of permissions as a unit.
+    let txn = db.begin().await?;
     // Delete existing regular permissions
     RolePermission::delete_many()
         .filter(role_permission::Column::RoleId.eq(role_id))
-        .exec(&db)
+        .exec(&txn)
         .await?;
 
     // Add new regular permissions
@@ -563,13 +622,13 @@ async fn set_role_permissions(
             permission: Set(permission.clone()),
             ..Default::default()
         };
-        perm.insert(&db).await?;
+        perm.insert(&txn).await?;
     }
 
     // Delete existing app permissions
     RoleAppPermission::delete_many()
         .filter(role_app_permission::Column::RoleId.eq(role_id))
-        .exec(&db)
+        .exec(&txn)
         .await?;
 
     // Add new app permissions
@@ -579,9 +638,17 @@ async fn set_role_permissions(
             app_name: Set(app_name.clone()),
             ..Default::default()
         };
-        app_perm.insert(&db).await?;
+        app_perm.insert(&txn).await?;
     }
-
+    audit_role_action(
+        &txn,
+        auth.user(),
+        AuditAction::RoleUpdated,
+        role_id,
+        Some(serde_json::json!({"changed": "permissions"})),
+    )
+    .await?;
+    txn.commit().await?;
     let response = get_role_with_apps(&state, role_id).await?;
     Ok(Json(response))
 }

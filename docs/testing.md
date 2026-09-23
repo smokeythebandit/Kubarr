@@ -120,6 +120,38 @@ failures rather than recording a successful sync. Registry images and third-part
 application images still need to be downloaded before execution; the suite is not
 fully offline. Default Kind networking does not prove NetworkPolicy enforcement.
 
+## Audit regression coverage
+
+Audit contract tests are in `code/api/tests/{auth_audit_tests,admin_audit_tests,
+vpn_audit_tests,app_audit_tests,audit_contract_tests}.rs`; the frontend audit UI
+tests are in `code/frontend/src/components/settings/tabs/AuditTab.test.tsx` and
+`code/frontend/src/api/__tests__/security.test.ts`. They cover emitted successful
+and failed logins, logout and session revocation; user, role, invite and settings
+mutations; VPN provider and assignment changes; app-operation requests and worker
+terminal outcomes written through the transactional audit outbox. Audit reads
+require `audit.view`; manual clearing requires `audit.manage` and records the
+attributed clear in the same transaction. Detail fields use a sensitive-key
+allowlist/redaction policy and bounded values; this is not a guarantee against
+secrets embedded in arbitrary free-form text.
+
+The UI is in **Security** and displays canonical snake_case action names. Audit
+event totals are event counts, not 2FA enrollment/adoption statistics; only 2FA
+enable/disable mutations are audited here, not OAuth sign-in, 2FA verification,
+or invite use. Recorded peer IP is the API's immediate connection peer (often the
+gateway), not necessarily the browser address. App-access events represent a
+requested access, not proof the app rendered; the backend cannot verify rendered
+content. If a worker disappears during an operation, recovery marks it
+indeterminate after 15 minutes and does not rerun it. These logs therefore do
+not claim complete coverage or prove every action's external effect.
+
+Retention runs every 24 hours (no immediate first cleanup), defaults to 90 days,
+and accepts `KUBARR_AUDIT_RETENTION_DAYS` from 1 through 3650; invalid values fall
+back to 90 days. Automatic cleanup and its system event commit together. Manual
+clear is likewise audited transactionally.
+
+Do not test or deploy against the running `kubarr-local` instance for this change:
+it uses an older image. Updated code requires a separate rebuild and redeploy.
+
 The release-only workflow remains separate because it needs images, a disposable
 Kind cluster, NFS kernel support, and published chart artifacts. See
 `.github/E2E.md` for its prerequisites and the outstanding chart publication/pin

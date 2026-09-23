@@ -22,7 +22,9 @@ use axum::{
     http::{header, Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, Statement};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, Statement,
+};
 use tower::util::ServiceExt;
 
 mod common;
@@ -30,7 +32,7 @@ use common::{build_test_app_state_with_db, create_test_db_with_seed, create_test
 
 use kubarr::endpoints::create_router;
 use kubarr::models::vpn_provider::VpnType;
-use kubarr::models::{app_operation, app_state, app_vpn_config};
+use kubarr::models::{app_operation, app_state, app_vpn_config, audit_log};
 use kubarr::services::catalog::{AppCatalog, AppConfig, ResourceRequirements};
 use kubarr::services::vpn::CreateVpnProviderRequest;
 
@@ -1052,6 +1054,9 @@ async fn test_vpn_assignment_and_removal_enqueue_atomic_updates_without_k8s() {
     assert_eq!(app_vpn_config::Entity::find().count(&db).await.unwrap(), 0);
     assert_eq!(app_operation::Entity::find().count(&db).await.unwrap(), 0);
 
+    let vpn_logs = || audit_log::Entity::find().filter(audit_log::Column::ResourceType.eq("vpn"));
+    assert_eq!(vpn_logs().count(&db).await.unwrap(), 0);
+
     let (status, body) = authenticated_put(
         create_router(state.clone()),
         "/api/vpn/apps/sonarr",
@@ -1071,6 +1076,17 @@ async fn test_vpn_assignment_and_removal_enqueue_atomic_updates_without_k8s() {
         .expect("queued assignment operation");
     assert_eq!(operation.operation, "update");
     assert_eq!(operation.status, "queued");
+    let logs = vpn_logs().all(&db).await.unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].action, "vpn_assigned");
+    assert_eq!(logs[0].username.as_deref(), Some("vpnlifecycleadmin"));
+    assert_eq!(logs[0].resource_id.as_deref(), Some("sonarr"));
+    let details: serde_json::Value =
+        serde_json::from_str(logs[0].details.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        details,
+        serde_json::json!({"app_name":"sonarr", "provider_id":provider.id, "operation_id":assign_operation_id, "phase":"queued"})
+    );
     let app_state = app_state::Entity::find_by_id("sonarr")
         .one(&db)
         .await
@@ -1094,6 +1110,16 @@ async fn test_vpn_assignment_and_removal_enqueue_atomic_updates_without_k8s() {
         .unwrap()
         .is_none());
     assert_eq!(app_operation::Entity::find().count(&db).await.unwrap(), 2);
+    let logs = vpn_logs().all(&db).await.unwrap();
+    assert_eq!(logs.len(), 2);
+    let removal = logs.iter().find(|log| log.action == "vpn_removed").unwrap();
+    assert_eq!(removal.resource_id.as_deref(), Some("sonarr"));
+    let details: serde_json::Value =
+        serde_json::from_str(removal.details.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        details,
+        serde_json::json!({"app_name":"sonarr", "provider_id":provider.id, "operation_id":remove_operation_id, "phase":"queued"})
+    );
 }
 
 #[tokio::test]
@@ -1131,6 +1157,14 @@ async fn test_unauthorized_vpn_assignment_does_not_mutate_database() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(app_vpn_config::Entity::find().count(&db).await.unwrap(), 0);
     assert_eq!(app_operation::Entity::find().count(&db).await.unwrap(), 0);
+    assert_eq!(
+        audit_log::Entity::find()
+            .filter(audit_log::Column::ResourceType.eq("vpn"))
+            .count(&db)
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -1186,6 +1220,14 @@ async fn test_vpn_assignment_rolls_back_when_enqueue_fails() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(app_vpn_config::Entity::find().count(&db).await.unwrap(), 0);
     assert_eq!(app_operation::Entity::find().count(&db).await.unwrap(), 0);
+    assert_eq!(
+        audit_log::Entity::find()
+            .filter(audit_log::Column::ResourceType.eq("vpn"))
+            .count(&db)
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 // ============================================================================

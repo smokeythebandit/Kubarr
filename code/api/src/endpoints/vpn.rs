@@ -5,12 +5,15 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use sea_orm::TransactionTrait;
+use sea_orm::{EntityTrait, TransactionTrait};
 use serde::Serialize;
 
 use crate::error::{AppError, Result};
 use crate::middleware::permissions::{Authorized, VpnManage, VpnView};
+use crate::models::app_vpn_config;
+use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::services::app_manager::AppManager;
+use crate::services::audit::log_on_transaction;
 use crate::services::vpn::{
     self, AppVpnConfigResponse, AssignVpnRequest, CreateVpnProviderRequest, SupportedProvider,
     UpdateVpnProviderRequest, VpnProviderResponse, VpnTestResult,
@@ -122,11 +125,27 @@ async fn get_provider(
 )]
 async fn create_provider(
     State(state): State<AppState>,
-    _auth: Authorized<VpnManage>,
+    auth: Authorized<VpnManage>,
     Json(req): Json<CreateVpnProviderRequest>,
 ) -> Result<Json<VpnProviderResponse>> {
     let db = state.get_db().await?;
-    let provider = vpn::create_vpn_provider(&db, req).await?;
+    let transaction = db.begin().await?;
+    let provider = vpn::create_vpn_provider(&transaction, req).await?;
+    log_on_transaction(
+        &transaction,
+        AuditAction::VpnProviderCreated,
+        ResourceType::Vpn,
+        Some(provider.id.to_string()),
+        Some(auth.user_id()),
+        Some(auth.user().username.clone()),
+        Some(serde_json::json!({"provider_id": provider.id, "enabled": provider.enabled})),
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    transaction.commit().await?;
     Ok(Json(provider))
 }
 
@@ -146,11 +165,47 @@ async fn create_provider(
 async fn update_provider(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    _auth: Authorized<VpnManage>,
+    auth: Authorized<VpnManage>,
     Json(req): Json<UpdateVpnProviderRequest>,
 ) -> Result<Json<VpnProviderResponse>> {
+    // Only static field names, never values (credentials, servers or subnets).
+    let mut fields = Vec::new();
+    if req.name.is_some() {
+        fields.push("name");
+    }
+    if req.service_provider.is_some() {
+        fields.push("service_provider");
+    }
+    if req.credentials.is_some() {
+        fields.push("credentials");
+    }
+    if req.enabled.is_some() {
+        fields.push("enabled");
+    }
+    if req.kill_switch.is_some() {
+        fields.push("kill_switch");
+    }
+    if req.firewall_outbound_subnets.is_some() {
+        fields.push("firewall_outbound_subnets");
+    }
     let db = state.get_db().await?;
-    let provider = vpn::update_vpn_provider(&db, id, req).await?;
+    let transaction = db.begin().await?;
+    let provider = vpn::update_vpn_provider(&transaction, id, req).await?;
+    log_on_transaction(
+        &transaction,
+        AuditAction::VpnProviderUpdated,
+        ResourceType::Vpn,
+        Some(id.to_string()),
+        Some(auth.user_id()),
+        Some(auth.user().username.clone()),
+        Some(serde_json::json!({"provider_id": id, "enabled": provider.enabled, "fields": fields})),
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    transaction.commit().await?;
     Ok(Json(provider))
 }
 
@@ -169,10 +224,26 @@ async fn update_provider(
 async fn delete_provider(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    _auth: Authorized<VpnManage>,
+    auth: Authorized<VpnManage>,
 ) -> Result<Json<serde_json::Value>> {
     let db = state.get_db().await?;
-    vpn::delete_vpn_provider(&db, id).await?;
+    let transaction = db.begin().await?;
+    vpn::delete_vpn_provider_in_transaction(&transaction, id).await?;
+    log_on_transaction(
+        &transaction,
+        AuditAction::VpnProviderDeleted,
+        ResourceType::Vpn,
+        Some(id.to_string()),
+        Some(auth.user_id()),
+        Some(auth.user().username.clone()),
+        Some(serde_json::json!({"provider_id": id})),
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    transaction.commit().await?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -286,6 +357,12 @@ async fn assign_vpn(
     let operation = manager
         .enqueue_update_in_transaction(&transaction, &app_name, Some(auth.user_id()))
         .await?;
+    log_on_transaction(
+        &transaction, AuditAction::VpnAssigned, ResourceType::Vpn, Some(app_name.clone()),
+        Some(auth.user_id()), Some(auth.user().username.clone()),
+        Some(serde_json::json!({"app_name": app_name, "provider_id": config.vpn_provider_id, "operation_id": operation.id, "phase": "queued"})),
+        None, None, true, None,
+    ).await?;
     transaction.commit().await?;
     config.operation_id = Some(operation.id);
 
@@ -324,11 +401,20 @@ async fn remove_vpn(
     }
 
     let transaction = db.begin().await?;
+    let previous = app_vpn_config::Entity::find_by_id(app_name.as_str())
+        .one(&transaction)
+        .await?;
     vpn::remove_vpn_from_app(&transaction, &app_name).await?;
     let manager = AppManager::new(db, state.k8s_client.clone(), state.catalog.clone());
     let operation = manager
         .enqueue_update_in_transaction(&transaction, &app_name, Some(auth.user_id()))
         .await?;
+    log_on_transaction(
+        &transaction, AuditAction::VpnRemoved, ResourceType::Vpn, Some(app_name.clone()),
+        Some(auth.user_id()), Some(auth.user().username.clone()),
+        Some(serde_json::json!({"app_name": app_name, "provider_id": previous.map(|c| c.vpn_provider_id), "operation_id": operation.id, "phase": "queued"})),
+        None, None, true, None,
+    ).await?;
     transaction.commit().await?;
 
     Ok(Json(RemoveVpnResponse {

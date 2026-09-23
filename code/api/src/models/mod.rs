@@ -3,6 +3,7 @@ pub mod app_operation;
 pub mod app_state;
 pub mod app_vpn_config;
 pub mod audit_log;
+pub mod audit_outbox;
 pub mod domain;
 pub mod dynamic_dns_profile;
 pub mod invite;
@@ -34,6 +35,7 @@ pub mod prelude {
     pub use super::app_state::{self, Entity as AppState};
     pub use super::app_vpn_config::{self, Entity as AppVpnConfig};
     pub use super::audit_log::{self, Entity as AuditLog};
+    pub use super::audit_outbox::{self, Entity as AuditOutbox};
     pub use super::domain::{self, Entity as Domain};
     pub use super::dynamic_dns_profile::{self, Entity as DynamicDnsProfile};
     pub use super::invite::{self, Entity as Invite};

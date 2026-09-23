@@ -7,16 +7,19 @@ use chrono::Utc;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, DeleteParams};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
-use crate::models::{app_operation, app_state};
+use crate::models::audit_log::{AuditAction, ResourceType};
+use crate::models::{app_operation, app_state, audit_outbox, user};
+use crate::services::audit::log_on_transaction;
 use crate::services::catalog::AppCatalog;
 use crate::services::deployment::{DeploymentManager, DeploymentRequest};
 use crate::services::k8s::K8sClient;
@@ -32,6 +35,9 @@ pub const STATUS_QUEUED: &str = "queued";
 pub const STATUS_RUNNING: &str = "running";
 pub const STATUS_SUCCEEDED: &str = "succeeded";
 pub const STATUS_FAILED: &str = "failed";
+const INTERRUPTED_LABEL: &str = "outcome_indeterminate_after_worker_interruption";
+const STALE_RUNNING_AFTER: chrono::Duration = chrono::Duration::minutes(15);
+const RUNNING_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 pub const DESIRED_INSTALLED: &str = "installed";
 pub const DESIRED_REMOVED: &str = "removed";
@@ -46,6 +52,7 @@ pub const OBS_FAILED: &str = "failed";
 pub struct AppWorkerTasks {
     operation: JoinHandle<()>,
     reconciliation: JoinHandle<()>,
+    audit_delivery: JoinHandle<()>,
 }
 
 impl AppWorkerTasks {
@@ -53,6 +60,7 @@ impl AppWorkerTasks {
         for (name, task) in [
             ("operation", self.operation),
             ("reconciliation", self.reconciliation),
+            ("audit delivery", self.audit_delivery),
         ] {
             if let Err(error) = task.await {
                 tracing::error!(task = name, %error, "App worker task stopped unexpectedly");
@@ -151,9 +159,12 @@ impl AppManager {
             updated_at: Set(now),
         };
 
-        let inserted = operation_model.insert(&self.db).await?;
-        self.mark_state_for_operation(app_name, operation, &inserted.id)
+        let transaction = self.db.begin().await?;
+        let inserted = operation_model.insert(&transaction).await?;
+        self.mark_state_for_operation(&transaction, app_name, operation, &inserted.id)
             .await?;
+        log_queued(&transaction, &inserted).await?;
+        transaction.commit().await?;
         Ok(inserted.into())
     }
 
@@ -235,6 +246,7 @@ impl AppManager {
             .await?;
         }
 
+        log_queued(transaction, &operation).await?;
         Ok(operation.into())
     }
 
@@ -348,6 +360,7 @@ impl AppManager {
         });
 
         let reconcile_worker = self.clone();
+        let audit_cancellation = cancellation.clone();
         let reconciliation = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(reconcile_interval);
             loop {
@@ -366,9 +379,27 @@ impl AppManager {
             }
         });
 
+        let audit_worker = self.clone();
+        let audit_delivery = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = audit_cancellation.cancelled() => break,
+                    _ = ticker.tick() => {
+                        if audit_cancellation.is_cancelled() { break; }
+                        if let Err(error) = audit_worker.drain_audit_outbox().await {
+                            tracing::error!(%error, "App terminal audit delivery failed; will retry");
+                        }
+                    }
+                }
+            }
+        });
+
         AppWorkerTasks {
             operation,
             reconciliation,
+            audit_delivery,
         }
     }
 
@@ -405,6 +436,12 @@ impl AppManager {
                     if cancellation.is_cancelled() {
                         break;
                     }
+                    // This loop is sequential: it never classifies its own in-flight Helm
+                    // execution as abandoned. Recreate deployment keeps predecessor workers gone.
+                    if let Err(e) = self.recover_stale_operations().await {
+                        tracing::error!(error = %e, "Failed to recover interrupted app operations");
+                        continue;
+                    }
                     // Once claimed, an operation is deliberately allowed to finish during shutdown.
                     if let Err(e) = self.process_next_operation_with(&execute).await {
                         tracing::error!(error = %e, "App worker operation loop failed");
@@ -415,6 +452,19 @@ impl AppManager {
     }
 
     async fn process_next_operation_with<F, Fut>(&self, execute: F) -> Result<()>
+    where
+        F: FnOnce(app_operation::Model) -> Fut,
+        Fut: Future<Output = Result<String>>,
+    {
+        self.process_next_operation_with_heartbeat(execute, RUNNING_HEARTBEAT_INTERVAL)
+            .await
+    }
+
+    async fn process_next_operation_with_heartbeat<F, Fut>(
+        &self,
+        execute: F,
+        heartbeat_interval: Duration,
+    ) -> Result<()>
     where
         F: FnOnce(app_operation::Model) -> Fut,
         Fut: Future<Output = Result<String>>,
@@ -431,38 +481,54 @@ impl AppManager {
             "App operation claimed"
         );
 
-        let result: Result<String> = async {
-            let message = execute(operation.clone()).await?;
-            if operation.operation != OP_RESTART {
-                self.upsert_state(
-                    &operation.app_name,
-                    &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
-                        .namespace,
-                    desired_state_for_operation(&operation.operation),
-                    if operation.operation == OP_DELETE {
-                        OBS_NOT_INSTALLED
-                    } else {
-                        OBS_INSTALLING
-                    },
-                    false,
-                    Some(if operation.operation == OP_DELETE {
-                        "Removed".to_string()
-                    } else {
-                        message.clone()
-                    }),
-                    Some(operation.id.clone()),
-                    false,
-                )
-                .await?;
-            }
-            Ok(message)
+        // JoinSet aborts the heartbeat if this future is dropped (e.g. a panic).
+        // Normal shutdown lets an already-claimed external operation finish.
+        let heartbeat_stop = CancellationToken::new();
+        let mut heartbeat = JoinSet::new();
+        heartbeat.spawn(heartbeat_running_operation(
+            self.db.clone(),
+            operation.id.clone(),
+            heartbeat_interval,
+            heartbeat_stop.clone(),
+        ));
+        let result = execute(operation.clone()).await;
+        heartbeat_stop.cancel();
+        if let Some(Err(error)) = heartbeat.join_next().await {
+            tracing::error!(operation_id = %operation.id, %error, "App operation heartbeat task stopped unexpectedly");
         }
-        .await;
         match result {
             Ok(message) => {
+                if operation.operation != OP_RESTART {
+                    if let Err(error) = self
+                        .upsert_state(
+                            &operation.app_name,
+                            &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
+                                .namespace,
+                            desired_state_for_operation(&operation.operation),
+                            if operation.operation == OP_DELETE {
+                                OBS_NOT_INSTALLED
+                            } else {
+                                OBS_INSTALLING
+                            },
+                            false,
+                            Some(if operation.operation == OP_DELETE {
+                                "Removed".to_string()
+                            } else {
+                                message.clone()
+                            }),
+                            Some(operation.id.clone()),
+                            false,
+                        )
+                        .await
+                    {
+                        tracing::error!(operation_id = %operation.id, %error, "App state update failed after external success");
+                    }
+                }
                 self.finish_operation(&operation.id, STATUS_SUCCEEDED, Some(message), None)
                     .await?;
-                self.reconcile_app(&operation.app_name).await?;
+                if let Err(error) = self.reconcile_app(&operation.app_name).await {
+                    tracing::error!(operation_id = %operation.id, %error, "App reconcile failed after terminal commit");
+                }
                 tracing::info!(
                     operation_id = %operation.id,
                     app = %operation.app_name,
@@ -479,18 +545,22 @@ impl AppManager {
                     Some(error.clone()),
                 )
                 .await?;
-                self.upsert_state(
-                    &operation.app_name,
-                    &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
-                        .namespace,
-                    desired_state_for_operation(&operation.operation),
-                    OBS_FAILED,
-                    false,
-                    Some(error),
-                    Some(operation.id.clone()),
-                    false,
-                )
-                .await?;
+                if let Err(state_error) = self
+                    .upsert_state(
+                        &operation.app_name,
+                        &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
+                            .namespace,
+                        desired_state_for_operation(&operation.operation),
+                        OBS_FAILED,
+                        false,
+                        Some(error),
+                        Some(operation.id.clone()),
+                        false,
+                    )
+                    .await
+                {
+                    tracing::error!(operation_id = %operation.id, %state_error, "App failure state update failed after terminal commit");
+                }
                 tracing::warn!(
                     operation_id = %operation.id,
                     app = %operation.app_name,
@@ -498,6 +568,10 @@ impl AppManager {
                     "App operation failed"
                 );
             }
+        }
+
+        if let Err(error) = self.deliver_audit(&operation.id).await {
+            tracing::error!(operation_id = %operation.id, %error, "Terminal app audit pending retry");
         }
 
         Ok(())
@@ -638,23 +712,204 @@ impl AppManager {
         message: Option<String>,
         error: Option<String>,
     ) -> Result<()> {
+        let transaction = self.db.begin().await?;
         let operation = app_operation::Entity::find_by_id(id.to_string())
-            .one(&self.db)
+            .one(&transaction)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Operation '{}' not found", id)))?;
         let now = Utc::now();
-        let mut active: app_operation::ActiveModel = operation.into();
+        let mut active: app_operation::ActiveModel = operation.clone().into();
         active.status = Set(status.to_string());
         active.message = Set(message);
         active.error = Set(error);
         active.finished_at = Set(Some(now));
         active.updated_at = Set(now);
-        active.update(&self.db).await?;
+        let changed = app_operation::Entity::update_many()
+            .set(active)
+            .filter(app_operation::Column::Id.eq(id))
+            .filter(app_operation::Column::Status.eq(STATUS_RUNNING))
+            .exec(&transaction)
+            .await?;
+        if changed.rows_affected != 1 {
+            return Err(AppError::Internal(format!(
+                "Operation '{}' no longer running",
+                id
+            )));
+        }
+        self.queue_terminal_audit(
+            &transaction,
+            &operation,
+            status == STATUS_SUCCEEDED,
+            "completed",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn queue_terminal_audit(
+        &self,
+        transaction: &DatabaseTransaction,
+        operation: &app_operation::Model,
+        success: bool,
+        phase: &str,
+    ) -> Result<()> {
+        let action = match operation.operation.as_str() {
+            OP_INSTALL => AuditAction::AppInstalled,
+            OP_DELETE => AuditAction::AppUninstalled,
+            OP_RESTART => AuditAction::AppRestarted,
+            _ => AuditAction::AppConfigured,
+        };
+        let (_, username) = actor(transaction, operation.created_by).await?;
+        audit_outbox::ActiveModel {
+            operation_id: Set(operation.id.clone()),
+            action: Set(action.to_string()),
+            resource_type: Set(ResourceType::App.to_string()),
+            resource_id: Set(operation.app_name.clone()),
+            created_by: Set(operation.created_by),
+            username: Set(username),
+            details: Set(serde_json::json!({
+                "operation_id": operation.id, "attempts": operation.attempts, "phase": phase
+            })
+            .to_string()),
+            success: Set(success),
+            outcome: Set(if phase == "completed" {
+                if success {
+                    STATUS_SUCCEEDED
+                } else {
+                    STATUS_FAILED
+                }
+            } else {
+                "indeterminate"
+            }
+            .into()),
+            error_label: Set(if success {
+                None
+            } else {
+                Some(
+                    if phase == "completed" {
+                        "app_operation_failed"
+                    } else {
+                        INTERRUPTED_LABEL
+                    }
+                    .into(),
+                )
+            }),
+            created_at: Set(Utc::now()),
+            processed_at: Set(None),
+        }
+        .insert(transaction)
+        .await?;
+        Ok(())
+    }
+
+    /// Recover only work whose worker has not updated its running row for a long time.
+    /// The external outcome cannot be inferred after a crash; never replay the operation.
+    pub async fn recover_stale_operations(&self) -> Result<()> {
+        let cutoff = Utc::now() - STALE_RUNNING_AFTER;
+        let candidates = app_operation::Entity::find()
+            .filter(app_operation::Column::Status.eq(STATUS_RUNNING))
+            .filter(app_operation::Column::UpdatedAt.lt(cutoff))
+            .all(&self.db)
+            .await?;
+        for operation in candidates {
+            let transaction = self.db.begin().await?;
+            let now = Utc::now();
+            let mut active: app_operation::ActiveModel = operation.clone().into();
+            active.status = Set(STATUS_FAILED.into());
+            active.message = Set(Some(
+                "Outcome indeterminate after worker interruption".into(),
+            ));
+            active.error = Set(Some(INTERRUPTED_LABEL.into()));
+            active.finished_at = Set(Some(now));
+            active.updated_at = Set(now);
+            let changed = app_operation::Entity::update_many()
+                .set(active)
+                .filter(app_operation::Column::Id.eq(&operation.id))
+                .filter(app_operation::Column::Status.eq(STATUS_RUNNING))
+                .filter(app_operation::Column::UpdatedAt.lt(cutoff))
+                .exec(&transaction)
+                .await?;
+            if changed.rows_affected == 0 {
+                continue;
+            }
+            self.queue_terminal_audit(&transaction, &operation, false, "indeterminate")
+                .await?;
+            transaction.commit().await?;
+            tracing::error!(operation_id = %operation.id, "Recovered interrupted app operation with unknown external outcome");
+        }
+        Ok(())
+    }
+
+    /// Both insert and acknowledgement are one transaction. The conditional update
+    /// is the delivery claim: a competing dispatcher rolls its audit insert back.
+    async fn deliver_audit(&self, id: &str) -> Result<()> {
+        let transaction = self.db.begin().await?;
+        let Some(event) = audit_outbox::Entity::find_by_id(id)
+            .one(&transaction)
+            .await?
+        else {
+            return Ok(());
+        };
+        if event.processed_at.is_some() {
+            return Ok(());
+        }
+        let claimed = audit_outbox::Entity::update_many()
+            .col_expr(audit_outbox::Column::ProcessedAt, Utc::now().into())
+            .filter(audit_outbox::Column::OperationId.eq(id))
+            .filter(audit_outbox::Column::ProcessedAt.is_null())
+            .exec(&transaction)
+            .await?;
+        if claimed.rows_affected != 1 {
+            return Ok(());
+        }
+        let action = match event.action.as_str() {
+            "app_installed" => AuditAction::AppInstalled,
+            "app_uninstalled" => AuditAction::AppUninstalled,
+            "app_restarted" => AuditAction::AppRestarted,
+            "app_configured" => AuditAction::AppConfigured,
+            _ => return Err(AppError::Internal("Invalid app audit outbox action".into())),
+        };
+        log_on_transaction(
+            &transaction,
+            action,
+            ResourceType::App,
+            Some(event.resource_id),
+            event.created_by,
+            event.username,
+            Some(serde_json::from_str(&event.details).map_err(|e| {
+                AppError::Internal(format!("Invalid app audit outbox details: {e}"))
+            })?),
+            None,
+            None,
+            event.success,
+            event.error_label,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn drain_audit_outbox(&self) -> Result<()> {
+        let pending = audit_outbox::Entity::find()
+            .filter(audit_outbox::Column::ProcessedAt.is_null())
+            .order_by_asc(audit_outbox::Column::CreatedAt)
+            .limit(100)
+            .all(&self.db)
+            .await?;
+        for event in pending {
+            // Retry on the next tick if the audit sink is unavailable.
+            if let Err(error) = self.deliver_audit(&event.operation_id).await {
+                tracing::error!(operation_id = %event.operation_id, %error, "App audit event still pending");
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
     async fn mark_state_for_operation(
         &self,
+        transaction: &DatabaseTransaction,
         app_name: &str,
         operation: &str,
         id: &str,
@@ -666,17 +921,42 @@ impl AppManager {
             _ => OBS_INSTALLING,
         };
 
-        self.upsert_state(
-            app_name,
-            &crate::services::catalog::lifecycle_for_app_name(app_name).namespace,
-            desired_state_for_operation(operation),
-            observed,
-            false,
-            Some(format!("Queued {}", operation)),
-            Some(id.to_string()),
-            true,
-        )
-        .await
+        let now = Utc::now();
+        let namespace = crate::services::catalog::lifecycle_for_app_name(app_name).namespace;
+        if let Some(existing) = app_state::Entity::find_by_id(app_name)
+            .one(transaction)
+            .await?
+        {
+            let mut active: app_state::ActiveModel = existing.into();
+            active.namespace = Set(namespace);
+            active.desired_state = Set(desired_state_for_operation(operation).into());
+            active.observed_state = Set(observed.into());
+            active.healthy = Set(false);
+            active.message = Set(Some(format!("Queued {}", operation)));
+            active.last_operation_id = Set(Some(id.into()));
+            active.last_checked_at = Set(Some(now));
+            active.updated_at = Set(now);
+            active.update(transaction).await?;
+        } else {
+            let version = self.catalog.read().await.chart_version(app_name);
+            app_state::ActiveModel {
+                app_name: Set(app_name.into()),
+                namespace: Set(namespace),
+                desired_state: Set(desired_state_for_operation(operation).into()),
+                observed_state: Set(observed.into()),
+                healthy: Set(false),
+                message: Set(Some(format!("Queued {}", operation))),
+                installed_chart_version: Set(None),
+                available_chart_version: Set(version),
+                update_available: Set(false),
+                last_operation_id: Set(Some(id.into())),
+                last_checked_at: Set(Some(now)),
+                updated_at: Set(now),
+            }
+            .insert(transaction)
+            .await?;
+        }
+        Ok(())
     }
 
     async fn reconcile_states(&self) -> Result<()> {
@@ -885,9 +1165,75 @@ impl AppManager {
     }
 }
 
+/// Only refresh the liveness clock: never replace terminal status, message,
+/// attempts or the terminal timestamp with a stale snapshot of the row.
+async fn heartbeat_running_operation(
+    db: DatabaseConnection,
+    id: String,
+    interval: Duration,
+    cancellation: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await; // The claim has just set updated_at; wait one full interval.
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => break,
+            _ = ticker.tick() => {
+                match app_operation::Entity::update_many()
+                    .col_expr(app_operation::Column::UpdatedAt, sea_orm::sea_query::Expr::value(Utc::now()))
+                    .filter(app_operation::Column::Id.eq(&id))
+                    .filter(app_operation::Column::Status.eq(STATUS_RUNNING))
+                    .exec(&db).await {
+                        Ok(result) if result.rows_affected == 0 => break,
+                        Ok(_) => {},
+                        Err(error) => tracing::error!(operation_id = %id, %error, "App operation heartbeat failed"),
+                    }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "app_manager_tests.rs"]
 mod tests;
+
+async fn actor<C: ConnectionTrait>(
+    db: &C,
+    id: Option<i64>,
+) -> Result<(Option<i64>, Option<String>)> {
+    let username = if let Some(id) = id {
+        user::Entity::find_by_id(id)
+            .one(db)
+            .await?
+            .map(|user| user.username)
+    } else {
+        None
+    };
+    Ok((id, username))
+}
+
+async fn log_queued<C: ConnectionTrait>(db: &C, operation: &app_operation::Model) -> Result<()> {
+    let (user_id, username) = actor(db, operation.created_by).await?;
+    log_on_transaction(
+        db,
+        AuditAction::AppConfigured,
+        ResourceType::App,
+        Some(operation.app_name.clone()),
+        user_id,
+        username,
+        Some(serde_json::json!({
+            "operation_id": operation.id, "operation": operation.operation, "phase": "queued"
+        })),
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    Ok(())
+}
 
 fn validate_operation(operation: &str) -> Result<()> {
     match operation {

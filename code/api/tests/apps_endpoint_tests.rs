@@ -490,7 +490,25 @@ async fn test_get_status_returns_error_state_without_k8s() {
 
 #[tokio::test]
 async fn test_log_app_access_returns_success() {
-    let (app, cookie) = make_admin("admin_access", "admin_access@test.com").await;
+    ensure_jwt_keys().await;
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "admin_access",
+        "admin_access@test.com",
+        "pass123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+    *state.catalog.write().await = AppCatalog::with_apps(HashMap::from([(
+        "sonarr".into(),
+        make_app_config("sonarr", "media", false, false),
+    )]));
+    let app = create_router(state);
+    let cookie = do_login(app.clone(), "admin_access", "pass123")
+        .await
+        .unwrap();
     let (status, body) =
         make_request(app, "POST", "/api/apps/sonarr/access", Some(&cookie), None).await;
     assert_eq!(status, StatusCode::OK, "log_access must succeed: {}", body);
