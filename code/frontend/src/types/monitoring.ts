@@ -1,3 +1,10 @@
+export interface ContainerStatus {
+  name: string;
+  ready: boolean;
+  restart_count: number;
+  state: string;
+}
+
 export interface PodStatus {
   name: string;
   app: string;
@@ -8,6 +15,8 @@ export interface PodStatus {
   age: string;
   node: string | null;
   ip: string | null;
+  // Optional while older monitoring backends still omit container details.
+  containers?: ContainerStatus[];
 }
 
 export interface PodMetrics {

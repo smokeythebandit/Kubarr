@@ -170,10 +170,7 @@ fn test_create_vpn_provider_request_defaults() {
     let req: CreateVpnProviderRequest = serde_json::from_str(json).unwrap();
     assert_eq!(req.enabled, true); // Default
     assert_eq!(req.kill_switch, true); // Default
-    assert_eq!(
-        req.firewall_outbound_subnets,
-        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-    ); // Default
+    assert_eq!(req.firewall_outbound_subnets, ""); // No outbound bypass by default
 }
 
 #[test]

@@ -492,8 +492,7 @@ async fn test_remove_vpn_viewer_without_vpn_manage_returns_403() {
 }
 
 #[tokio::test]
-async fn test_remove_vpn_without_k8s_returns_500() {
-    // remove_vpn requires K8s to clean up secrets and redeploy
+async fn test_remove_vpn_without_k8s_queues_operation() {
     ensure_jwt_keys().await;
 
     let db = create_test_db_with_seed().await;
@@ -515,16 +514,24 @@ async fn test_remove_vpn_without_k8s_returns_500() {
     .await;
     let cookie = cookie.expect("Login must set a session cookie");
 
-    let (status, _) =
+    let (status, body) =
         authenticated_delete(create_router(state), "/api/vpn/apps/qbittorrent", &cookie).await;
 
-    // Without K8s the handler returns 500
     assert_ne!(status, StatusCode::UNAUTHORIZED, "Must not be 401");
     assert_ne!(status, StatusCode::FORBIDDEN, "Must not be 403");
     assert_eq!(
         status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "DELETE /api/vpn/apps/{{app_name}} without K8s must return 500"
+        StatusCode::OK,
+        "DELETE /api/vpn/apps/{{app_name}} must queue successfully. Body: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json["operation_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "Queued operation must have a nonempty operation_id. Body: {}",
+        body
     );
 }
 
@@ -669,6 +676,59 @@ async fn test_get_forwarded_port_viewer_with_vpn_view_returns_500_without_k8s() 
     assert_ne!(status, StatusCode::UNAUTHORIZED);
     assert_ne!(status, StatusCode::FORBIDDEN);
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_public_ip_requires_vpn_view_and_is_registered() {
+    ensure_jwt_keys().await;
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "public_ip_viewer",
+        "public_ip_viewer@example.com",
+        "password123",
+        "viewer",
+    )
+    .await;
+    create_test_user_with_role(
+        &db,
+        "public_ip_admin",
+        "public_ip_admin@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+    let path = "/api/vpn/apps/qbittorrent/public-ip";
+    let response = create_router(state.clone())
+        .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let (_, viewer_cookie) = do_login(
+        create_router(state.clone()),
+        "public_ip_viewer",
+        "password123",
+    )
+    .await;
+    let (status, _) =
+        authenticated_get(create_router(state.clone()), path, &viewer_cookie.unwrap()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (_, admin_cookie) = do_login(
+        create_router(state.clone()),
+        "public_ip_admin",
+        "password123",
+    )
+    .await;
+    let (status, body) =
+        authenticated_get(create_router(state), path, &admin_cookie.unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "No Kubernetes client: {body}"
+    );
 }
 
 // ============================================================================

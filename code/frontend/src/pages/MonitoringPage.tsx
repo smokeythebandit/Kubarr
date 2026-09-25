@@ -591,6 +591,8 @@ function AppDetailModal({
     }))
   ).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()) || []
 
+  const pods = detailMetrics?.pods
+
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
       <div className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col border border-gray-200 dark:border-gray-700">
@@ -793,8 +795,8 @@ function AppDetailModal({
                   <p>No pods found</p>
                 </div>
               ) : (
-                <div className="bg-gray-100 dark:bg-gray-900 rounded-lg overflow-hidden">
-                  <table className="w-full">
+                <div className="bg-gray-100 dark:bg-gray-900 rounded-lg overflow-x-auto">
+                  <table aria-label="Pods" className="w-full min-w-[720px]">
                     <thead>
                       <tr className="border-b border-gray-200 dark:border-gray-700">
                         <th className="text-left px-4 py-3 text-sm font-medium text-gray-500 dark:text-gray-400">Pod</th>
@@ -807,11 +809,26 @@ function AppDetailModal({
                       </tr>
                     </thead>
                     <tbody>
-                      {detailMetrics?.pods?.map((pod) => (
+                      {pods?.map((pod) => (
                         <tr key={pod.name} className="border-b border-gray-200 dark:border-gray-800 hover:bg-gray-200 dark:hover:bg-gray-800/50">
                           <td className="px-4 py-3">
-                            <div className="font-mono text-sm text-gray-900 dark:text-white">{pod.name}</div>
+                            <div className="font-mono text-sm text-gray-900 dark:text-white break-all">{pod.name}</div>
                             <div className="text-xs text-gray-500">{pod.ip || 'No IP'}</div>
+                            {!!pod.containers?.length && (
+                              <ul aria-label={`Containers in pod ${pod.name}`} className="mt-2 space-y-1 border-l-2 border-gray-300 dark:border-gray-700 pl-3">
+                                {pod.containers.map(container => (
+                                  <li key={container.name} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-600 dark:text-gray-300">
+                                    <span className="font-mono break-all text-gray-900 dark:text-white">{container.name}</span>
+                                    <span className={container.ready ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
+                                      {container.ready ? 'Ready' : 'Not ready'}
+                                    </span>
+                                    <span className={container.restart_count > 0 ? 'text-yellow-600 dark:text-yellow-400' : ''}>
+                                      Restarts: {container.restart_count}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
                           </td>
                           <td className="px-4 py-3">
                             <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium ${
@@ -826,9 +843,9 @@ function AppDetailModal({
                           </td>
                           <td className="px-4 py-3">
                             {pod.ready ? (
-                              <CheckCircle size={18} className="text-green-400" />
+                              <CheckCircle size={18} className="text-green-400" aria-label="Pod ready" />
                             ) : (
-                              <XCircle size={18} className="text-red-400" />
+                              <XCircle size={18} className="text-red-400" aria-label="Pod not ready" />
                             )}
                           </td>
                           <td className="px-4 py-3 text-right">

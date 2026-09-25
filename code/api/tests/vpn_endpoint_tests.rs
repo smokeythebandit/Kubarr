@@ -403,6 +403,7 @@ async fn test_create_wireguard_provider_as_admin() {
         json["kill_switch"], true,
         "Created provider must default to kill_switch=true"
     );
+    assert_eq!(json["firewall_outbound_subnets"], "");
     assert_eq!(
         json["app_count"], 0,
         "New provider must have 0 associated apps"

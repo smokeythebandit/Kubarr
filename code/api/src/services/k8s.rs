@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use k8s_openapi::api::core::v1::{
-    NFSVolumeSource, Namespace, PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimSpec,
-    PersistentVolumeSpec, Pod, Secret, Service, VolumeResourceRequirements,
+    ContainerStatus as K8sContainerStatus, NFSVolumeSource, Namespace, PersistentVolume,
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeSpec, Pod, PodSpec,
+    PodStatus as K8sPodStatus, Secret, Service, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -84,66 +85,10 @@ impl K8sClient {
 
         let pod_list = pods.list(&lp).await?;
 
-        let mut statuses = Vec::new();
-        for pod in pod_list {
-            let metadata = pod.metadata;
-            let spec = pod.spec.unwrap_or_default();
-            let status = pod.status.unwrap_or_default();
-
-            let name = metadata.name.unwrap_or_default();
-            let labels = metadata.labels.unwrap_or_default();
-
-            // Calculate age
-            let age = if let Some(creation) = metadata.creation_timestamp {
-                let now = jiff::Timestamp::now();
-                let seconds = now.duration_since(creation.0).as_secs();
-                format_age(seconds)
-            } else {
-                "unknown".to_string()
-            };
-
-            // Get restart count
-            let restart_count = status
-                .container_statuses
-                .as_ref()
-                .map(|cs| cs.iter().map(|c| c.restart_count).sum())
-                .unwrap_or(0);
-
-            // Check if ready
-            let ready = status
-                .conditions
-                .as_ref()
-                .and_then(|conditions| {
-                    conditions
-                        .iter()
-                        .find(|c| c.type_ == "Ready")
-                        .map(|c| c.status == "True")
-                })
-                .unwrap_or(false);
-
-            // Get app label
-            let app_label = labels
-                .get("app.kubernetes.io/name")
-                .or_else(|| labels.get("app"))
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-
-            statuses.push(PodStatus {
-                name,
-                app: app_label,
-                namespace: namespace.to_string(),
-                status: status.phase.unwrap_or_else(|| "Unknown".to_string()),
-                ready,
-                restart_count,
-                age,
-                node: spec.node_name,
-                ip: status.pod_ip,
-                cpu_usage: None,
-                memory_usage: None,
-            });
-        }
-
-        Ok(statuses)
+        Ok(pod_list
+            .into_iter()
+            .map(|pod| pod_status_from_pod(pod, namespace))
+            .collect())
     }
 
     /// Get pod metrics for a namespace
@@ -468,7 +413,17 @@ impl K8sClient {
 // Helper Types
 // ============================================================================
 
-#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+/// Status of a regular workload container (not an init or ephemeral container).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct PodContainerStatus {
+    pub name: String,
+    pub ready: bool,
+    pub restart_count: i32,
+    /// Running, Waiting, Terminated, or Unknown when Kubernetes has not reported a state.
+    pub state: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct PodStatus {
     pub name: String,
     pub app: String,
@@ -477,6 +432,8 @@ pub struct PodStatus {
     pub ready: bool,
     #[serde(rename = "restarts")]
     pub restart_count: i32,
+    #[serde(default)]
+    pub containers: Vec<PodContainerStatus>,
     pub age: String,
     pub node: Option<String>,
     pub ip: Option<String>,
@@ -539,6 +496,102 @@ struct ContainerUsage {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+fn container_status(name: String, status: Option<&K8sContainerStatus>) -> PodContainerStatus {
+    let state = status.and_then(|s| s.state.as_ref());
+    PodContainerStatus {
+        name,
+        ready: status.is_some_and(|s| s.ready),
+        restart_count: status.map_or(0, |s| s.restart_count),
+        state: if state.is_some_and(|s| s.running.is_some()) {
+            "Running"
+        } else if state.is_some_and(|s| s.waiting.is_some()) {
+            "Waiting"
+        } else if state.is_some_and(|s| s.terminated.is_some()) {
+            "Terminated"
+        } else {
+            "Unknown"
+        }
+        .to_string(),
+    }
+}
+
+fn regular_container_statuses(spec: &PodSpec, status: &K8sPodStatus) -> Vec<PodContainerStatus> {
+    // Spec order is stable and lets us show containers even before kubelet reports status.
+    // Include only regular containers: init/ephemeral statuses have different lifecycle
+    // semantics and should not be confused with the app's running sidecars.
+    let mut reported: BTreeMap<&str, &K8sContainerStatus> = status
+        .container_statuses
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|s| (s.name.as_str(), s))
+        .collect();
+    let mut containers: Vec<_> = spec
+        .containers
+        .iter()
+        .map(|c| container_status(c.name.clone(), reported.remove(c.name.as_str())))
+        .collect();
+    // In case the spec is absent/stale, retain reported regular containers by name.
+    containers.extend(
+        reported
+            .into_iter()
+            .map(|(name, s)| container_status(name.to_string(), Some(s))),
+    );
+    containers
+}
+
+fn pod_status_from_pod(pod: Pod, namespace: &str) -> PodStatus {
+    let metadata = pod.metadata;
+    let spec = pod.spec.unwrap_or_default();
+    let status = pod.status.unwrap_or_default();
+    let labels = metadata.labels.unwrap_or_default();
+    let age = if let Some(creation) = metadata.creation_timestamp {
+        format_age(jiff::Timestamp::now().duration_since(creation.0).as_secs())
+    } else {
+        "unknown".to_string()
+    };
+    // Preserve existing pod-level semantics: only regular reported container restarts,
+    // and readiness from the pod's Ready condition (not a derived per-container value).
+    let restart_count = status
+        .container_statuses
+        .as_ref()
+        .map(|cs| cs.iter().map(|c| c.restart_count).sum())
+        .unwrap_or(0);
+    let ready = status
+        .conditions
+        .as_ref()
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|c| c.type_ == "Ready")
+                .map(|c| c.status == "True")
+        })
+        .unwrap_or(false);
+    let app = labels
+        .get("app.kubernetes.io/name")
+        .or_else(|| labels.get("app"))
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    PodStatus {
+        name: metadata.name.unwrap_or_default(),
+        app,
+        namespace: namespace.to_string(),
+        status: status
+            .phase
+            .clone()
+            .unwrap_or_else(|| "Unknown".to_string()),
+        ready,
+        restart_count,
+        containers: regular_container_statuses(&spec, &status),
+        age,
+        node: spec.node_name,
+        ip: status.pod_ip,
+        cpu_usage: None,
+        memory_usage: None,
+    }
+}
 
 fn format_age(total_seconds: i64) -> String {
     if total_seconds < 60 {
@@ -604,6 +657,136 @@ mod namespace_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::api::core::v1::{
+        Container, ContainerState, ContainerStateRunning, ContainerStateTerminated,
+        ContainerStateWaiting, PodCondition,
+    };
+
+    #[test]
+    fn pod_status_shows_regular_containers_without_changing_pod_aggregates() {
+        let container = |name: &str| Container {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        let reported = |name: &str, ready, restart_count, state| K8sContainerStatus {
+            name: name.to_string(),
+            ready,
+            restart_count,
+            state: Some(state),
+            ..Default::default()
+        };
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("qbittorrent-abc".to_string()),
+                labels: Some(BTreeMap::from([(
+                    "app.kubernetes.io/name".to_string(),
+                    "qbittorrent".to_string(),
+                )])),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![
+                    container("qbittorrent"),
+                    container("gluetun"),
+                    container("exporter"),
+                ],
+                init_containers: Some(vec![container("setup")]),
+                ..Default::default()
+            }),
+            status: Some(K8sPodStatus {
+                phase: Some("Running".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "False".to_string(),
+                    ..Default::default()
+                }]),
+                // Reverse order intentionally: response follows spec order.
+                container_statuses: Some(vec![
+                    reported(
+                        "exporter",
+                        false,
+                        2,
+                        ContainerState {
+                            waiting: Some(ContainerStateWaiting::default()),
+                            ..Default::default()
+                        },
+                    ),
+                    reported(
+                        "gluetun",
+                        true,
+                        1,
+                        ContainerState {
+                            running: Some(ContainerStateRunning::default()),
+                            ..Default::default()
+                        },
+                    ),
+                    reported(
+                        "qbittorrent",
+                        false,
+                        3,
+                        ContainerState {
+                            terminated: Some(ContainerStateTerminated::default()),
+                            ..Default::default()
+                        },
+                    ),
+                ]),
+                init_container_statuses: Some(vec![reported(
+                    "setup",
+                    true,
+                    9,
+                    ContainerState::default(),
+                )]),
+                ..Default::default()
+            }),
+        };
+        let result = pod_status_from_pod(pod, "media");
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(result.app, "qbittorrent");
+        assert_eq!(json["status"], "Running");
+        assert_eq!(json["ready"], false);
+        assert_eq!(json["restarts"], 6); // init restarts excluded, pod Ready condition retained
+        assert_eq!(
+            json["containers"],
+            serde_json::json!([
+                {"name":"qbittorrent","ready":false,"restart_count":3,"state":"Terminated"},
+                {"name":"gluetun","ready":true,"restart_count":1,"state":"Running"},
+                {"name":"exporter","ready":false,"restart_count":2,"state":"Waiting"}
+            ])
+        );
+        assert!(!json.to_string().contains("setup"));
+    }
+
+    #[test]
+    fn pod_status_uses_spec_when_statuses_are_not_yet_reported() {
+        let pod = Pod {
+            spec: Some(PodSpec {
+                containers: vec!["qbittorrent", "gluetun", "exporter"]
+                    .into_iter()
+                    .map(|name| Container {
+                        name: name.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let result = pod_status_from_pod(pod, "media");
+        assert_eq!(result.restart_count, 0);
+        assert!(!result.ready);
+        assert_eq!(
+            result
+                .containers
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["qbittorrent", "gluetun", "exporter"]
+        );
+        assert!(result
+            .containers
+            .iter()
+            .all(|c| !c.ready && c.restart_count == 0 && c.state == "Unknown"));
+    }
 
     // -------------------------------------------------------------------------
     // format_age tests
@@ -836,6 +1019,7 @@ mod tests {
             status: "Running".to_string(),
             ready: true,
             restart_count: 0,
+            containers: vec![],
             age: "2d".to_string(),
             node: None,
             ip: None,
@@ -846,6 +1030,15 @@ mod tests {
         assert!(json.contains("\"name\":\"sonarr-abc123\""));
         assert!(json.contains("\"status\":\"Running\""));
         assert!(json.contains("\"restarts\":0")); // renamed field
+        assert!(json.contains("\"containers\":[]"));
+        let old_json = serde_json::json!({
+            "name":"sonarr-abc123", "app":"sonarr", "namespace":"media",
+            "status":"Running", "ready":true, "restarts":0, "age":"2d",
+            "node":null, "ip":null
+        });
+        let old: PodStatus =
+            serde_json::from_value(old_json).expect("old payload still deserializes");
+        assert!(old.containers.is_empty());
         assert!(!json.contains("cpu_usage")); // skip_serializing_if None
         assert!(!json.contains("memory_usage")); // skip_serializing_if None
     }
@@ -859,6 +1052,7 @@ mod tests {
             status: "Running".to_string(),
             ready: true,
             restart_count: 2,
+            containers: vec![],
             age: "1h".to_string(),
             node: Some("node1".to_string()),
             ip: Some("10.0.0.5".to_string()),

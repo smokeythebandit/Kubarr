@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   getOperations: vi.fn(),
   listProviders: vi.fn(),
   getVpnConfig: vi.fn(),
+  getPublicIp: vi.fn(),
+  getForwardedPort: vi.fn(),
   assignVpn: vi.fn(),
   removeVpn: vi.fn(),
   refreshAppStatuses: vi.fn(),
@@ -39,7 +41,8 @@ vi.mock('../api/vpn', () => ({
   vpnApi: { listProviders: (...args: unknown[]) => mocks.listProviders(...args) },
   appVpnApi: {
     getConfig: (...args: unknown[]) => mocks.getVpnConfig(...args),
-    getForwardedPort: vi.fn(),
+    getPublicIp: (...args: unknown[]) => mocks.getPublicIp(...args),
+    getForwardedPort: (...args: unknown[]) => mocks.getForwardedPort(...args),
     assignVpn: (...args: unknown[]) => mocks.assignVpn(...args),
     removeVpn: (...args: unknown[]) => mocks.removeVpn(...args),
   },
@@ -152,6 +155,8 @@ describe('AppsPage restart action', () => {
     mocks.restart.mockReset()
     mocks.listProviders.mockReset()
     mocks.getVpnConfig.mockReset()
+    mocks.getPublicIp.mockReset()
+    mocks.getForwardedPort.mockReset()
     mocks.assignVpn.mockReset()
     mocks.removeVpn.mockReset()
     mocks.refreshAppStatuses.mockReset()
@@ -224,6 +229,8 @@ describe('AppsPage VPN assignment', () => {
     mocks.listProviders.mockResolvedValue([provider])
     mocks.getVpnConfig.mockReset()
     mocks.getVpnConfig.mockResolvedValue(null)
+    mocks.getPublicIp.mockReset()
+    mocks.getForwardedPort.mockReset()
     mocks.assignVpn.mockReset()
     mocks.removeVpn.mockReset()
     mocks.refreshAppStatuses.mockReset()
@@ -259,6 +266,53 @@ describe('AppsPage VPN assignment', () => {
     expect(screen.queryByText(/VPN active via/)).not.toBeInTheDocument()
   })
 
+  it('shows the IP reported by the VPN endpoint only for an assigned app', async () => {
+    mocks.getVpnConfig.mockResolvedValue(config)
+    mocks.getPublicIp.mockResolvedValue({ public_ip: '203.0.113.42' })
+    renderPage()
+
+    expect(await screen.findByText('VPN public IP: 203.0.113.42')).toBeVisible()
+    expect(mocks.getPublicIp).toHaveBeenCalledWith('sonarr')
+  })
+
+  it('shows loading then unavailable when the VPN endpoint has no IP yet', async () => {
+    mocks.getVpnConfig.mockResolvedValue(config)
+    let resolveIp!: (value: { public_ip: string | null }) => void
+    mocks.getPublicIp.mockReturnValue(new Promise<{ public_ip: string | null }>(resolve => { resolveIp = resolve }))
+    renderPage()
+
+    expect(await screen.findByText('VPN public IP: loading...')).toBeVisible()
+    resolveIp({ public_ip: null })
+    expect(await screen.findByText('VPN public IP: unavailable (VPN may still be connecting)')).toBeVisible()
+  })
+
+  it('shows an error instead of a previously cached IP when refreshing fails', async () => {
+    mocks.getVpnConfig.mockResolvedValue(config)
+    mocks.getPublicIp.mockResolvedValueOnce({ public_ip: '203.0.113.42' })
+    const { queryClient } = renderPage()
+
+    expect(await screen.findByText('VPN public IP: 203.0.113.42')).toBeVisible()
+    mocks.getPublicIp.mockRejectedValueOnce(new Error('unavailable'))
+    await queryClient.invalidateQueries({ queryKey: ['vpn-public-ip', 'sonarr'] })
+    expect(await screen.findByText('VPN public IP: unable to retrieve (retrying...)')).toBeVisible()
+    expect(screen.queryByText('VPN public IP: 203.0.113.42')).not.toBeInTheDocument()
+  })
+
+  it('does not request or display a VPN IP without an assignment or permission', async () => {
+    const { unmount } = renderPage()
+    await screen.findByDisplayValue('No VPN')
+    expect(mocks.getPublicIp).not.toHaveBeenCalled()
+    expect(screen.queryByText(/VPN public IP:/)).not.toBeInTheDocument()
+
+    unmount()
+    mocks.canViewVpn = false
+    mocks.getVpnConfig.mockResolvedValue(config)
+    renderPage()
+    await screen.findByRole('heading', { name: 'Sonarr', level: 2 })
+    expect(mocks.getPublicIp).not.toHaveBeenCalled()
+    expect(screen.queryByText(/VPN public IP:/)).not.toBeInTheDocument()
+  })
+
   it('shows pending status and disables VPN controls while an app operation is queued', async () => {
     mocks.getOperations.mockResolvedValue([queuedRestart])
     mocks.getVpnConfig.mockResolvedValue(config)
@@ -267,5 +321,36 @@ describe('AppsPage VPN assignment', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('VPN change pending')
     expect(screen.getByRole('button', { name: 'Update VPN' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Remove VPN' })).toBeDisabled()
+  })
+
+  it('distinguishes loading, pending port zero, and an assigned forwarded port', async () => {
+    mocks.getVpnConfig.mockResolvedValue({ ...config, port_forwarding: true })
+    let resolvePort!: (value: { port: number }) => void
+    mocks.getForwardedPort.mockReturnValueOnce(new Promise<{ port: number }>(resolve => { resolvePort = resolve }))
+    const { queryClient } = renderPage()
+
+    expect(await screen.findByText('Port forwarding: loading...')).toBeVisible()
+    expect(mocks.getForwardedPort).toHaveBeenCalledWith('sonarr')
+
+    resolvePort({ port: 0 })
+    expect(await screen.findByText('Port forwarding: negotiating...')).toBeVisible()
+    expect(screen.queryByText('Port forwarding: loading...')).not.toBeInTheDocument()
+
+    mocks.getForwardedPort.mockResolvedValue({ port: 54321 })
+    await queryClient.invalidateQueries({ queryKey: ['vpn-forwarded-port', 'sonarr'] })
+    expect(await screen.findByText('Forwarded port: 54321')).toBeVisible()
+  })
+
+  it('shows a retrying error rather than negotiating after the forwarded-port request fails', async () => {
+    mocks.getVpnConfig.mockResolvedValue({ ...config, port_forwarding: true })
+    mocks.getForwardedPort.mockRejectedValueOnce(new Error('unavailable'))
+    const { queryClient } = renderPage()
+
+    expect(await screen.findByText('Port forwarding: unable to retrieve port (retrying...)')).toBeVisible()
+    expect(screen.queryByText('Port forwarding: negotiating...')).not.toBeInTheDocument()
+
+    mocks.getForwardedPort.mockResolvedValue({ port: 0 })
+    await queryClient.invalidateQueries({ queryKey: ['vpn-forwarded-port', 'sonarr'] })
+    expect(await screen.findByText('Port forwarding: negotiating...')).toBeVisible()
   })
 })

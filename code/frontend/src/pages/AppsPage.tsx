@@ -524,8 +524,16 @@ function AppDetailPanel({
     staleTime: 10000,
   })
 
+  const { data: vpnPublicIp, isPending: vpnPublicIpPending, isError: vpnPublicIpError } = useQuery({
+    queryKey: ['vpn-public-ip', app?.name, appVpnConfig?.vpn_provider_id],
+    queryFn: () => appVpnApi.getPublicIp(app!.name),
+    enabled: canViewVpn && !!app && isInstalled && !app.is_system && !!appVpnConfig,
+    refetchInterval: 15000,
+    staleTime: 5000,
+  })
+
   // Query forwarded port when VPN is active with port forwarding enabled
-  const { data: forwardedPortData } = useQuery({
+  const { data: forwardedPortData, isPending: forwardedPortPending, isError: forwardedPortError } = useQuery({
     queryKey: ['vpn-forwarded-port', app?.name],
     queryFn: () => appVpnApi.getForwardedPort(app!.name),
     enabled: canViewVpn && !!app && !!appVpnConfig?.port_forwarding,
@@ -961,12 +969,26 @@ function AppDetailPanel({
                         VPN configured via {appVpnConfig.vpn_provider_name}
                         {appVpnConfig.effective_kill_switch && ' (kill switch on)'}
                       </div>
+                      <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
+                        <span className="w-1.5 h-1.5 bg-blue-500 rounded-full"></span>
+                        {vpnPublicIpError
+                          ? 'VPN public IP: unable to retrieve (retrying...)'
+                          : vpnPublicIpPending
+                            ? 'VPN public IP: loading...'
+                            : vpnPublicIp?.public_ip
+                              ? `VPN public IP: ${vpnPublicIp.public_ip}`
+                              : 'VPN public IP: unavailable (VPN may still be connecting)'}
+                      </div>
                       {appVpnConfig.port_forwarding && (
                         <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
                           <span className="w-1.5 h-1.5 bg-blue-500 rounded-full"></span>
-                          {forwardedPortData?.port
-                            ? `Forwarded port: ${forwardedPortData.port}`
-                            : 'Port forwarding: negotiating...'}
+                          {forwardedPortError
+                            ? 'Port forwarding: unable to retrieve port (retrying...)'
+                            : forwardedPortPending
+                              ? 'Port forwarding: loading...'
+                              : forwardedPortData?.port
+                                ? `Forwarded port: ${forwardedPortData.port}`
+                                : 'Port forwarding: negotiating...'}
                         </div>
                       )}
                     </div>

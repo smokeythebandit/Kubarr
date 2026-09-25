@@ -155,6 +155,12 @@ export const appVpnApi = {
     return response.data;
   },
 
+  // Get the public IP observed from inside the app's VPN tunnel
+  getPublicIp: async (appName: string): Promise<{ public_ip: string | null }> => {
+    const response = await apiClient.get<{ public_ip: string | null }>(`/vpn/apps/${appName}/public-ip`);
+    return response.data;
+  },
+
   // Assign VPN to an app
   assignVpn: async (appName: string, data: AssignVpnRequest): Promise<AppVpnConfig> => {
     const response = await apiClient.put<AppVpnConfig>(`/vpn/apps/${appName}`, data);

@@ -188,6 +188,7 @@ use crate::state::AppState;
         vpn::assign_vpn,
         vpn::remove_vpn,
         vpn::get_forwarded_port,
+        vpn::get_public_ip,
         vpn::list_supported_providers,
     ),
     tags(

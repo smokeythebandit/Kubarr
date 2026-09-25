@@ -228,10 +228,7 @@ fn test_create_vpn_provider_request_defaults() {
     assert_eq!(req.name, "My VPN");
     assert!(req.enabled, "enabled defaults to true");
     assert!(req.kill_switch, "kill_switch defaults to true");
-    assert!(
-        req.firewall_outbound_subnets.contains("10.0.0.0"),
-        "firewall defaults to RFC1918"
-    );
+    assert!(req.firewall_outbound_subnets.is_empty());
 }
 
 #[test]

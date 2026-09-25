@@ -158,7 +158,9 @@ fn default_true() -> bool {
 }
 
 fn default_firewall_subnets() -> String {
-    "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16".to_string()
+    // No private-network bypass by default. Users needing LAN/cluster access
+    // can explicitly configure the narrow destinations they require.
+    String::new()
 }
 
 // ============================================================================
@@ -1733,7 +1735,7 @@ mod tests_request_response_serde {
         assert_eq!(r.name, "myvpn");
         assert!(r.enabled);
         assert!(r.kill_switch);
-        assert!(!r.firewall_outbound_subnets.is_empty());
+        assert!(r.firewall_outbound_subnets.is_empty());
     }
 
     #[test]

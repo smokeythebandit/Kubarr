@@ -30,7 +30,7 @@ export function VpnProviderForm({
   const [enabled, setEnabled] = useState(provider?.enabled ?? true);
   const [killSwitch, setKillSwitch] = useState(provider?.kill_switch ?? true);
   const [firewallSubnets, setFirewallSubnets] = useState(
-    provider?.firewall_outbound_subnets || '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16'
+    provider?.firewall_outbound_subnets ?? ''
   );
 
   // WireGuard credentials
@@ -420,19 +420,20 @@ export function VpnProviderForm({
 
           {/* Firewall Subnets */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+            <label htmlFor="vpn-firewall-subnets" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Allowed Subnets
             </label>
             <input
+              id="vpn-firewall-subnets"
               type="text"
               value={firewallSubnets}
               onChange={e => setFirewallSubnets(e.target.value)}
-              placeholder="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+              placeholder="Your cluster pod and service CIDRs (comma-separated)"
               className="w-full px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
             />
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1">
               <Info size={12} />
-              Subnets allowed through firewall (for cluster communication)
+               Allowlist only the specific cluster CIDRs needed for communication (e.g. pod or service CIDRs). Leave blank if none are needed; avoid broad private ranges such as 10.0.0.0/8.
             </p>
           </div>
 

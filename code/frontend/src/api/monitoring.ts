@@ -1,5 +1,6 @@
 import apiClient from './client';
 import type { AppHealth, PodMetrics, PodStatus, ServiceEndpoint } from '../types';
+import type { ContainerStatus } from '../types/monitoring';
 
 export interface AppMetrics {
   app_name: string;
@@ -63,6 +64,7 @@ export interface PodStatusInfo {
   age: string;
   node: string;
   ip: string;
+  containers?: ContainerStatus[];
   cpu_usage?: number;     // CPU usage in cores (from VictoriaMetrics)
   memory_usage?: number;  // Memory usage in bytes (from VictoriaMetrics)
 }
