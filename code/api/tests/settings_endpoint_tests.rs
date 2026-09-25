@@ -485,6 +485,138 @@ async fn test_viewer_cannot_update_settings() {
     );
 }
 
+#[tokio::test]
+async fn viewer_cannot_read_single_setting_or_change_registration_for_admin() {
+    ensure_jwt_keys().await;
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "settings_admin_probe",
+        "admin_probe@example.test",
+        "password123",
+        "admin",
+    )
+    .await;
+    create_test_user_with_role(
+        &db,
+        "settings_view_probe",
+        "view_probe@example.test",
+        "password123",
+        "viewer",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+    let (_, admin_cookie) = do_login(
+        create_router(state.clone()),
+        "settings_admin_probe",
+        "password123",
+    )
+    .await;
+    let (_, viewer_cookie) = do_login(
+        create_router(state.clone()),
+        "settings_view_probe",
+        "password123",
+    )
+    .await;
+    let admin_cookie = admin_cookie.unwrap();
+    let viewer_cookie = viewer_cookie.unwrap();
+    let key = "/api/settings/registration_enabled";
+    let (status, before) =
+        authenticated_get(create_router(state.clone()), key, &admin_cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = authenticated_get(create_router(state.clone()), key, &viewer_cookie).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = authenticated_put(
+        create_router(state.clone()),
+        key,
+        &viewer_cookie,
+        &serde_json::json!({"value": "false"}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, after) = authenticated_get(create_router(state), key, &admin_cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&before).unwrap()["value"],
+        serde_json::from_str::<serde_json::Value>(&after).unwrap()["value"]
+    );
+}
+
+#[tokio::test]
+async fn domain_and_profile_settings_require_authorized_roles() {
+    ensure_jwt_keys().await;
+    let db = create_test_db_with_seed().await;
+    create_test_user_with_role(
+        &db,
+        "domains_admin_probe",
+        "domains_admin@example.test",
+        "password123",
+        "admin",
+    )
+    .await;
+    create_test_user_with_role(
+        &db,
+        "domains_view_probe",
+        "domains_view@example.test",
+        "password123",
+        "viewer",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+    let admin = do_login(
+        create_router(state.clone()),
+        "domains_admin_probe",
+        "password123",
+    )
+    .await
+    .1
+    .unwrap();
+    let viewer = do_login(
+        create_router(state.clone()),
+        "domains_view_probe",
+        "password123",
+    )
+    .await
+    .1
+    .unwrap();
+    for path in [
+        "/api/domains",
+        "/api/domains/ddns-profiles",
+        "/api/domains/letsencrypt-profiles",
+    ] {
+        assert_eq!(
+            authenticated_get(create_router(state.clone()), path, &admin)
+                .await
+                .0,
+            StatusCode::OK,
+            "admin must be able to inspect {path}"
+        );
+        assert_eq!(
+            authenticated_get(create_router(state.clone()), path, &viewer)
+                .await
+                .0,
+            StatusCode::FORBIDDEN,
+            "viewer must not inspect {path}"
+        );
+        let request = Request::builder()
+            .uri(path)
+            .method("POST")
+            .header("Cookie", &viewer)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(
+            create_router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "viewer must not create records in {path}"
+        );
+    }
+}
+
 // ============================================================================
 // Default fallback paths: when DB rows are missing, use DEFAULT_SETTINGS
 // ============================================================================

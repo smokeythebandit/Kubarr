@@ -132,6 +132,7 @@ jobs:
           fi
 
       - name: Run controlled WireGuard acceptance lab
+        id: vpn_run
         env:
           KUBARR_ACCEPTANCE_DISPOSABLE: "1"
           KUBARR_VPN_ACCEPTANCE_DISPOSABLE: "1"
@@ -145,6 +146,24 @@ jobs:
         run: |
           set -o pipefail
           tests/acceptance/app-lifecycle.sh | tee "$VPN_ACCEPTANCE_LOG"
+
+      - name: VPN acceptance ledger
+        if: always()
+        run: |
+          args=()
+          case '${{ steps.vpn_run.outcome }}' in
+            success) args+=(--lane-result vpn-live=passed) ;;
+            failure) args+=(--lane-result vpn-live=failed) ;;
+          esac
+          python3 tests/report/generate.py "${args[@]}" --output code/frontend/test-results/ledger
+
+      - name: Upload VPN acceptance ledger
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vpn-acceptance-ledger-${{ github.run_id }}-${{ github.run_attempt }}
+          path: code/frontend/test-results/ledger/
+          retention-days: 7
 
       - name: Upload sanitized VPN acceptance log
         if: always()

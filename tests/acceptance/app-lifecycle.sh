@@ -726,7 +726,7 @@ curl --fail --silent --show-error --max-time 30 -b "$COOKIE_JAR" -c "$COOKIE_JAR
   "http://127.0.0.1:$GATEWAY_PORT/auth/login" >/dev/null
 rm -f "$WORK_DIR/login.json"
 if frontend_acceptance_enabled; then
-  run_frontend_projects real-settings-vpn real-app-install
+  run_frontend_projects real-settings-vpn real-settings-profiles real-settings-accounts real-app-install
   install_id=$(frontend_operation_id install_id)
 else
   if [[ $VPN_LAB_ACCEPTANCE != 1 ]]; then

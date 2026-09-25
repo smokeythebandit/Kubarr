@@ -4,6 +4,7 @@ import { sessionLogin, verify2FA, loginWithRecoveryCode, SessionLoginResponse, g
 import { getCurrentUser } from '../api/users'
 import { oauthApi, AvailableProvider } from '../api/oauth'
 import { precacheDashboard } from '../utils/precache'
+import { Link } from 'react-router-dom'
 
 type LoginStep = 'credentials' | '2fa_required' | '2fa_setup_required' | 'recovery_code'
 
@@ -637,6 +638,7 @@ export default function LoginPage() {
             </>
           )}
         </form>
+        <Link to="/login?register=1" className="block mt-5 text-center text-blue-400 hover:underline">Create an account</Link>
       </div>
     </div>
   )

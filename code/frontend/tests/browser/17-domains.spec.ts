@@ -72,6 +72,8 @@ test('creates, edits, and deletes a domain using only isolated inventory', async
   await page.getByPlaceholder('example.com', { exact: true }).fill('renamed.example.test');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByText('renamed.example.test', { exact: true })).toBeVisible();
+  // Safe success evidence: the edit form is closed and the domain is fixture-only.
+  await test.info().attach('domain-inventory', { body: await page.screenshot(), contentType: 'image/png' });
   page.once('dialog', async dialog => {
     expect(dialog.message()).toBe('Delete domain "renamed.example.test"? App URL assignments using it will be removed.');
     await dialog.dismiss();

@@ -70,7 +70,7 @@ function matchesExpected(error: { status: number; method: string; path: string }
 export const test = base.extend<RealFixtures>({
   expectedHttpErrors: async ({ browserName: _browserName }, provide) => provide([]),
 
-  page: async ({ page, context, expectedHttpErrors }, provide) => {
+  page: async ({ page, context, expectedHttpErrors }, provide, testInfo) => {
     await page.goto('/login');
     const username = page.getByLabel('Username');
     await expect(username).toBeVisible({ timeout: 30_000 });
@@ -117,6 +117,29 @@ export const test = base.extend<RealFixtures>({
     });
 
     await provide(page);
+
+    // Only photograph read-only inventory pages after credential forms are gone.
+    // A failed test may leave a secret-bearing form open; never capture it.
+    const safeSection = new URL(page.url()).searchParams.get('section');
+    if (safeSection === 'domains' &&
+        await page.locator('input[type="password"], textarea, form').count() === 0) {
+      await testInfo.attach('settings-inventory', { body: await page.screenshot(), contentType: 'image/png' });
+    }
+
+    // Failure evidence contains only sanitized request paths and error categories.
+    // No response bodies, cookies, URLs with queries, form values or network traces.
+    if (testInfo.status !== testInfo.expectedStatus) {
+      await testInfo.attach('sanitized-failure', {
+        body: JSON.stringify({
+          path: new URL(page.url()).pathname,
+          pageErrorCount: pageErrors.length,
+          consoleErrorCount: consoleErrors.length,
+          failedRequestCount: failedRequests.length,
+          http: httpErrors.map(({ status, method, path }) => ({ status, method, path: path.split('?')[0] })),
+        }),
+        contentType: 'application/json',
+      });
+    }
 
     const unexpectedHttp = httpErrors.filter(error => !matchesExpected(error, expectedHttpErrors));
     expect(expectedHttpErrors, 'Registered HTTP validation errors that did not occur').toEqual([]);

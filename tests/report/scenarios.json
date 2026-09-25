@@ -1,0 +1,44 @@
+{
+  "settings": {
+    "dashboard": ["settings dashboard statistics"],
+    "general": [
+      "registration and approval toggles send exact mutations and survive reload",
+      {"name": "registration settings enforce disabled and enabled access", "api": "registration_approval_invitation_and_permissions", "live": "registration toggle rejects strangers; pending approval and rejection control login"},
+      "registration and approval switches persist, then restore their baseline"
+    ],
+    "users": [
+      "admin creates, assigns a role, edits and deletes only the selected user",
+      {"name": "real disposable user creation and deletion", "live": "user CRUD role permissions enforce access and audit attributes admin mutations"}
+    ],
+    "pending": [
+      "pending approval and reject only mutate selected accounts",
+      {"name": "real pending approval and rejection affect login", "live": "registration toggle rejects strangers; pending approval and rejection control login", "api": "registration_approval_invitation_and_permissions"}
+    ],
+    "invites": [
+      "invite create and delete never exposes code in inventory",
+      {"name": "invite single-use redemption bypasses disabled open registration", "live": "invite is redeemable exactly once even with open registration disabled", "api": "registration_approval_invitation_and_permissions"}
+    ],
+    "permissions": [
+      "permission matrix locks admin and persists limited role changes through reload",
+      {"name": "real role permissions enforce audit-only access", "live": "user CRUD role permissions enforce access and audit attributes admin mutations"}
+    ],
+    "audit": [
+      "audit action filter requests attributed results and excludes other actions",
+      {"name": "real attributed user creation audit", "live": "user CRUD role permissions enforce access and audit attributes admin mutations"}
+    ],
+    "domains": ["creates, edits, and deletes a domain using only isolated inventory", "manual domain inventory CRUD does not request DNS or TLS provisioning", "real domain routing"],
+    "ddns": ["manual DNS profile CRUD sends exact state and reloads without provider traffic", "manual DNS and staging certificate profiles persist through edit and delete without contacting providers", "real DDNS provider updates"],
+    "letsencrypt": ["certificate profile staging CRUD persists disabled renewal without ACME calls", "real certificate issuance and renewal"],
+    "notifications": ["notification event preferences", "notification channel configuration"],
+    "vpn": ["creates a WireGuard provider without exposing its key in UI or read APIs", "real WireGuard connectivity"]
+  },
+  "other": {
+    "auth": ["session login/logout"],
+    "apps": ["application lifecycle install upgrade restart uninstall"],
+    "storage": ["storage configuration"],
+    "monitoring": ["monitoring resources"],
+    "networking": ["networking routes"],
+    "security": ["security controls"],
+    "navigation": ["navigation and errors"]
+  }
+}

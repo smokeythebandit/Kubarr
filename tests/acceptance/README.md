@@ -56,7 +56,7 @@ For the real frontend scenario, install the pinned frontend dependencies and
 Chromium first, then add `KUBARR_ACCEPTANCE_FRONTEND=1`. The harness supplies the
 gateway URL, disposable bootstrap-admin credentials, run ID, chart versions, and a
 private mode-0600 result path to these serial Playwright projects:
-`real-settings-vpn`, `real-app-install`, `real-app-upgrade`, `real-app-restart`, and
+`real-settings-vpn`, `real-settings-profiles`, `real-settings-accounts`, `real-app-install`, `real-app-upgrade`, `real-app-restart`, and
 `real-app-uninstall`. Playwright starts no development server and must not mock
 routes. Each app project writes its operation ID to the shared JSON result as
 `install_id`, `update_id`, `restart_id`, or `delete_id`; the shell harness then

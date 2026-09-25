@@ -7,7 +7,11 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   workers: 2,
-  reporter: 'list',
+  reporter: [
+    ['list'],
+    ['json', { outputFile: 'test-results/browser-results.json' }],
+    ['html', { outputFolder: 'playwright-report/browser', open: 'never' }],
+  ],
   outputDir: 'test-results/browser',
   use: {
     baseURL: 'http://127.0.0.1:4174',

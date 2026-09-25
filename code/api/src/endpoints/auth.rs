@@ -10,6 +10,8 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use crate::config::CONFIG;
 use crate::error::{AppError, Result};
@@ -19,10 +21,11 @@ use crate::middleware::auth::{
 use crate::models::prelude::*;
 use crate::models::{
     audit_log::{AuditAction, ResourceType},
-    role, session, two_factor_recovery_code, user, user_role,
+    invite, role, session, two_factor_recovery_code, user, user_role,
 };
 use crate::services::{
-    create_session_token, decode_session_token, verify_password, verify_recovery_code, verify_totp,
+    create_session_token, decode_session_token, hash_password, verify_password,
+    verify_recovery_code, verify_totp,
 };
 use crate::state::AppState;
 
@@ -99,6 +102,7 @@ async fn audit_success(
 pub fn auth_routes(state: AppState) -> Router {
     Router::new()
         .route("/login", post(login))
+        .route("/register", post(register))
         .route("/logout", post(logout))
         .route("/sessions", get(list_sessions))
         .route("/sessions/{session_id}", delete(revoke_session))
@@ -117,6 +121,163 @@ pub struct LoginRequest {
     pub username: String,
     pub password: String,
     pub totp_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterRequest {
+    username: String,
+    email: String,
+    password: String,
+    invite_code: Option<String>,
+}
+
+// Bound unauthenticated work (including bcrypt and database transactions).
+static REGISTRATION_SLOTS: Semaphore = Semaphore::const_new(8);
+
+/// Public registration never grants an administrator role or a session. Invite
+/// consumption and the audit record commit atomically. Accounts registered here
+/// have no roles; administrators can explicitly grant roles after registration.
+async fn register(
+    State(state): State<AppState>,
+    Json(data): Json<RegisterRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let username = data.username.trim();
+    let email = data.email.trim();
+    if username.len() < 3
+        || username.len() > 64
+        || email.len() > 255
+        || !email.contains('@')
+        || data.password.len() < 8
+        || data.password.len() > 1024
+    {
+        return Err(AppError::BadRequest(
+            "Invalid registration fields".to_string(),
+        ));
+    }
+    let slot = Arc::new(
+        REGISTRATION_SLOTS
+            .try_acquire()
+            .map_err(|_| AppError::ServiceUnavailable("Registration is busy".to_string()))?,
+    );
+    let db = state.get_db().await?;
+    // bcrypt is CPU-bound: keep it off the async worker and outside the DB transaction.
+    // The task also holds a permit so a cancelled request cannot free its slot
+    // while its non-cancellable blocking hash is still running.
+    let password = data.password;
+    let hash_slot = Arc::clone(&slot);
+    let hashed_password = tokio::task::spawn_blocking(move || {
+        let _hash_slot = hash_slot;
+        hash_password(&password)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Password hashing task failed: {e}")))??;
+    let tx = db.begin().await?;
+    let enabled = SystemSetting::find_by_id("registration_enabled")
+        .one(&tx)
+        .await?
+        .map(|setting| setting.value == "true")
+        .unwrap_or(true);
+    let approval = SystemSetting::find_by_id("registration_require_approval")
+        .one(&tx)
+        .await?
+        .map(|setting| setting.value == "true")
+        .unwrap_or(true);
+    let invite_code = data.invite_code.as_deref().filter(|code| !code.is_empty());
+    if !enabled && invite_code.is_none() {
+        return Err(AppError::Forbidden(
+            "Open registration is disabled".to_string(),
+        ));
+    }
+    let invitation = if let Some(code) = invite_code {
+        let invitation = Invite::find()
+            .filter(invite::Column::Code.eq(code))
+            .one(&tx)
+            .await?
+            .ok_or_else(|| AppError::BadRequest("Invalid or used invite".to_string()))?;
+        if invitation.is_used || invitation.expires_at.is_some_and(|date| date <= Utc::now()) {
+            return Err(AppError::BadRequest("Invalid or used invite".to_string()));
+        }
+        Some(invitation)
+    } else {
+        None
+    };
+    if User::find()
+        .filter(user::Column::Username.eq(username))
+        .one(&tx)
+        .await?
+        .is_some()
+        || User::find()
+            .filter(user::Column::Email.eq(email))
+            .one(&tx)
+            .await?
+            .is_some()
+    {
+        return Err(AppError::BadRequest("Account already exists".to_string()));
+    }
+    let now = Utc::now();
+    let created = user::ActiveModel {
+        username: Set(username.to_string()),
+        email: Set(email.to_string()),
+        hashed_password: Set(hashed_password),
+        is_active: Set(true),
+        is_approved: Set(invitation.is_some() || !approval),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&tx)
+    .await?;
+    if let Some(invitation) = invitation {
+        let updated = Invite::update_many()
+            .col_expr(
+                invite::Column::IsUsed,
+                sea_orm::sea_query::Expr::value(true),
+            )
+            .col_expr(
+                invite::Column::UsedById,
+                sea_orm::sea_query::Expr::value(created.id),
+            )
+            .col_expr(invite::Column::UsedAt, sea_orm::sea_query::Expr::value(now))
+            .filter(invite::Column::Id.eq(invitation.id))
+            .filter(invite::Column::IsUsed.eq(false))
+            .exec(&tx)
+            .await?;
+        if updated.rows_affected != 1 {
+            return Err(AppError::BadRequest("Invalid or used invite".to_string()));
+        }
+        crate::services::audit::log_on_transaction(
+            &tx,
+            AuditAction::InviteUsed,
+            ResourceType::Invite,
+            Some(invitation.id.to_string()),
+            Some(created.id),
+            Some(username.to_string()),
+            None,
+            None,
+            None,
+            true,
+            None,
+        )
+        .await?;
+    }
+    crate::services::audit::log_on_transaction(
+        &tx,
+        AuditAction::UserCreated,
+        ResourceType::User,
+        Some(created.id.to_string()),
+        Some(created.id),
+        Some(username.to_string()),
+        Some(serde_json::json!({"method": "registration"})),
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(
+        serde_json::json!({"status": if created.is_approved {"approved"} else {"pending"}}),
+    ))
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]

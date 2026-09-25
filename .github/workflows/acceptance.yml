@@ -124,6 +124,7 @@ jobs:
           tests/acceptance/test-sonarr-api.sh
 
       - name: Run real Kubernetes acceptance test
+        id: acceptance_run
         env:
           KUBARR_ACCEPTANCE_DISPOSABLE: "1"
           KUBARR_ACCEPTANCE_FRONTEND: ${{ matrix.scenario == 'frontend' && '1' || '0' }}
@@ -134,6 +135,37 @@ jobs:
           KUBARR_ACCEPTANCE_WORK_DIR: ${{ runner.temp }}/kubarr-acceptance-work-${{ matrix.scenario }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: tests/acceptance/app-lifecycle.sh
 
+      - name: Generate API acceptance ledger
+        if: always() && matrix.scenario == 'api'
+        run: |
+          args=()
+          case '${{ steps.acceptance_run.outcome }}' in
+            success) args+=(--lane-result api-live=passed) ;;
+            failure) args+=(--lane-result api-live=failed) ;;
+          esac
+          python3 tests/report/generate.py "${args[@]}" --output code/frontend/test-results/ledger
+
+      - name: Upload API acceptance ledger
+        if: always() && matrix.scenario == 'api'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: api-acceptance-ledger-${{ github.run_id }}-${{ github.run_attempt }}
+          path: code/frontend/test-results/ledger/
+          retention-days: 7
+
+      - name: Generate acceptance ledger
+        if: always() && matrix.scenario == 'frontend'
+        run: |
+          args=()
+          case '${{ steps.acceptance_run.outcome }}' in
+            success) args+=(--lane-result live=passed) ;;
+            failure) args+=(--lane-result live=failed) ;;
+          esac
+          for result in code/frontend/test-results/real-*.json; do
+            if [[ -f "$result" ]]; then args+=(--playwright "live=$result"); fi
+          done
+          python3 tests/report/generate.py "${args[@]}" --output code/frontend/test-results/ledger
+
       - name: Upload frontend acceptance reports
         if: always() && matrix.scenario == 'frontend'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -142,5 +174,7 @@ jobs:
           path: |
             code/frontend/test-results/real/
             code/frontend/playwright-report/real/
+            code/frontend/test-results/real-*.json
+            code/frontend/test-results/ledger/
           if-no-files-found: ignore
           retention-days: 7

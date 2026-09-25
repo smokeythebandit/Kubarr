@@ -10,7 +10,7 @@ interface InviteLinkModalProps {
 const InviteLinkModal: React.FC<InviteLinkModalProps> = ({ invite, onClose }) => {
   const [copied, setCopied] = useState(false);
 
-  const inviteUrl = `${window.location.origin}/auth/register?invite=${invite.code}`;
+  const inviteUrl = `${window.location.origin}/login?register=1&invite=${encodeURIComponent(invite.code)}`;
 
   const handleCopy = async () => {
     try {

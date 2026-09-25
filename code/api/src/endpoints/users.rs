@@ -913,6 +913,12 @@ async fn reject_user(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    if user_id == auth.user_id() || existing_user.is_approved {
+        return Err(AppError::BadRequest(
+            "Only a pending account can be rejected".to_string(),
+        ));
+    }
+
     let txn = db.begin().await?;
     existing_user.delete(&txn).await?;
     audit_user_on_transaction(

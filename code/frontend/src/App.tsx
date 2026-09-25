@@ -10,6 +10,7 @@ import SecurityPage from './pages/SecurityPage'
 import SettingsPage from './pages/SettingsPage'
 import AccountPage from './pages/AccountPage'
 import LoginPage from './pages/LoginPage'
+import RegisterPage from './pages/RegisterPage'
 import NotFoundPage from './pages/NotFoundPage'
 import AppErrorPage from './pages/AppErrorPage'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
@@ -893,7 +894,7 @@ function AppContent() {
   if (isLoginPage) {
     return (
       <Routes>
-        <Route path="/login" element={<LoginPage />} />
+        <Route path="/login" element={new URLSearchParams(location.search).get('register') === '1' ? <RegisterPage /> : <LoginPage />} />
       </Routes>
     )
   }

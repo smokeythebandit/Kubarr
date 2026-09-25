@@ -55,32 +55,67 @@ jobs:
           workspaces: code/api
 
       - name: Library and worker/deployment contracts
-        run: cargo test --locked --lib
+        run: bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-rust-lib.log" cargo test --locked --lib
         working-directory: code/api
 
       - name: Operation API and permission contracts
-        run: cargo test --locked --test app_operations_tests
+        run: bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-app-operations.log" cargo test --locked --test app_operations_tests
         working-directory: code/api
 
       - name: Audit security and contract tests
         run: |
-          cargo test --locked --test auth_audit_tests
-          cargo test --locked --test admin_audit_tests
-          cargo test --locked --test audit_contract_tests
-          cargo test --locked --test app_audit_tests
-          cargo test --locked --test vpn_audit_tests
-          cargo test --locked --test audit_endpoint_tests
+          bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-auth-audit.log" cargo test --locked --test auth_audit_tests
+          bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-admin-audit.log" cargo test --locked --test admin_audit_tests
+          bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-audit-contract.log" cargo test --locked --test audit_contract_tests
+          bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-app-audit.log" cargo test --locked --test app_audit_tests
+          bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-vpn-audit.log" cargo test --locked --test vpn_audit_tests
+          bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-audit-endpoint.log" cargo test --locked --test audit_endpoint_tests
         working-directory: code/api
 
       - name: Session-authenticated enqueue integration
-        run: cargo test --locked --test apps_endpoint_tests queues_without_k8s
+        run: bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-app-enqueue.log" cargo test --locked --test apps_endpoint_tests queues_without_k8s
         working-directory: code/api
 
       - name: VPN assignment security and transaction contracts
         run: |
-          cargo test --locked --test vpn_endpoint_tests
-          cargo test --locked --test vpn_service_tests
+          bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-vpn-endpoint.log" cargo test --locked --test vpn_endpoint_tests
+          bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-vpn-service.log" cargo test --locked --test vpn_service_tests
         working-directory: code/api
+
+      - name: Settings authorization contracts (isolated SQLite)
+        run: bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-settings.log" cargo test --locked --test settings_endpoint_tests
+        working-directory: code/api
+
+      - name: Registration, approval and invite contracts (isolated SQLite)
+        run: bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-registration.log" cargo test --locked --test registration_settings_tests
+        working-directory: code/api
+
+      - name: Backend ledger
+        if: always()
+        run: >-
+          python3 tests/report/generate.py
+          --rust "$RUNNER_TEMP/kubarr-rust-lib.log"
+          --rust "$RUNNER_TEMP/kubarr-settings.log"
+          --rust "$RUNNER_TEMP/kubarr-registration.log"
+          --rust "$RUNNER_TEMP/kubarr-admin-audit.log"
+          --rust "$RUNNER_TEMP/kubarr-app-operations.log"
+          --rust "$RUNNER_TEMP/kubarr-auth-audit.log"
+          --rust "$RUNNER_TEMP/kubarr-audit-contract.log"
+          --rust "$RUNNER_TEMP/kubarr-app-audit.log"
+          --rust "$RUNNER_TEMP/kubarr-vpn-audit.log"
+          --rust "$RUNNER_TEMP/kubarr-audit-endpoint.log"
+          --rust "$RUNNER_TEMP/kubarr-app-enqueue.log"
+          --rust "$RUNNER_TEMP/kubarr-vpn-endpoint.log"
+          --rust "$RUNNER_TEMP/kubarr-vpn-service.log"
+          --output code/frontend/test-results/ledger
+
+      - name: Upload backend ledger
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: backend-test-ledger
+          path: code/frontend/test-results/ledger/
+          retention-days: 7
 
   postgres-audit-migrations:
     runs-on: ubuntu-latest
@@ -110,8 +145,20 @@ jobs:
       - name: PostgreSQL audit migration and write regression
         env:
           AUDIT_TEST_POSTGRES_URL: postgres://kubarr_test:testonly_audit_pg@localhost:5432/audit_test
-        run: cargo test --locked --test audit_postgres_migration_tests
+        run: bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-postgres-audit.log" cargo test --locked --test audit_postgres_migration_tests
         working-directory: code/api
+
+      - name: PostgreSQL audit ledger
+        if: always()
+        run: python3 tests/report/generate.py --rust "$RUNNER_TEMP/kubarr-postgres-audit.log" --output code/frontend/test-results/ledger
+
+      - name: Upload PostgreSQL audit ledger
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: postgres-audit-ledger
+          path: code/frontend/test-results/ledger/
+          retention-days: 7
 
   cli:
     runs-on: ubuntu-latest
@@ -124,8 +171,20 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
           workspaces: code/cli
-      - run: cargo test --locked --bin kubarr
+      - run: bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-cli.log" cargo test --locked --bin kubarr
         working-directory: code/cli
+
+      - name: CLI ledger
+        if: always()
+        run: python3 tests/report/generate.py --rust "$RUNNER_TEMP/kubarr-cli.log" --output code/frontend/test-results/ledger
+
+      - name: Upload CLI ledger
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cli-test-ledger
+          path: code/frontend/test-results/ledger/
+          retention-days: 7
 
   frontend:
     runs-on: ubuntu-latest
@@ -144,8 +203,11 @@ jobs:
         working-directory: code/frontend
 
       - name: Unit tests
-        run: pnpm test
+        run: pnpm exec vitest run --reporter=default --reporter=json --outputFile.json=test-results/unit.json
         working-directory: code/frontend
+
+      - name: Report generator contracts
+        run: python3 -B -m unittest discover -s tests/report -p 'test_*.py'
 
       - name: Typecheck browser tests
         run: pnpm test:typecheck
@@ -162,6 +224,25 @@ jobs:
       - name: Deterministic browser tests
         run: pnpm test:browser
         working-directory: code/frontend
+
+      - name: Build test ledger
+        if: always()
+        run: >-
+          python3 tests/report/generate.py
+          --vitest code/frontend/test-results/unit.json
+          --playwright browser=code/frontend/test-results/browser-results.json
+          --output code/frontend/test-results/ledger
+
+      - name: Upload test ledger and browser evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: frontend-test-ledger
+          path: |
+            code/frontend/test-results/ledger/
+            code/frontend/test-results/browser/
+            code/frontend/playwright-report/browser/
+          retention-days: 7
 
       - name: Browser failure artifacts
         if: failure()

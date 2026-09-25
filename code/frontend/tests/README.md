@@ -29,7 +29,8 @@ only by the test that registers them; none reaches a backend. Import `test` and
 `expect` from this fixture in every deterministic spec, not from Playwright.
 Do not use `request`/`route.fetch` to contact real services in this lane.
 
-The 34 Chromium tests consolidate the old suites into behavioral scenarios:
+The 44 Chromium tests cover behavioral scenarios (including strict mocked
+General registration/approval persistence, account administration and manual DNS/certificate profile CRUD):
 
 | Replacement | Coverage |
 | --- | --- |
@@ -37,20 +38,26 @@ The 34 Chromium tests consolidate the old suites into behavioral scenarios:
 | `browser/14-vpn.spec.ts` (9) | Empty/disabled states, navigation, required fields/cancel, WireGuard and OpenVPN creation payloads, rejected creation, seeded edit/delete confirmation, connection success/failure, app assignment/removal, retry/refresh |
 | `browser/15-notifications.spec.ts` (8) | Empty/seeded inbox, outside-click dismissal, preferences link, individual/all read and delete, channel configuration/enablement, supported channels, event enablement/severity persistence, test destination validation and delivery success/failure |
 | `browser/17-domains.spec.ts` (7) | Current Domains navigation/inventory, required and wildcard validation, cancel, create/edit/delete confirmation, rejected save, path/subdomain/exact-host app URLs |
+| `browser/18-settings-access.spec.ts` (1) | Registration and approval toggle payloads and reload persistence |
+| `browser/19-settings-profiles.spec.ts` (2) | Manual DNS profile CRUD and staging certificate profile create/delete with strict request matching |
+| `browser/20-registration.spec.ts` (2) | Public registration disabled response and invite payload through the gateway-compatible login route |
+| `browser/21-settings-admin.spec.ts` (5) | Pending approval/rejection, invite create/delete, role permission matrix, user CRUD/role assignment and attributed audit filtering |
 
 The old top-level `07-storage`, `14-vpn`, `15-notifications`, and `17-cloudflare` specs were
 replaced rather than left as destructive shared-state tests. Cloudflare token
 wizard/deployment/status scenarios describe a removed UI; they are not skipped
 or represented as tested features. Current Domains inventory and app URL flows
 replace that suite. DNS-provider and certificate-profile management are separate
-panes and are not yet covered by this browser milestone.
+panes. Their new real configuration-only journeys have not been run in a cluster yet.
 
 ## Live Tests
 
 ### Real disposable-cluster frontend acceptance
 
 `playwright.real.config.ts` and `tests/real/` now provide a separate, real-backend
-lane: 14 settings, VPN-configuration, and app-lifecycle scenarios. It is driven by
+lane: 19 settings, VPN-configuration, profile, accounts and app-lifecycle scenarios.
+All 19 passed in a fresh-image disposable run on 2026-09-23 with scoped cleanup.
+It is driven by
 `KUBARR_ACCEPTANCE_FRONTEND=1 tests/acceptance/app-lifecycle.sh` from the application
 root with the other disposable-run prerequisites. See `tests/real/README.md` for
 coverage, safety, and limitations. It does not use the mocked browser fixtures.

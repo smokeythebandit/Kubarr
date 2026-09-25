@@ -259,7 +259,7 @@ const UsersPage: React.FC = () => {
 
   const copyInviteLink = (invite: Invite) => {
     const baseUrl = window.location.origin;
-    const inviteUrl = `${baseUrl}/auth/register?invite=${invite.code}`;
+    const inviteUrl = `${baseUrl}/login?register=1&invite=${encodeURIComponent(invite.code)}`;
     navigator.clipboard.writeText(inviteUrl);
     setCopiedInviteId(invite.id);
     setTimeout(() => setCopiedInviteId(null), 2000);

@@ -47,6 +47,7 @@ export default defineConfig({
   reporter: [
     ['list'],
     ['html', { outputFolder: `playwright-report/real/${phase}`, open: 'never' }],
+    ['json', { outputFile: `test-results/real-${phase}.json` }],
   ],
   use: {
     ...devices['Desktop Chrome'],
@@ -61,6 +62,8 @@ export default defineConfig({
   },
   projects: [
     { name: 'real-settings-vpn', testMatch: /settings-vpn\.spec\.ts/ },
+    { name: 'real-settings-profiles', testMatch: /settings-profiles\.spec\.ts/ },
+    { name: 'real-settings-accounts', testMatch: /settings-accounts\.spec\.ts/ },
     { name: 'real-app-install', testMatch: /apps\.install\.spec\.ts/ },
     { name: 'real-app-upgrade', testMatch: /apps\.upgrade\.spec\.ts/ },
     { name: 'real-app-restart', testMatch: /apps\.restart\.spec\.ts/ },

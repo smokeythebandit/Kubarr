@@ -487,6 +487,11 @@ async fn list_all_permissions(
             category: "Users".to_string(),
             description: "Create, edit, and delete users".to_string(),
         },
+        PermissionInfo {
+            key: "users.reset_password".to_string(),
+            category: "Users".to_string(),
+            description: "Reset other users' passwords".to_string(),
+        },
         // Roles permissions
         PermissionInfo {
             key: "roles.view".to_string(),
@@ -508,6 +513,16 @@ async fn list_all_permissions(
             key: "settings.manage".to_string(),
             category: "Settings".to_string(),
             description: "Modify system settings".to_string(),
+        },
+        PermissionInfo {
+            key: "audit.view".to_string(),
+            category: "Audit".to_string(),
+            description: "View audit logs".to_string(),
+        },
+        PermissionInfo {
+            key: "audit.manage".to_string(),
+            category: "Audit".to_string(),
+            description: "Manage audit retention".to_string(),
         },
         // VPN permissions
         PermissionInfo {
