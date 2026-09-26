@@ -294,10 +294,12 @@ fn clear_logs_request_deser_empty() {
 fn clear_logs_response_ser() {
     let r = ClearLogsResponse {
         deleted: 42,
+        audit_event_id: 7,
         message: "42 logs deleted".to_string(),
     };
     let json = serde_json::to_string(&r).expect("ser");
     assert!(json.contains("\"deleted\":42"));
+    assert!(json.contains("\"audit_event_id\":7"));
 }
 
 // ============================================================================

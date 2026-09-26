@@ -22,6 +22,7 @@ use crate::models::{app_operation, app_state, audit_outbox, user};
 use crate::services::audit::log_on_transaction;
 use crate::services::catalog::AppCatalog;
 use crate::services::deployment::{DeploymentManager, DeploymentRequest};
+use crate::services::gpu::{self, GpuSelection, QUEUED_GPU_KEY};
 use crate::services::k8s::K8sClient;
 use crate::services::storage_config;
 use crate::state::{SharedCatalog, SharedK8sClient};
@@ -35,9 +36,14 @@ pub const STATUS_QUEUED: &str = "queued";
 pub const STATUS_RUNNING: &str = "running";
 pub const STATUS_SUCCEEDED: &str = "succeeded";
 pub const STATUS_FAILED: &str = "failed";
+pub const STATUS_PAUSED: &str = "paused";
+pub const STATUS_CANCELLED: &str = "cancelled";
+pub const STATUS_RETRIED: &str = "retried";
 const INTERRUPTED_LABEL: &str = "outcome_indeterminate_after_worker_interruption";
 const STALE_RUNNING_AFTER: chrono::Duration = chrono::Duration::minutes(15);
 const RUNNING_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const STOP_ERROR: &str = "Stop requested; external outcome indeterminate";
 
 pub const DESIRED_INSTALLED: &str = "installed";
 pub const DESIRED_REMOVED: &str = "removed";
@@ -75,6 +81,7 @@ pub struct AppOperationResponse {
     pub app_name: String,
     pub operation: String,
     pub status: String,
+    pub stop_requested: bool,
     pub message: Option<String>,
     pub error: Option<String>,
     pub attempts: i32,
@@ -128,8 +135,18 @@ impl AppManager {
         custom_config: HashMap<String, String>,
         created_by: Option<i64>,
     ) -> Result<AppOperationResponse> {
-        validate_operation(operation)?;
+        gpu::validate_custom_gpu_keys(&custom_config)?;
+        self.enqueue_operation_unchecked(app_name, operation, custom_config, created_by)
+            .await
+    }
 
+    async fn persist_operation(
+        &self,
+        app_name: &str,
+        operation: &str,
+        custom_config: HashMap<String, String>,
+        created_by: Option<i64>,
+    ) -> Result<AppOperationResponse> {
         if operation != OP_DELETE {
             let catalog = self.catalog.read().await;
             if catalog.get_app(app_name).is_none() {
@@ -146,6 +163,7 @@ impl AppManager {
             app_name: Set(app_name.to_string()),
             operation: Set(operation.to_string()),
             status: Set(STATUS_QUEUED.to_string()),
+            stop_requested: Set(false),
             message: Set(Some(format!("Queued {} for {}", operation, app_name))),
             error: Set(None),
             custom_config: Set(Some(serde_json::to_string(&custom_config).map_err(
@@ -166,6 +184,50 @@ impl AppManager {
         log_queued(&transaction, &inserted).await?;
         transaction.commit().await?;
         Ok(inserted.into())
+    }
+
+    pub async fn enqueue_gpu_operation(
+        &self,
+        app_name: &str,
+        operation: &str,
+        mut custom_config: HashMap<String, String>,
+        gpu: Option<Option<GpuSelection>>,
+        created_by: Option<i64>,
+    ) -> Result<AppOperationResponse> {
+        gpu::validate_custom_gpu_keys(&custom_config)?;
+        if gpu.is_some() && !matches!(app_name, "plex" | "jellyfin") {
+            return Err(AppError::BadRequest(
+                "GPU is supported only for Plex and Jellyfin".into(),
+            ));
+        }
+        if gpu.is_some() {
+            gpu::validate_gpu_scheduling_config(&custom_config)?;
+        }
+        if let Some(selection) = gpu.as_ref().and_then(Option::as_ref) {
+            let guard = self.k8s_client.read().await;
+            let client = guard
+                .as_ref()
+                .ok_or_else(|| AppError::Internal("Kubernetes client not available".into()))?;
+            gpu::validate_selection(client, selection).await?;
+        }
+        if gpu.is_some() {
+            custom_config.insert(QUEUED_GPU_KEY.into(), serde_json::to_string(&gpu)?);
+        }
+        // Only this method may insert the reserved queue key.
+        self.enqueue_operation_unchecked(app_name, operation, custom_config, created_by)
+            .await
+    }
+
+    async fn enqueue_operation_unchecked(
+        &self,
+        app_name: &str,
+        operation: &str,
+        custom_config: HashMap<String, String>,
+        created_by: Option<i64>,
+    ) -> Result<AppOperationResponse> {
+        validate_operation(operation)?;
+        self.persist_operation(app_name, operation, custom_config, created_by)
+            .await
     }
 
     /// Queue an app update using the caller's transaction.
@@ -199,6 +261,7 @@ impl AppManager {
             app_name: Set(app_name.to_string()),
             operation: Set(OP_UPDATE.to_string()),
             status: Set(STATUS_QUEUED.to_string()),
+            stop_requested: Set(false),
             message: Set(Some(format!("Queued {} for {}", OP_UPDATE, app_name))),
             error: Set(None),
             custom_config: Set(Some("{}".to_string())),
@@ -264,6 +327,212 @@ impl AppManager {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Operation '{}' not found", id)))?;
         Ok(operation.into())
+    }
+
+    /// Queued controls are transactional CAS updates. Running cancel records a
+    /// stop request; the worker alone resolves the external outcome.
+    pub async fn control_operation(
+        &self,
+        id: &str,
+        action: &str,
+        actor_id: i64,
+    ) -> Result<AppOperationResponse> {
+        let (from, to) = match action {
+            "pause" => (STATUS_QUEUED, STATUS_PAUSED),
+            "resume" => (STATUS_PAUSED, STATUS_QUEUED),
+            "cancel" => (STATUS_QUEUED, STATUS_CANCELLED),
+            _ => return Err(AppError::BadRequest("Unsupported operation control".into())),
+        };
+        let transaction = self.db.begin().await?;
+        let operation = app_operation::Entity::find_by_id(id)
+            .one(&transaction)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Operation '{id}' not found")))?;
+        if action == "cancel" && operation.status == STATUS_RUNNING {
+            let now = Utc::now();
+            let changed = app_operation::Entity::update_many()
+                .col_expr(app_operation::Column::StopRequested, true.into())
+                .col_expr(app_operation::Column::Message, "Stop requested".into())
+                .col_expr(app_operation::Column::UpdatedAt, now.into())
+                .filter(app_operation::Column::Id.eq(id))
+                .filter(app_operation::Column::Status.eq(STATUS_RUNNING))
+                .filter(app_operation::Column::StopRequested.eq(false))
+                .exec(&transaction)
+                .await?;
+            if changed.rows_affected != 1 {
+                return Err(AppError::Conflict(
+                    "Operation already stopped or completed".into(),
+                ));
+            }
+            log_control(&transaction, &operation, "stop_requested", actor_id).await?;
+            let result = app_operation::Entity::find_by_id(id)
+                .one(&transaction)
+                .await?
+                .unwrap();
+            transaction.commit().await?;
+            return Ok(result.into());
+        }
+        let now = Utc::now();
+        let changed = app_operation::Entity::update_many()
+            .col_expr(
+                app_operation::Column::Status,
+                sea_orm::sea_query::Expr::value(to),
+            )
+            .col_expr(
+                app_operation::Column::Message,
+                sea_orm::sea_query::Expr::value(format!(
+                    "Operation {} by user {actor_id}",
+                    match action {
+                        "cancel" => "cancelled",
+                        "pause" => "paused",
+                        _ => "resumed",
+                    }
+                )),
+            )
+            .col_expr(
+                app_operation::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(app_operation::Column::Id.eq(id))
+            .filter(if action == "cancel" {
+                app_operation::Column::Status.is_in([STATUS_QUEUED, STATUS_PAUSED])
+            } else {
+                app_operation::Column::Status.eq(from)
+            });
+        let changed = if action == "cancel" {
+            changed
+                .col_expr(
+                    app_operation::Column::FinishedAt,
+                    sea_orm::sea_query::Expr::value(now),
+                )
+                .exec(&transaction)
+                .await?
+        } else {
+            changed.exec(&transaction).await?
+        };
+        if changed.rows_affected != 1 {
+            return Err(AppError::Conflict(if operation.status == STATUS_RUNNING {
+                "Operation already running; cannot safely interrupt Helm".into()
+            } else {
+                format!(
+                    "Operation must be {from} to {action}; current status: {}",
+                    operation.status
+                )
+            }));
+        }
+        log_control(&transaction, &operation, action, actor_id).await?;
+        if action == "cancel" {
+            app_state::Entity::update_many()
+                .col_expr(
+                    app_state::Column::Message,
+                    sea_orm::sea_query::Expr::value("Queued operation cancelled"),
+                )
+                .col_expr(
+                    app_state::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now),
+                )
+                .filter(app_state::Column::AppName.eq(&operation.app_name))
+                .filter(app_state::Column::LastOperationId.eq(id))
+                .exec(&transaction)
+                .await?;
+        }
+        let result = app_operation::Entity::find_by_id(id)
+            .one(&transaction)
+            .await?
+            .unwrap();
+        transaction.commit().await?;
+        Ok(result.into())
+    }
+
+    pub async fn retry_operation(&self, id: &str, actor_id: i64) -> Result<AppOperationResponse> {
+        let transaction = self.db.begin().await?;
+        let original = app_operation::Entity::find_by_id(id)
+            .one(&transaction)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Operation '{id}' not found")))?;
+        if original.status != STATUS_FAILED {
+            return Err(AppError::Conflict(format!(
+                "Retry requires failed operation; current status: {}",
+                original.status
+            )));
+        }
+        // Validate stored input before copying it, including the reserved internal GPU
+        // marker. It must never be accepted from a new public custom-config request.
+        validate_operation(&original.operation)?;
+        if original.operation == OP_DELETE
+            && self
+                .catalog
+                .read()
+                .await
+                .get_app(&original.app_name)
+                .is_some_and(|app| app.is_system)
+        {
+            return Err(AppError::Forbidden("Cannot delete system app".into()));
+        }
+        let config: HashMap<String, String> =
+            serde_json::from_str(original.custom_config.as_deref().unwrap_or("{}"))
+                .map_err(|_| AppError::BadRequest("Invalid stored operation config".into()))?;
+        let mut public_config = config.clone();
+        public_config.remove(QUEUED_GPU_KEY);
+        gpu::validate_custom_gpu_keys(&public_config)?;
+        if let Some(gpu) = config.get(QUEUED_GPU_KEY) {
+            if !matches!(original.app_name.as_str(), "plex" | "jellyfin") {
+                return Err(AppError::BadRequest("Invalid stored GPU app".into()));
+            }
+            serde_json::from_str::<Option<GpuSelection>>(gpu)
+                .map_err(|_| AppError::BadRequest("Invalid stored GPU selection".into()))?;
+        }
+        let now = Utc::now();
+        let new_id = Uuid::new_v4().to_string();
+        let changed = app_operation::Entity::update_many()
+            .col_expr(
+                app_operation::Column::Status,
+                sea_orm::sea_query::Expr::value(STATUS_RETRIED),
+            )
+            .col_expr(
+                app_operation::Column::Message,
+                sea_orm::sea_query::Expr::value(format!("Retried as {new_id}")),
+            )
+            .col_expr(
+                app_operation::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(app_operation::Column::Id.eq(id))
+            .filter(app_operation::Column::Status.eq(STATUS_FAILED))
+            .exec(&transaction)
+            .await?;
+        if changed.rows_affected != 1 {
+            return Err(AppError::Conflict("Operation already retried".into()));
+        }
+        let inserted = app_operation::ActiveModel {
+            id: Set(new_id.clone()),
+            app_name: Set(original.app_name.clone()),
+            operation: Set(original.operation.clone()),
+            status: Set(STATUS_QUEUED.into()),
+            stop_requested: Set(false),
+            message: Set(Some(format!("Retry of {id}"))),
+            error: Set(None),
+            custom_config: Set(original.custom_config.clone()),
+            attempts: Set(0),
+            created_by: Set(Some(actor_id)),
+            created_at: Set(now),
+            started_at: Set(None),
+            finished_at: Set(None),
+            updated_at: Set(now),
+        }
+        .insert(&transaction)
+        .await?;
+        self.mark_state_for_operation(
+            &transaction,
+            &original.app_name,
+            &original.operation,
+            &new_id,
+        )
+        .await?;
+        log_control(&transaction, &original, "retry", actor_id).await?;
+        log_queued(&transaction, &inserted).await?;
+        transaction.commit().await?;
+        Ok(inserted.into())
     }
 
     pub async fn list_states(&self) -> Result<Vec<AppStateResponse>> {
@@ -410,9 +679,9 @@ impl AppManager {
     ) {
         self.run_operation_loop_with(poll_interval, cancellation, {
             let manager = self.clone();
-            move |operation| {
+            move |operation, stop| {
                 let manager = manager.clone();
-                async move { manager.execute_operation(&operation).await }
+                async move { manager.execute_operation(&operation, &stop).await }
             }
         })
         .await;
@@ -424,7 +693,7 @@ impl AppManager {
         cancellation: CancellationToken,
         execute: F,
     ) where
-        F: Fn(app_operation::Model) -> Fut,
+        F: Fn(app_operation::Model, CancellationToken) -> Fut,
         Fut: Future<Output = Result<String>>,
     {
         let mut ticker = tokio::time::interval(poll_interval);
@@ -443,7 +712,7 @@ impl AppManager {
                         continue;
                     }
                     // Once claimed, an operation is deliberately allowed to finish during shutdown.
-                    if let Err(e) = self.process_next_operation_with(&execute).await {
+                    if let Err(e) = self.process_next_operation_with_stop(&execute, RUNNING_HEARTBEAT_INTERVAL).await {
                         tracing::error!(error = %e, "App worker operation loop failed");
                     }
                 }
@@ -451,6 +720,7 @@ impl AppManager {
         }
     }
 
+    #[cfg(test)]
     async fn process_next_operation_with<F, Fut>(&self, execute: F) -> Result<()>
     where
         F: FnOnce(app_operation::Model) -> Fut,
@@ -460,6 +730,7 @@ impl AppManager {
             .await
     }
 
+    #[cfg(test)]
     async fn process_next_operation_with_heartbeat<F, Fut>(
         &self,
         execute: F,
@@ -467,6 +738,19 @@ impl AppManager {
     ) -> Result<()>
     where
         F: FnOnce(app_operation::Model) -> Fut,
+        Fut: Future<Output = Result<String>>,
+    {
+        self.process_next_operation_with_stop(|operation, _| execute(operation), heartbeat_interval)
+            .await
+    }
+
+    async fn process_next_operation_with_stop<F, Fut>(
+        &self,
+        execute: F,
+        heartbeat_interval: Duration,
+    ) -> Result<()>
+    where
+        F: FnOnce(app_operation::Model, CancellationToken) -> Fut,
         Fut: Future<Output = Result<String>>,
     {
         let Some(operation) = self.claim_next_operation().await? else {
@@ -484,6 +768,7 @@ impl AppManager {
         // JoinSet aborts the heartbeat if this future is dropped (e.g. a panic).
         // Normal shutdown lets an already-claimed external operation finish.
         let heartbeat_stop = CancellationToken::new();
+        let stop = CancellationToken::new();
         let mut heartbeat = JoinSet::new();
         heartbeat.spawn(heartbeat_running_operation(
             self.db.clone(),
@@ -491,82 +776,142 @@ impl AppManager {
             heartbeat_interval,
             heartbeat_stop.clone(),
         ));
-        let result = execute(operation.clone()).await;
+        heartbeat.spawn(watch_stop(
+            self.db.clone(),
+            operation.id.clone(),
+            stop.clone(),
+        ));
+        let result = execute(operation.clone(), stop.clone()).await;
         heartbeat_stop.cancel();
+        // Do not stop the watcher until finalization has resolved the stop/success race.
+        let stopped = stop.is_cancelled();
+        let result = if stopped {
+            Err(AppError::Internal(STOP_ERROR.into()))
+        } else {
+            result
+        };
+        // The watcher exits when the row becomes terminal, or when we finish below.
+        // The heartbeat task exits immediately; the watcher is aborted on drop.
+        heartbeat.abort_all();
         if let Some(Err(error)) = heartbeat.join_next().await {
             tracing::error!(operation_id = %operation.id, %error, "App operation heartbeat task stopped unexpectedly");
         }
-        match result {
-            Ok(message) => {
-                if operation.operation != OP_RESTART {
-                    if let Err(error) = self
-                        .upsert_state(
-                            &operation.app_name,
-                            &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
-                                .namespace,
-                            desired_state_for_operation(&operation.operation),
-                            if operation.operation == OP_DELETE {
-                                OBS_NOT_INSTALLED
-                            } else {
-                                OBS_INSTALLING
-                            },
-                            false,
-                            Some(if operation.operation == OP_DELETE {
-                                "Removed".to_string()
-                            } else {
-                                message.clone()
-                            }),
-                            Some(operation.id.clone()),
-                            false,
-                        )
-                        .await
-                    {
-                        tracing::error!(operation_id = %operation.id, %error, "App state update failed after external success");
-                    }
-                }
-                self.finish_operation(&operation.id, STATUS_SUCCEEDED, Some(message), None)
-                    .await?;
-                if let Err(error) = self.reconcile_app(&operation.app_name).await {
-                    tracing::error!(operation_id = %operation.id, %error, "App reconcile failed after terminal commit");
-                }
-                tracing::info!(
-                    operation_id = %operation.id,
-                    app = %operation.app_name,
-                    operation = %operation.operation,
-                    "App operation finished"
-                );
-            }
-            Err(e) => {
-                let error = e.to_string();
-                self.finish_operation(
+        let stop_requested = app_operation::Entity::find_by_id(&operation.id)
+            .one(&self.db)
+            .await?
+            .is_some_and(|row| row.stop_requested);
+        if stop_requested {
+            self.finish_stopped(&operation).await?;
+        } else if stopped {
+            if !self
+                .finish_operation_if_unstopped(
                     &operation.id,
                     STATUS_FAILED,
-                    Some(format!("{} failed", operation.operation)),
-                    Some(error.clone()),
+                    Some(STOP_ERROR.into()),
+                    Some(STOP_ERROR.into()),
                 )
-                .await?;
-                if let Err(state_error) = self
-                    .upsert_state(
-                        &operation.app_name,
-                        &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
-                            .namespace,
-                        desired_state_for_operation(&operation.operation),
-                        OBS_FAILED,
-                        false,
-                        Some(error),
-                        Some(operation.id.clone()),
-                        false,
-                    )
-                    .await
-                {
-                    tracing::error!(operation_id = %operation.id, %state_error, "App failure state update failed after terminal commit");
+                .await?
+            {
+                self.finish_stopped(&operation).await?;
+            }
+        } else {
+            match result {
+                Ok(message) => {
+                    let won = self
+                        .finish_operation_if_unstopped(
+                            &operation.id,
+                            STATUS_SUCCEEDED,
+                            Some(message.clone()),
+                            None,
+                        )
+                        .await?;
+                    if won && operation.operation != OP_RESTART {
+                        if let Err(error) = self
+                            .upsert_state(
+                                &operation.app_name,
+                                &crate::services::catalog::lifecycle_for_app_name(
+                                    &operation.app_name,
+                                )
+                                .namespace,
+                                desired_state_for_operation(&operation.operation),
+                                if operation.operation == OP_DELETE {
+                                    OBS_NOT_INSTALLED
+                                } else {
+                                    OBS_INSTALLING
+                                },
+                                false,
+                                Some(if operation.operation == OP_DELETE {
+                                    "Removed".to_string()
+                                } else {
+                                    message.clone()
+                                }),
+                                Some(operation.id.clone()),
+                                false,
+                            )
+                            .await
+                        {
+                            tracing::error!(operation_id = %operation.id, %error, "App state update failed after external success");
+                        }
+                    }
+                    if won {
+                        if let Err(error) = self.reconcile_app(&operation.app_name).await {
+                            tracing::error!(operation_id = %operation.id, %error, "App reconcile failed after terminal commit");
+                        }
+                    } else {
+                        self.finish_stopped(&operation).await?;
+                    }
+                    tracing::info!(
+                        operation_id = %operation.id,
+                        app = %operation.app_name,
+                        operation = %operation.operation,
+                        "App operation finished"
+                    );
                 }
-                tracing::warn!(
-                    operation_id = %operation.id,
-                    app = %operation.app_name,
-                    operation = %operation.operation,
-                    "App operation failed"
-                );
+                Err(e) => {
+                    let error = e.to_string();
+                    let message = if error.contains("external outcome indeterminate") {
+                        "Helm deadline exceeded; external outcome indeterminate".to_string()
+                    } else {
+                        format!("{} failed", operation.operation)
+                    };
+                    let won = self
+                        .finish_operation_if_unstopped(
+                            &operation.id,
+                            STATUS_FAILED,
+                            Some(message),
+                            Some(error.clone()),
+                        )
+                        .await?;
+                    if !won {
+                        self.finish_stopped(&operation).await?;
+                    }
+                    if won {
+                        if let Err(state_error) = self
+                            .upsert_state(
+                                &operation.app_name,
+                                &crate::services::catalog::lifecycle_for_app_name(
+                                    &operation.app_name,
+                                )
+                                .namespace,
+                                desired_state_for_operation(&operation.operation),
+                                OBS_FAILED,
+                                false,
+                                Some(error),
+                                Some(operation.id.clone()),
+                                false,
+                            )
+                            .await
+                        {
+                            tracing::error!(operation_id = %operation.id, %state_error, "App failure state update failed after terminal commit");
+                        }
+                    }
+                    tracing::warn!(
+                        operation_id = %operation.id,
+                        app = %operation.app_name,
+                        operation = %operation.operation,
+                        "App operation failed"
+                    );
+                }
             }
         }
 
@@ -580,6 +925,7 @@ impl AppManager {
     async fn claim_next_operation(&self) -> Result<Option<app_operation::Model>> {
         let Some(operation) = app_operation::Entity::find()
             .filter(app_operation::Column::Status.eq(STATUS_QUEUED))
+            .filter(app_operation::Column::StopRequested.eq(false))
             .order_by_asc(app_operation::Column::CreatedAt)
             .one(&self.db)
             .await?
@@ -609,6 +955,7 @@ impl AppManager {
             .set(active)
             .filter(app_operation::Column::Id.eq(&id))
             .filter(app_operation::Column::Status.eq(STATUS_QUEUED))
+            .filter(app_operation::Column::StopRequested.eq(false))
             .exec(&self.db)
             .await?;
         if claimed.rows_affected == 0 {
@@ -617,7 +964,12 @@ impl AppManager {
         Ok(app_operation::Entity::find_by_id(id).one(&self.db).await?)
     }
 
-    async fn execute_operation(&self, operation: &app_operation::Model) -> Result<String> {
+    async fn execute_operation(
+        &self,
+        operation: &app_operation::Model,
+        stop: &CancellationToken,
+    ) -> Result<String> {
+        check_stop(stop)?;
         let k8s_guard = self.k8s_client.read().await;
         let client = k8s_guard
             .as_ref()
@@ -626,15 +978,18 @@ impl AppManager {
 
         match operation.operation.as_str() {
             OP_INSTALL | OP_UPDATE => {
-                self.execute_install_or_update(operation, client, &catalog)
+                self.execute_install_or_update(operation, client, &catalog, stop)
                     .await
             }
             OP_DELETE => {
                 let manager = DeploymentManager::new(client, &catalog);
-                manager.remove_app(&operation.app_name).await?;
+                manager
+                    .remove_app_with_stop(&operation.app_name, Some(stop))
+                    .await?;
                 Ok(format!("Removed {}", operation.app_name))
             }
             OP_RESTART => {
+                check_stop(stop)?;
                 self.restart_app(client, &operation.app_name).await?;
                 Ok(format!("Restarted {}", operation.app_name))
             }
@@ -650,12 +1005,18 @@ impl AppManager {
         operation: &app_operation::Model,
         client: &K8sClient,
         catalog: &AppCatalog,
+        stop: &CancellationToken,
     ) -> Result<String> {
-        let custom_config: HashMap<String, String> = operation
-            .custom_config
-            .as_deref()
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
+        // A malformed persisted request must fail rather than silently deploying
+        // with defaults (which can reset a queued GPU or other chart settings).
+        let mut custom_config = parse_queued_config(operation.custom_config.as_deref())?;
+        let gpu: Option<Option<GpuSelection>> = custom_config
+            .remove(QUEUED_GPU_KEY)
+            .map(|raw| {
+                serde_json::from_str(&raw)
+                    .map_err(|_| AppError::BadRequest("Invalid queued GPU selection".into()))
+            })
+            .transpose()?;
 
         let app_config = catalog.get_app(&operation.app_name).ok_or_else(|| {
             AppError::NotFound(format!("App '{}' not found in catalog", operation.app_name))
@@ -681,6 +1042,7 @@ impl AppManager {
         let request = DeploymentRequest {
             app_name: operation.app_name.clone(),
             custom_config,
+            gpu,
             reuse_values: operation.operation == OP_UPDATE,
             wait: !(operation.operation == OP_UPDATE && operation.app_name == "kubarr-worker"),
         };
@@ -689,7 +1051,10 @@ impl AppManager {
         } else {
             storage.as_ref()
         };
-        let status = manager.deploy_app(&request, deployment_storage).await?;
+        check_stop(stop)?;
+        let status = manager
+            .deploy_app_with_stop(&request, deployment_storage, Some(stop))
+            .await?;
 
         Ok(status.message)
     }
@@ -705,6 +1070,7 @@ impl AppManager {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn finish_operation(
         &self,
         id: &str,
@@ -712,6 +1078,49 @@ impl AppManager {
         message: Option<String>,
         error: Option<String>,
     ) -> Result<()> {
+        if !self
+            .finish_operation_if_unstopped(id, status, message, error)
+            .await?
+        {
+            return Err(AppError::Conflict(
+                "Operation stop requested or already completed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn finish_stopped(&self, operation: &app_operation::Model) -> Result<()> {
+        let transaction = self.db.begin().await?;
+        let now = Utc::now();
+        let changed = app_operation::Entity::update_many()
+            .col_expr(app_operation::Column::Status, STATUS_CANCELLED.into())
+            .col_expr(
+                app_operation::Column::Message,
+                "Stopped; external outcome indeterminate".into(),
+            )
+            .col_expr(app_operation::Column::Error, STOP_ERROR.into())
+            .col_expr(app_operation::Column::FinishedAt, now.into())
+            .col_expr(app_operation::Column::UpdatedAt, now.into())
+            .filter(app_operation::Column::Id.eq(&operation.id))
+            .filter(app_operation::Column::Status.eq(STATUS_RUNNING))
+            .filter(app_operation::Column::StopRequested.eq(true))
+            .exec(&transaction)
+            .await?;
+        if changed.rows_affected == 1 {
+            self.queue_terminal_audit(&transaction, operation, false, "indeterminate")
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn finish_operation_if_unstopped(
+        &self,
+        id: &str,
+        status: &str,
+        message: Option<String>,
+        error: Option<String>,
+    ) -> Result<bool> {
         let transaction = self.db.begin().await?;
         let operation = app_operation::Entity::find_by_id(id.to_string())
             .one(&transaction)
@@ -721,6 +1130,14 @@ impl AppManager {
         let mut active: app_operation::ActiveModel = operation.clone().into();
         active.status = Set(status.to_string());
         active.message = Set(message);
+        let phase = if error
+            .as_deref()
+            .is_some_and(|e| e.contains("external outcome indeterminate"))
+        {
+            "indeterminate"
+        } else {
+            "completed"
+        };
         active.error = Set(error);
         active.finished_at = Set(Some(now));
         active.updated_at = Set(now);
@@ -728,23 +1145,16 @@ impl AppManager {
             .set(active)
             .filter(app_operation::Column::Id.eq(id))
             .filter(app_operation::Column::Status.eq(STATUS_RUNNING))
+            .filter(app_operation::Column::StopRequested.eq(false))
             .exec(&transaction)
             .await?;
         if changed.rows_affected != 1 {
-            return Err(AppError::Internal(format!(
-                "Operation '{}' no longer running",
-                id
-            )));
+            return Ok(false);
         }
-        self.queue_terminal_audit(
-            &transaction,
-            &operation,
-            status == STATUS_SUCCEEDED,
-            "completed",
-        )
-        .await?;
+        self.queue_terminal_audit(&transaction, &operation, status == STATUS_SUCCEEDED, phase)
+            .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn queue_terminal_audit(
@@ -813,31 +1223,60 @@ impl AppManager {
             .all(&self.db)
             .await?;
         for operation in candidates {
-            let transaction = self.db.begin().await?;
-            let now = Utc::now();
-            let mut active: app_operation::ActiveModel = operation.clone().into();
-            active.status = Set(STATUS_FAILED.into());
-            active.message = Set(Some(
-                "Outcome indeterminate after worker interruption".into(),
-            ));
-            active.error = Set(Some(INTERRUPTED_LABEL.into()));
-            active.finished_at = Set(Some(now));
-            active.updated_at = Set(now);
-            let changed = app_operation::Entity::update_many()
-                .set(active)
-                .filter(app_operation::Column::Id.eq(&operation.id))
-                .filter(app_operation::Column::Status.eq(STATUS_RUNNING))
-                .filter(app_operation::Column::UpdatedAt.lt(cutoff))
-                .exec(&transaction)
-                .await?;
-            if changed.rows_affected == 0 {
-                continue;
-            }
-            self.queue_terminal_audit(&transaction, &operation, false, "indeterminate")
-                .await?;
-            transaction.commit().await?;
-            tracing::error!(operation_id = %operation.id, "Recovered interrupted app operation with unknown external outcome");
+            self.recover_stale_operation(operation, cutoff).await?;
         }
+        Ok(())
+    }
+
+    async fn recover_stale_operation(
+        &self,
+        operation: app_operation::Model,
+        cutoff: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let transaction = self.db.begin().await?;
+        let now = Utc::now();
+        let mut active: app_operation::ActiveModel = operation.clone().into();
+        active.status = Set(if operation.stop_requested {
+            STATUS_CANCELLED
+        } else {
+            STATUS_FAILED
+        }
+        .into());
+        active.message = Set(Some(
+            if operation.stop_requested {
+                "Stop requested; outcome indeterminate after worker interruption"
+            } else {
+                "Outcome indeterminate after worker interruption"
+            }
+            .into(),
+        ));
+        active.error = Set(Some(
+            if operation.stop_requested {
+                STOP_ERROR
+            } else {
+                INTERRUPTED_LABEL
+            }
+            .into(),
+        ));
+        active.finished_at = Set(Some(now));
+        active.updated_at = Set(now);
+        let changed = app_operation::Entity::update_many()
+            .set(active)
+            .filter(app_operation::Column::Id.eq(&operation.id))
+            .filter(app_operation::Column::Status.eq(STATUS_RUNNING))
+            // A concurrent cancel changes both this flag and updated_at. Never
+            // overwrite that request with the stale snapshot read above.
+            .filter(app_operation::Column::StopRequested.eq(operation.stop_requested))
+            .filter(app_operation::Column::UpdatedAt.lt(cutoff))
+            .exec(&transaction)
+            .await?;
+        if changed.rows_affected == 0 {
+            return Ok(());
+        }
+        self.queue_terminal_audit(&transaction, &operation, false, "indeterminate")
+            .await?;
+        transaction.commit().await?;
+        tracing::error!(operation_id = %operation.id, "Recovered interrupted app operation with unknown external outcome");
         Ok(())
     }
 
@@ -1195,6 +1634,39 @@ async fn heartbeat_running_operation(
     }
 }
 
+fn check_stop(stop: &CancellationToken) -> Result<()> {
+    if stop.is_cancelled() {
+        Err(AppError::Internal(STOP_ERROR.into()))
+    } else {
+        Ok(())
+    }
+}
+
+fn parse_queued_config(config: Option<&str>) -> Result<HashMap<String, String>> {
+    serde_json::from_str(config.unwrap_or("{}"))
+        .map_err(|_| AppError::BadRequest("Invalid queued operation config".into()))
+}
+
+async fn watch_stop(db: DatabaseConnection, id: String, stop: CancellationToken) {
+    let mut ticker = tokio::time::interval(STOP_POLL_INTERVAL);
+    loop {
+        ticker.tick().await;
+        match app_operation::Entity::find_by_id(&id).one(&db).await {
+            Ok(Some(row)) if row.stop_requested => {
+                stop.cancel();
+                break;
+            }
+            Ok(Some(row)) if row.status != STATUS_RUNNING => break,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                // Losing DB visibility cannot be interpreted as permission to continue Helm.
+                stop.cancel();
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "app_manager_tests.rs"]
 mod tests;
@@ -1232,6 +1704,20 @@ async fn log_queued<C: ConnectionTrait>(db: &C, operation: &app_operation::Model
         None,
     )
     .await?;
+    Ok(())
+}
+
+async fn log_control<C: ConnectionTrait>(
+    db: &C,
+    operation: &app_operation::Model,
+    action: &str,
+    actor_id: i64,
+) -> Result<()> {
+    let (_, username) = actor(db, Some(actor_id)).await?;
+    log_on_transaction(db, AuditAction::AppConfigured, ResourceType::App,
+        Some(operation.app_name.clone()), Some(actor_id), username,
+        Some(serde_json::json!({"operation_id": operation.id, "operation": operation.operation, "phase": action})),
+        None, None, true, None).await?;
     Ok(())
 }
 
@@ -1278,6 +1764,7 @@ impl From<app_operation::Model> for AppOperationResponse {
             app_name: model.app_name,
             operation: model.operation,
             status: model.status,
+            stop_requested: model.stop_requested,
             message: model.message,
             error: model.error,
             attempts: model.attempts,

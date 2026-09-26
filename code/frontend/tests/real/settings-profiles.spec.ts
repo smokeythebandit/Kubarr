@@ -16,7 +16,7 @@ test('manual DNS and staging certificate profiles persist through edit and delet
   await page.locator('form select').first().selectOption('manual');
   await page.getByRole('button', { name: 'Save Profile' }).click();
   await expect(page.getByText(dns, { exact: true })).toBeVisible();
-  let dnsRecord = (await getJson<Item[]>(page, '/api/domains/ddns-profiles')).find(item => item.name === dns);
+  const dnsRecord = (await getJson<Item[]>(page, '/api/domains/ddns-profiles')).find(item => item.name === dns);
   expect(dnsRecord?.id).toBeTruthy();
   await page.reload();
   await expect(page.getByText(dns, { exact: true })).toBeVisible();

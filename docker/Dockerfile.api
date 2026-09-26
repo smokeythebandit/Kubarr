@@ -22,7 +22,7 @@ COPY code/api/src ./src
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=api-target,target=/app/code/api/target,sharing=locked \
-    PROFILE_DIR=$(if [ "$PROFILE" = "release" ]; then echo "release"; else echo "$PROFILE"; fi) && \
+    PROFILE_DIR=$(if [ "$PROFILE" = "dev" ]; then echo "debug"; else echo "$PROFILE"; fi) && \
     rm -f "target/${PROFILE_DIR}/kubarr-api" "target/${PROFILE_DIR}/libkubarr"* 2>/dev/null || true && \
     find "target/${PROFILE_DIR}/deps" -maxdepth 1 \( -name 'kubarr_api*' -o -name 'kubarr*' -o -name 'libkubarr*' \) -delete 2>/dev/null || true && \
     touch src/lib.rs src/main.rs && \

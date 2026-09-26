@@ -4,6 +4,9 @@ import type { AppOperation } from '../types'
 interface OperationQueueProps {
   operations: AppOperation[]
   displayNames: Record<string, string>
+  canManage?: (operation: AppOperation) => boolean
+  pendingId?: string | null
+  onAction?: (action: 'pause' | 'resume' | 'cancel' | 'retry', operation: AppOperation) => void
 }
 
 const operationLabels: Record<string, string> = {
@@ -38,23 +41,38 @@ function OperationType({ operation }: { operation: AppOperation }) {
   )
 }
 
-export function OperationQueue({ operations, displayNames }: OperationQueueProps) {
+export function OperationQueue({ operations, displayNames, canManage, pendingId, onAction }: OperationQueueProps) {
   const sorted = [...operations].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
   const running = sorted.filter(operation => operation.status === 'running')
   const queued = sorted
     .filter(operation => operation.status === 'queued')
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+  const paused = sorted.filter(operation => operation.status === 'paused')
   const failed = sorted.filter(operation => operation.status === 'failed')
   const succeeded = sorted.filter(operation => operation.status === 'succeeded')
-  const activeCount = running.length + queued.length
+  const cancelled = sorted.filter(operation => operation.status === 'cancelled')
+  const retried = sorted.filter(operation => operation.status === 'retried')
+  const activeCount = running.length + queued.length + paused.length
+  const actionButton = (action: 'pause' | 'resume' | 'cancel' | 'retry', operation: AppOperation) => {
+    const runningStop = action === 'cancel' && operation.status === 'running'
+    const label = runningStop ? 'Request stop' : action[0].toUpperCase() + action.slice(1)
+    const requested = runningStop && operation.stop_requested
+    return <button type="button" key={action} disabled={!canManage?.(operation) || !onAction || !!pendingId || requested}
+      title={!canManage?.(operation) ? `Requires ${operation.operation === 'delete' ? 'apps.delete' : operation.operation === 'restart' ? 'apps.restart' : 'apps.install'} permission` : undefined}
+      onClick={() => onAction?.(action, operation)}
+      aria-label={`${requested ? 'Stop requested' : label} ${displayNames[operation.app_name] || operation.app_name} ${operation.operation}`}
+      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700">
+      {requested ? 'Stop requested' : pendingId === operation.id && runningStop ? 'Requesting stop…' : `${label}${pendingId === operation.id ? '…' : ''}`}
+    </button>
+  }
 
   return (
     <div className="space-y-6">
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-950 text-white shadow-sm dark:border-slate-700">
         <div className="grid gap-px bg-white/10 sm:grid-cols-2 xl:grid-cols-4">
           {[
-            { label: 'Active', value: activeCount, detail: `${running.length} running`, icon: LoaderCircle, color: 'text-sky-300' },
-            { label: 'Queued', value: queued.length, detail: 'Waiting for worker', icon: Clock3, color: 'text-amber-300' },
+              { label: 'Active', value: activeCount, detail: `${running.length} running, ${paused.length} paused`, icon: LoaderCircle, color: 'text-sky-300' },
+              { label: 'Queued', value: queued.length, detail: 'Waiting for worker', icon: Clock3, color: 'text-amber-300' },
             { label: 'Succeeded', value: succeeded.length, detail: 'Recorded operations', icon: CheckCircle2, color: 'text-emerald-300' },
             { label: 'Failed', value: failed.length, detail: 'Needs attention', icon: AlertTriangle, color: 'text-rose-300' },
           ].map(({ label, value, detail, icon: Icon, color }) => (
@@ -99,12 +117,16 @@ export function OperationQueue({ operations, displayNames }: OperationQueueProps
                         <h3 className="font-semibold text-slate-950 dark:text-white">{displayNames[operation.app_name] || operation.app_name}</h3>
                         <OperationType operation={operation} />
                       </div>
-                      <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">{operation.message || `${operationLabels[operation.operation] || operation.operation} in progress`}</p>
+                      <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">{operation.stop_requested ? 'Stop requested; awaiting worker outcome' : operation.message || `${operationLabels[operation.operation] || operation.operation} in progress`}</p>
                     </div>
                     <div className="text-right">
                       <div className="text-sm font-semibold tabular-nums text-sky-700 dark:text-sky-300">{formatDuration(operation.started_at)}</div>
-                      <div className="mt-1 text-xs text-slate-500">Attempt {operation.attempts + 1}</div>
+                      <div className="mt-1 text-xs text-slate-500">Attempt {operation.attempts}</div>
                     </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    {actionButton('cancel', operation)}
+                    <span className="text-xs text-slate-500 dark:text-slate-400">{operation.stop_requested ? 'Awaiting worker confirmation. External changes may already have occurred; inspect the app after completion.' : 'Requests a cooperative stop, not a rollback. Helm or Kubernetes changes may already have occurred; the final outcome can be indeterminate.'}</span>
                   </div>
                   <dl className="mt-4 grid gap-3 rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/70 sm:grid-cols-3">
                     <div><dt className="text-slate-500">Created</dt><dd className="mt-1 font-medium text-slate-700 dark:text-slate-200">{formatTimestamp(operation.created_at)}</dd></div>
@@ -123,21 +145,22 @@ export function OperationQueue({ operations, displayNames }: OperationQueueProps
         <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
           <div className="border-b border-slate-200 px-5 py-4 dark:border-slate-700">
             <h2 className="font-semibold text-slate-950 dark:text-white">Waiting queue</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Processed in submission order</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Queued work runs in submission order; paused work waits for resumption</p>
           </div>
-          {queued.length === 0 ? (
+          {queued.length + paused.length === 0 ? (
             <p className="px-5 py-10 text-center text-sm text-slate-500 dark:text-slate-400">No operations are waiting.</p>
           ) : (
             <ol className="divide-y divide-slate-200 dark:divide-slate-700">
-              {queued.map((operation, index) => (
+              {[...queued, ...paused].map((operation, index) => (
                 <li key={operation.id} className="flex gap-3 px-5 py-4">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-sm font-bold text-amber-700 dark:text-amber-300">{index + 1}</span>
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-sm font-bold text-amber-700 dark:text-amber-300">{operation.status === 'paused' ? 'Ⅱ' : index + 1}</span>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="truncate font-medium text-slate-900 dark:text-white">{displayNames[operation.app_name] || operation.app_name}</span>
                       <OperationType operation={operation} />
                     </div>
-                    <p className="mt-1 text-xs text-slate-500">Queued {formatTimestamp(operation.created_at)}</p>
+                    <p className="mt-1 text-xs text-slate-500">{operation.status === 'paused' ? 'Paused' : 'Queued'} · created {formatTimestamp(operation.created_at)}</p>
+                    <div className="mt-2 flex gap-2">{actionButton(operation.status === 'paused' ? 'resume' : 'pause', operation)}{actionButton('cancel', operation)}</div>
                   </div>
                 </li>
               ))}
@@ -150,11 +173,11 @@ export function OperationQueue({ operations, displayNames }: OperationQueueProps
         <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 px-5 py-4 dark:border-slate-700">
           <div>
             <h2 className="font-semibold text-slate-950 dark:text-white">Operation history</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Completed and failed worker requests</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Completed, cancelled and failed worker requests</p>
           </div>
-          <span className="ml-auto text-xs text-slate-500">{failed.length + succeeded.length} records</span>
+          <span className="ml-auto text-xs text-slate-500">{failed.length + succeeded.length + cancelled.length + retried.length} records</span>
         </div>
-        {failed.length + succeeded.length === 0 ? (
+        {failed.length + succeeded.length + cancelled.length + retried.length === 0 ? (
           <p className="px-5 py-10 text-center text-sm text-slate-500 dark:text-slate-400">No completed operations yet.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -163,16 +186,17 @@ export function OperationQueue({ operations, displayNames }: OperationQueueProps
                 <tr><th className="px-5 py-3 font-semibold">Application</th><th className="px-5 py-3 font-semibold">Action</th><th className="px-5 py-3 font-semibold">Result</th><th className="px-5 py-3 font-semibold">Duration</th><th className="px-5 py-3 font-semibold">Finished</th><th className="px-5 py-3 font-semibold">Detail</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
-                {[...failed, ...succeeded].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()).map(operation => {
+                {[...failed, ...succeeded, ...cancelled, ...retried].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()).map(operation => {
                   const isFailed = operation.status === 'failed'
+                  const isRetried = operation.status === 'retried'
                   return (
                     <tr key={operation.id} className="align-top">
                       <td className="whitespace-nowrap px-5 py-4 font-medium text-slate-900 dark:text-white">{displayNames[operation.app_name] || operation.app_name}</td>
                       <td className="px-5 py-4"><OperationType operation={operation} /></td>
-                      <td className="px-5 py-4"><span className={`inline-flex items-center gap-1.5 font-medium ${isFailed ? 'text-rose-600 dark:text-rose-300' : 'text-emerald-600 dark:text-emerald-300'}`}>{isFailed ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}{isFailed ? 'Failed' : 'Succeeded'}</span></td>
+                      <td className="px-5 py-4"><span className={`inline-flex items-center gap-1.5 font-medium ${isFailed ? 'text-rose-600 dark:text-rose-300' : operation.status === 'cancelled' || isRetried ? 'text-slate-500' : 'text-emerald-600 dark:text-emerald-300'}`}>{isFailed ? <AlertTriangle size={15} /> : operation.status === 'cancelled' || isRetried ? <Clock3 size={15} /> : <CheckCircle2 size={15} />}{isRetried ? 'Retried' : isFailed ? 'Failed' : operation.status === 'cancelled' ? 'Cancelled' : 'Succeeded'}</span></td>
                       <td className="whitespace-nowrap px-5 py-4 tabular-nums text-slate-600 dark:text-slate-300">{formatDuration(operation.started_at, operation.finished_at || operation.updated_at)}</td>
                       <td className="whitespace-nowrap px-5 py-4 text-slate-500">{formatTimestamp(operation.finished_at || operation.updated_at)}</td>
-                      <td className={`max-w-sm px-5 py-4 ${isFailed ? 'text-rose-600 dark:text-rose-300' : 'text-slate-500 dark:text-slate-400'}`}>{operation.error || operation.message || 'Completed successfully'}</td>
+                      <td className={`max-w-sm px-5 py-4 ${isFailed ? 'text-rose-600 dark:text-rose-300' : 'text-slate-500 dark:text-slate-400'}`}>{isRetried ? (operation.message || 'Retried; a new operation was queued.') : operation.error || operation.message || (operation.status === 'cancelled' ? 'Cancelled' : 'Completed successfully')}{isFailed && <div className="mt-2">{actionButton('retry', operation)}</div>}</td>
                     </tr>
                   )
                 })}

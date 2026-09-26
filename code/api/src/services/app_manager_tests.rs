@@ -58,6 +58,264 @@ async fn audits(manager: &AppManager) -> Vec<audit_log::Model> {
 }
 
 #[tokio::test]
+async fn controls_compete_with_claim_and_only_queued_work_executes() {
+    let manager = setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_RESTART, HashMap::new(), None)
+        .await
+        .unwrap();
+    let (claim, pause) = tokio::join!(
+        manager.claim_operation(operation(&manager, &queued.id).await),
+        manager.control_operation(&queued.id, "pause", 1)
+    );
+    assert_ne!(claim.unwrap().is_some(), pause.is_ok());
+    if pause.is_ok() {
+        assert!(manager.claim_next_operation().await.unwrap().is_none());
+        manager
+            .control_operation(&queued.id, "resume", 1)
+            .await
+            .unwrap();
+        assert!(manager.claim_next_operation().await.unwrap().is_some());
+    } else {
+        assert!(
+            manager
+                .control_operation(&queued.id, "cancel", 1)
+                .await
+                .unwrap()
+                .stop_requested
+        );
+        assert!(manager
+            .control_operation(&queued.id, "pause", 1)
+            .await
+            .is_err());
+    }
+    let second = manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), None)
+        .await
+        .unwrap();
+    manager
+        .control_operation(&second.id, "pause", 1)
+        .await
+        .unwrap();
+    manager
+        .control_operation(&second.id, "cancel", 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        operation(&manager, &second.id).await.status,
+        STATUS_CANCELLED
+    );
+    assert!(manager
+        .claim_operation(operation(&manager, &second.id).await)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn running_stop_wins_completion_and_cannot_be_retried() {
+    let manager = Arc::new(setup().await);
+    let queued = manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), None)
+        .await
+        .unwrap();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let task = tokio::spawn({
+        let manager = manager.clone();
+        let started = started.clone();
+        let release = release.clone();
+        async move {
+            manager
+                .process_next_operation_with(move |_| async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok("Helm returned success".into())
+                })
+                .await
+        }
+    });
+    started.notified().await;
+    let requested = manager
+        .control_operation(&queued.id, "cancel", 7)
+        .await
+        .unwrap();
+    assert_eq!(requested.status, STATUS_RUNNING);
+    assert_eq!(requested.message.as_deref(), Some("Stop requested"));
+    assert!(requested.stop_requested);
+    assert!(requested.finished_at.is_none());
+    assert!(manager
+        .control_operation(&queued.id, "cancel", 7)
+        .await
+        .is_err());
+    release.notify_one();
+    task.await.unwrap().unwrap();
+    let stopped = operation(&manager, &queued.id).await;
+    assert_eq!(stopped.status, STATUS_CANCELLED);
+    assert!(stopped.error.unwrap().contains("indeterminate"));
+    assert!(manager.retry_operation(&queued.id, 7).await.is_err());
+    assert_ne!(
+        state(&manager).await.message.as_deref(),
+        Some("Helm returned success")
+    );
+    assert_eq!(
+        audit_outbox::Entity::find_by_id(&queued.id)
+            .one(&manager.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "indeterminate"
+    );
+}
+
+#[tokio::test]
+async fn stale_requested_stop_is_terminal_without_replay() {
+    let manager = setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_DELETE, HashMap::new(), None)
+        .await
+        .unwrap();
+    manager.claim_next_operation().await.unwrap().unwrap();
+    manager
+        .control_operation(&queued.id, "cancel", 1)
+        .await
+        .unwrap();
+    let mut stale: app_operation::ActiveModel = operation(&manager, &queued.id).await.into();
+    stale.updated_at = Set(Utc::now() - chrono::Duration::minutes(16));
+    stale.update(&manager.db).await.unwrap();
+    manager.recover_stale_operations().await.unwrap();
+    assert_eq!(
+        operation(&manager, &queued.id).await.status,
+        STATUS_CANCELLED
+    );
+    assert!(manager.claim_next_operation().await.unwrap().is_none());
+    assert!(manager.retry_operation(&queued.id, 1).await.is_err());
+}
+
+#[tokio::test]
+async fn stale_recovery_snapshot_cannot_erase_a_new_stop_request() {
+    let manager = setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_DELETE, HashMap::new(), None)
+        .await
+        .unwrap();
+    manager.claim_next_operation().await.unwrap().unwrap();
+    let cutoff = Utc::now() - STALE_RUNNING_AFTER;
+    let mut stale: app_operation::ActiveModel = operation(&manager, &queued.id).await.into();
+    stale.updated_at = Set(cutoff - chrono::Duration::seconds(1));
+    stale.update(&manager.db).await.unwrap();
+    let snapshot = operation(&manager, &queued.id).await;
+    manager
+        .control_operation(&queued.id, "cancel", 1)
+        .await
+        .unwrap();
+    manager
+        .recover_stale_operation(snapshot, cutoff)
+        .await
+        .unwrap();
+    let current = operation(&manager, &queued.id).await;
+    assert_eq!(current.status, STATUS_RUNNING);
+    assert!(current.stop_requested);
+    assert!(current.finished_at.is_none());
+    assert!(audit_outbox::Entity::find_by_id(&queued.id)
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn corrupt_queued_configuration_is_rejected_instead_of_resetting_chart_values() {
+    assert!(parse_queued_config(Some("not json")).is_err());
+    assert!(parse_queued_config(Some(r#"{"gpu.enabled":true}"#)).is_err());
+    assert_eq!(parse_queued_config(Some("{}")).unwrap(), HashMap::new());
+}
+
+#[tokio::test]
+async fn retry_is_single_use_and_preserves_gpu_queue_input_and_new_actor() {
+    let manager = setup().await;
+    let mut plex = manager.catalog.read().await.get_app(APP).unwrap().clone();
+    plex.name = "plex".into();
+    *manager.catalog.write().await = AppCatalog::with_apps(HashMap::from([("plex".into(), plex)]));
+    let config = HashMap::from([(QUEUED_GPU_KEY.into(), "null".into())]);
+    let failed = manager
+        .enqueue_operation_unchecked("plex", OP_UPDATE, config, None)
+        .await
+        .unwrap();
+    manager
+        .claim_operation(operation(&manager, &failed.id).await)
+        .await
+        .unwrap();
+    manager
+        .finish_operation(&failed.id, STATUS_FAILED, None, Some("error".into()))
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        manager.retry_operation(&failed.id, 3),
+        manager.retry_operation(&failed.id, 4)
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    let new = a.or(b).unwrap();
+    assert_eq!(new.status, STATUS_QUEUED);
+    assert!(new.created_by == Some(3) || new.created_by == Some(4));
+    assert_eq!(
+        operation(&manager, &new.id).await.custom_config,
+        operation(&manager, &failed.id).await.custom_config
+    );
+    assert_eq!(operation(&manager, &failed.id).await.status, STATUS_RETRIED);
+    assert_eq!(
+        app_state::Entity::find_by_id("plex")
+            .one(&manager.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_operation_id
+            .as_deref(),
+        Some(new.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn gpu_disable_survives_queue_and_managed_override_cannot_be_enqueued() {
+    let manager = setup().await;
+    let mut plex = manager.catalog.read().await.get_app(APP).unwrap().clone();
+    plex.name = "plex".into();
+    *manager.catalog.write().await = AppCatalog::with_apps(HashMap::from([("plex".into(), plex)]));
+    let queued = manager
+        .enqueue_gpu_operation("plex", OP_UPDATE, HashMap::new(), Some(None), None)
+        .await
+        .unwrap();
+    let config: HashMap<String, String> = serde_json::from_str(
+        operation(&manager, &queued.id)
+            .await
+            .custom_config
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config.get(QUEUED_GPU_KEY).map(String::as_str), Some("null"));
+    for config in [
+        HashMap::from([(QUEUED_GPU_KEY.into(), "null".into())]),
+        HashMap::from([("gpu.enabled".into(), "true".into())]),
+        HashMap::from([("image.tag".into(), "stable,gpu.enabled=true".into())]),
+    ] {
+        assert!(manager
+            .enqueue_operation("plex", OP_INSTALL, config, None)
+            .await
+            .is_err());
+    }
+    assert_eq!(
+        app_operation::Entity::find()
+            .all(&manager.db)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn audit_enqueue_and_terminal_correlate_without_exposing_config_or_errors() {
     for (kind, action) in [
         (OP_INSTALL, "app_installed"),
@@ -605,7 +863,8 @@ async fn worker_success_persists_claim_and_completion_for_each_operation() {
                 }
             );
             assert!(current.updated_at >= claimed.updated_at);
-            assert!(current.updated_at <= finished.updated_at);
+            // Success state is published only after terminal CAS wins.
+            assert!(current.updated_at >= finished.updated_at);
         }
         manager
             .process_next_operation_with(|_| async { panic!("terminal operation was re-executed") })
@@ -793,7 +1052,7 @@ async fn cancelled_operation_loop_does_not_claim_queued_work() {
     let calls = AtomicUsize::new(0);
 
     manager
-        .run_operation_loop_with(Duration::from_millis(1), cancellation, |_| async {
+        .run_operation_loop_with(Duration::from_millis(1), cancellation, |_, _| async {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok("unexpected execution".into())
         })
@@ -829,7 +1088,7 @@ async fn cancelled_operation_loop_drains_claimed_work_without_claiming_next() {
         let calls = calls.clone();
         async move {
             manager
-                .run_operation_loop_with(Duration::from_millis(1), cancellation, move |_| {
+                .run_operation_loop_with(Duration::from_millis(1), cancellation, move |_, _| {
                     let started = started.clone();
                     let finish = finish.clone();
                     let calls = calls.clone();

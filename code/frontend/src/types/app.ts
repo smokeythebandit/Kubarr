@@ -33,6 +33,13 @@ export interface DeploymentRequest {
   app_name: string;
   namespace?: string;
   custom_config?: Record<string, any>;
+  gpu?: GpuSelection;
+}
+
+export interface GpuSelection {
+  vendor: 'intel' | 'nvidia' | 'amd';
+  node_name: string;
+  resource_name: string;
 }
 
 export interface DeploymentStatus {
@@ -47,7 +54,8 @@ export interface AppOperation {
   id: string;
   app_name: string;
   operation: 'install' | 'update' | 'delete' | 'restart' | string;
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | string;
+  status: 'queued' | 'paused' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'retried' | string;
+  stop_requested: boolean;
   message: string | null;
   error: string | null;
   attempts: number;

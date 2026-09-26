@@ -7,6 +7,13 @@ import AppsPage from './AppsPage'
 
 const mocks = vi.hoisted(() => ({
   restart: vi.fn(),
+  install: vi.fn(),
+  update: vi.fn(),
+  getGpus: vi.fn(),
+  pauseOperation: vi.fn(),
+  resumeOperation: vi.fn(),
+  cancelOperation: vi.fn(),
+  retryOperation: vi.fn(),
   getOperations: vi.fn(),
   listProviders: vi.fn(),
   getVpnConfig: vi.fn(),
@@ -16,6 +23,10 @@ const mocks = vi.hoisted(() => ({
   removeVpn: vi.fn(),
   refreshAppStatuses: vi.fn(),
   canRestart: true,
+  canInstall: true,
+  canDelete: false,
+  showPlex: false,
+  plexInstalled: false,
   canViewVpn: false,
   canManageVpn: false,
 }))
@@ -25,9 +36,14 @@ vi.mock('../api/apps', () => ({
     getSyncStatus: vi.fn().mockResolvedValue({ last_synced: null }),
     getOperations: (...args: unknown[]) => mocks.getOperations(...args),
     restart: (...args: unknown[]) => mocks.restart(...args),
+    pauseOperation: (...args: unknown[]) => mocks.pauseOperation(...args),
+    resumeOperation: (...args: unknown[]) => mocks.resumeOperation(...args),
+    cancelOperation: (...args: unknown[]) => mocks.cancelOperation(...args),
+    retryOperation: (...args: unknown[]) => mocks.retryOperation(...args),
     syncCatalog: vi.fn(),
-    install: vi.fn(),
-    update: vi.fn(),
+    install: (...args: unknown[]) => mocks.install(...args),
+    update: (...args: unknown[]) => mocks.update(...args),
+    getGpus: (...args: unknown[]) => mocks.getGpus(...args),
     delete: vi.fn(),
     logAccess: vi.fn().mockResolvedValue(undefined),
   },
@@ -61,6 +77,8 @@ vi.mock('../contexts/AuthContext', () => ({
   useAuth: () => ({
     hasPermission: (permission: string) => {
       if (permission === 'apps.restart') return mocks.canRestart
+      if (permission === 'apps.install') return mocks.canInstall
+      if (permission === 'apps.delete') return mocks.canDelete
       if (permission === 'vpn.view') return mocks.canViewVpn
       if (permission === 'vpn.manage') return mocks.canManageVpn
       return false
@@ -110,6 +128,7 @@ const queuedRestart: AppOperation = {
   app_name: 'sonarr',
   operation: 'restart',
   status: 'queued',
+  stop_requested: false,
   message: null,
   error: null,
   attempts: 0,
@@ -122,9 +141,9 @@ const queuedRestart: AppOperation = {
 
 vi.mock('../contexts/MonitoringContext', () => ({
   useMonitoring: () => ({
-    catalog: [app],
-    installedApps: ['sonarr'],
-    appStates: { sonarr: appState },
+    catalog: mocks.showPlex ? [app, { ...app, name: 'plex', display_name: 'Plex' }] : [app],
+    installedApps: mocks.plexInstalled ? ['sonarr', 'plex'] : ['sonarr'],
+    appStates: mocks.plexInstalled ? { sonarr: appState, plex: { ...appState, app_name: 'plex' } } : { sonarr: appState },
     appStatuses: { sonarr: { healthy: true, loading: false, pods: [] } },
     refreshAppStatuses: mocks.refreshAppStatuses,
   }),
@@ -192,6 +211,145 @@ describe('AppsPage restart action', () => {
 
     fireEvent.click(restart)
     expect(mocks.restart).not.toHaveBeenCalled()
+  })
+})
+
+describe('AppsPage operation controls', () => {
+  beforeEach(() => {
+    mocks.canInstall = true
+    mocks.canRestart = true
+    mocks.canDelete = false
+    mocks.canViewVpn = false
+    mocks.getOperations.mockReset()
+    mocks.pauseOperation.mockReset()
+    mocks.resumeOperation.mockReset()
+    mocks.cancelOperation.mockReset()
+    mocks.retryOperation.mockReset()
+    mocks.refreshAppStatuses.mockReset()
+  })
+
+  it('pauses a queued operation and invalidates operation and app state', async () => {
+    mocks.getOperations.mockResolvedValue([queuedRestart])
+    mocks.pauseOperation.mockResolvedValue({ ...queuedRestart, status: 'paused' })
+    const { queryClient } = renderPage()
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+    fireEvent.click(screen.getByRole('button', { name: 'Operations' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause Sonarr restart' }))
+    await waitFor(() => expect(mocks.pauseOperation).toHaveBeenCalledWith('restart-1'))
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['app-operations'] }))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['apps', 'states'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['apps', 'installed'] })
+  })
+
+  it('permits restart controls without install permission, but not delete controls', async () => {
+    mocks.canInstall = false
+    mocks.getOperations.mockResolvedValue([queuedRestart, { ...queuedRestart, id: 'delete-1', operation: 'delete' }])
+    mocks.pauseOperation.mockResolvedValue({ ...queuedRestart, status: 'paused' })
+    renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Operations' }))
+    const restartPause = await screen.findByRole('button', { name: 'Pause Sonarr restart' })
+    expect(restartPause).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Pause Sonarr delete' })).toBeDisabled()
+    fireEvent.click(restartPause)
+    await waitFor(() => expect(mocks.pauseOperation).toHaveBeenCalledWith('restart-1'))
+  })
+
+  it('confirms a running stop request and displays the accepted request without claiming cancellation', async () => {
+    const running = { ...queuedRestart, status: 'running' }
+    const requested = { ...running, stop_requested: true, message: 'Stop requested' }
+    mocks.getOperations.mockResolvedValueOnce([running]).mockResolvedValue([requested])
+    let resolve!: (value: AppOperation) => void
+    mocks.cancelOperation.mockReturnValue(new Promise<AppOperation>(done => { resolve = done }))
+    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true)
+    vi.stubGlobal('confirm', confirm)
+    renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Operations' }))
+    const stop = await screen.findByRole('button', { name: 'Request stop Sonarr restart' })
+    fireEvent.click(stop)
+    expect(mocks.cancelOperation).not.toHaveBeenCalled()
+    fireEvent.click(stop)
+    await waitFor(() => expect(mocks.cancelOperation).toHaveBeenCalledWith('restart-1'))
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('cannot roll back'))
+    expect(screen.getByText('Requesting stop…')).toBeInTheDocument()
+    expect(stop).toBeDisabled()
+    resolve(requested)
+    expect(await screen.findByRole('button', { name: 'Stop requested Sonarr restart' })).toBeDisabled()
+    expect(screen.getByText('Stop requested; awaiting worker outcome')).toBeInTheDocument()
+    expect(screen.queryByText('Cancelled')).not.toBeInTheDocument()
+    expect(mocks.cancelOperation).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: /Pause Sonarr restart/ })).not.toBeInTheDocument()
+    vi.unstubAllGlobals()
+  })
+
+  it('requires the original operation permission to request a running stop', async () => {
+    mocks.canRestart = false
+    mocks.getOperations.mockResolvedValue([{ ...queuedRestart, status: 'running' }])
+    renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Operations' }))
+    expect(await screen.findByRole('button', { name: 'Request stop Sonarr restart' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Request stop Sonarr restart' })).toHaveAttribute('title', 'Requires apps.restart permission')
+  })
+
+  it('requires confirmation before retrying a failed action and blocks it without permission', async () => {
+    mocks.getOperations.mockResolvedValue([{ ...queuedRestart, status: 'failed', operation: 'delete' }])
+    mocks.retryOperation.mockResolvedValue({ ...queuedRestart, id: 'new-retry' })
+    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true)
+    vi.stubGlobal('confirm', confirm)
+    const { unmount } = renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Operations' }))
+    const retry = await screen.findByRole('button', { name: 'Retry Sonarr delete' })
+    expect(retry).toBeDisabled()
+    mocks.canDelete = true
+    unmount()
+    const { unmount: unmountAllowed } = renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Operations' }))
+    const allowedRetry = await screen.findByRole('button', { name: 'Retry Sonarr delete' })
+    fireEvent.click(allowedRetry)
+    expect(mocks.retryOperation).not.toHaveBeenCalled()
+    fireEvent.click(allowedRetry)
+    await waitFor(() => expect(mocks.retryOperation).toHaveBeenCalledWith('restart-1'))
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('partially changed'))
+    unmountAllowed()
+    mocks.canDelete = false
+    renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Operations' }))
+    expect(await screen.findByRole('button', { name: 'Retry Sonarr delete' })).toBeDisabled()
+    vi.unstubAllGlobals()
+  })
+})
+
+describe('AppsPage GPU requests', () => {
+  beforeEach(() => {
+    mocks.showPlex = true
+    mocks.plexInstalled = false
+    mocks.canInstall = true
+    mocks.getOperations.mockResolvedValue([])
+    mocks.getGpus.mockResolvedValue([{ name: 'gpu-node', ready: true, schedulable: true, allocatable: { 'gpu.intel.com/i915': 1 } }])
+    mocks.install.mockReset()
+    mocks.update.mockReset()
+  })
+
+  it('sends the selected GPU in a Plex install request', async () => {
+    mocks.install.mockResolvedValue({ ...queuedRestart, app_name: 'plex', operation: 'install' })
+    renderPage()
+    fireEvent.click(await screen.findByRole('heading', { name: 'Plex', level: 3 }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Install', exact: true })[0])
+    fireEvent.click(screen.getByRole('checkbox', { name: /Enable hardware acceleration/ }))
+    const select = await screen.findByRole('combobox', { name: 'GPU node and resource' })
+    await waitFor(() => expect(select).toBeEnabled())
+    fireEvent.change(select, { target: { value: JSON.stringify({ vendor: 'intel', node_name: 'gpu-node', resource_name: 'gpu.intel.com/i915' }) } })
+    fireEvent.click(screen.getByRole('dialog').querySelector('button:last-child')!)
+    await waitFor(() => expect(mocks.install).toHaveBeenCalledWith({ app_name: 'plex', namespace: 'plex', gpu: { vendor: 'intel', node_name: 'gpu-node', resource_name: 'gpu.intel.com/i915' } }))
+  })
+
+  it('sends explicit null when disabling GPU on an installed Plex app', async () => {
+    mocks.plexInstalled = true
+    mocks.update.mockResolvedValue({ ...queuedRestart, app_name: 'plex', operation: 'update' })
+    renderPage()
+    fireEvent.click(await screen.findByRole('heading', { name: 'Plex', level: 3 }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'GPU settings' })[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Disable GPU' }))
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('plex', null))
   })
 })
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::process::Command;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
@@ -13,9 +13,12 @@ use crate::config::CONFIG;
 use crate::error::{AppError, Result};
 use crate::models::{app_state, app_vpn_config};
 use crate::services::catalog::{kubarr_system_component, lifecycle_for_app_name, AppCatalog};
+use crate::services::gpu::{self, GpuSelection};
+use crate::services::helm_process;
 use crate::services::storage_config::{self, PersistedStorageConfig};
 use crate::services::vpn;
 use crate::services::K8sClient;
+use tokio_util::sync::CancellationToken;
 
 /// Deployment request
 #[derive(Debug, Clone, Deserialize)]
@@ -23,6 +26,8 @@ pub struct DeploymentRequest {
     pub app_name: String,
     #[serde(default)]
     pub custom_config: HashMap<String, String>,
+    #[serde(default, deserialize_with = "gpu::gpu_field")]
+    pub gpu: Option<Option<GpuSelection>>,
     #[serde(default)]
     pub reuse_values: bool,
     #[serde(default = "default_wait")]
@@ -85,10 +90,21 @@ impl<'a> DeploymentManager<'a> {
 
     /// Run a Helm command
     fn run_helm_command(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("helm")
-            .args(args)
-            .output()
-            .map_err(|e| AppError::Internal(format!("Failed to run helm: {}", e)))?;
+        self.run_helm_command_with_stop(args, None)
+    }
+
+    fn run_helm_command_with_stop(
+        &self,
+        args: &[&str],
+        stop: Option<&CancellationToken>,
+    ) -> Result<String> {
+        let timeout = if args.first() == Some(&"uninstall") {
+            Duration::from_secs(120)
+        } else {
+            Duration::from_secs(12 * 60)
+        };
+        let output =
+            tokio::task::block_in_place(|| helm_process::run_with_stop(args, timeout, stop))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -112,10 +128,8 @@ impl<'a> DeploymentManager<'a> {
         lifecycle: &crate::services::catalog::AppLifecycleConfig,
     ) -> Result<Option<ReleaseMetadata>> {
         self.release_metadata_with_command(lifecycle, |args| {
-            let output = Command::new("helm")
-                .args(args)
-                .output()
-                .map_err(|error| AppError::Internal(format!("Failed to run helm: {error}")))?;
+            let output =
+                tokio::task::block_in_place(|| helm_process::run(args, Duration::from_secs(30)))?;
             if output.status.success() {
                 return Ok(Some(output.stdout));
             }
@@ -164,6 +178,25 @@ impl<'a> DeploymentManager<'a> {
             .await
     }
 
+    pub async fn deploy_app_with_stop(
+        &self,
+        request: &DeploymentRequest,
+        storage_config: Option<&PersistedStorageConfig>,
+        stop: Option<&CancellationToken>,
+    ) -> Result<DeploymentStatus> {
+        let result = self
+            .deploy_app_with_command(request, storage_config, |args| {
+                self.run_helm_command_with_stop(args, stop)
+            })
+            .await?;
+        if stop.is_some_and(CancellationToken::is_cancelled) {
+            return Err(AppError::Internal(
+                "Stop requested; external outcome indeterminate".into(),
+            ));
+        }
+        Ok(result)
+    }
+
     async fn deploy_app_with_command(
         &self,
         request: &DeploymentRequest,
@@ -176,6 +209,19 @@ impl<'a> DeploymentManager<'a> {
         })?;
 
         validate_custom_config(&request.custom_config)?;
+        if request.gpu.is_some() && !matches!(request.app_name.as_str(), "plex" | "jellyfin") {
+            return Err(AppError::BadRequest(
+                "GPU is supported only for Plex and Jellyfin".into(),
+            ));
+        }
+        if request.gpu.is_some() {
+            gpu::validate_gpu_scheduling_config(&request.custom_config)?;
+        }
+        let gpu_hostname = if let Some(Some(selection)) = &request.gpu {
+            Some(gpu::validate_selection(self.k8s, selection).await?)
+        } else {
+            None
+        };
 
         // Resolve VPN state before making any Kubernetes changes. An assigned
         // VPN that cannot be resolved must fail closed rather than deploying
@@ -228,6 +274,19 @@ impl<'a> DeploymentManager<'a> {
         // The API creates the namespace above, so the chart must not render and
         // make Helm adopt that cluster-scoped resource during upgrades.
         let mut set_args: Vec<String> = namespace_helm_values(namespace).into();
+        if matches!(request.app_name.as_str(), "plex" | "jellyfin") {
+            // An omitted GPU on update preserves the release; install and explicit null
+            // both reset previously reused managed values.
+            if !request.reuse_values || request.gpu.is_some() {
+                set_args.extend(gpu::helm_values(
+                    request
+                        .gpu
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .zip(gpu_hostname.as_deref()),
+                ));
+            }
+        }
         let mut vpn_values_file = None;
 
         // Add storage configuration using the shared NFS-backed media PVC.
@@ -380,6 +439,14 @@ impl<'a> DeploymentManager<'a> {
 
     /// Remove an application
     pub async fn remove_app(&self, app_name: &str) -> Result<bool> {
+        self.remove_app_with_stop(app_name, None).await
+    }
+
+    pub async fn remove_app_with_stop(
+        &self,
+        app_name: &str,
+        stop: Option<&CancellationToken>,
+    ) -> Result<bool> {
         if self.catalog.get_app(app_name).is_none() {
             return Err(AppError::NotFound(format!(
                 "App '{}' not found in catalog",
@@ -392,7 +459,24 @@ impl<'a> DeploymentManager<'a> {
         let release_namespace = lifecycle.release_namespace.as_str();
 
         // Try to uninstall with Helm
-        let _ = self.run_helm_command(&["uninstall", release, "-n", release_namespace]);
+        if let Err(error) =
+            self.run_helm_command_with_stop(&["uninstall", release, "-n", release_namespace], stop)
+        {
+            // Do not report removal as successful when Helm timed out or failed: its
+            // external outcome is unknown, and deleting the namespace could mask it.
+            // An already absent release is the one safe exception.
+            if stop.is_some_and(CancellationToken::is_cancelled)
+                || !helm_release_not_found(&error.to_string())
+            {
+                return Err(error);
+            }
+        }
+
+        if stop.is_some_and(CancellationToken::is_cancelled) {
+            return Err(AppError::Internal(
+                "Stop requested; external outcome indeterminate".into(),
+            ));
+        }
 
         // Delete the namespace
         let namespaces: Api<Namespace> = Api::all(self.k8s.client().clone());
@@ -785,6 +869,7 @@ fn namespace_helm_values(namespace: &str) -> [String; 2] {
 }
 
 fn validate_custom_config(custom_config: &HashMap<String, String>) -> Result<()> {
+    gpu::validate_custom_gpu_keys(custom_config)?;
     if let Some(key) = custom_config.keys().find(|key| is_vpn_helm_key(key)) {
         return Err(AppError::BadRequest(format!(
             "custom_config key '{key}' is managed by Kubarr; use VPN settings instead"
@@ -863,6 +948,25 @@ mod tests {
         let req: DeploymentRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.app_name, "radarr");
         assert!(req.custom_config.is_empty());
+        assert_eq!(req.gpu, None);
+    }
+
+    #[test]
+    fn gpu_disable_is_distinct_from_omitted_and_unknown_vendor_is_rejected() {
+        let disabled: DeploymentRequest =
+            serde_json::from_str(r#"{"app_name":"plex","gpu":null}"#).unwrap();
+        assert_eq!(disabled.gpu, Some(None));
+        let selected: DeploymentRequest = serde_json::from_str(
+            r#"{"app_name":"plex","gpu":{"vendor":"intel","node_name":"gpu-node"}}"#,
+        )
+        .unwrap();
+        let selection = selected.gpu.unwrap().unwrap();
+        assert_eq!(selection.node_name, "gpu-node");
+        assert_eq!(selection.resource_name, None);
+        assert!(serde_json::from_str::<DeploymentRequest>(
+            r#"{"app_name":"plex","gpu":{"vendor":"unknown","node_name":"gpu-node"}}"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -942,6 +1046,7 @@ mod tests {
                 m
             },
             reuse_values: false,
+            gpu: None,
             wait: true,
         };
         let cloned = req.clone();

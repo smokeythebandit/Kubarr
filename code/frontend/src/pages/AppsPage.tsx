@@ -8,9 +8,11 @@ import type { VpnProvider } from '../api/vpn'
 import { VpnProviderForm } from '../components/vpn/VpnProviderForm'
 import { AppIcon, useIconColors } from '../components/AppIcon'
 import { OperationQueue } from '../components/OperationQueue'
+import { GpuInstallDialog, installRequest } from '../components/GpuInstallDialog'
+import type { GpuSelection } from '../types'
 import { useAuth } from '../contexts/AuthContext'
 import { useMonitoring } from '../contexts/MonitoringContext'
-import type { AppConfig, AppOperation } from '../types'
+import type { AppConfig, AppOperation, DeploymentRequest } from '../types'
 import type { ServiceEndpoint } from '../types/monitoring'
 
 type FilterType = 'all' | 'installed' | 'healthy' | 'unhealthy' | 'available' | 'updates'
@@ -119,6 +121,7 @@ interface AppCardComponentProps {
   isSelected: boolean
   onInstall: () => void
   onUpdate: () => void
+  onChangeGpu: () => void
   onDelete: () => void
   onOpen: () => void
   onClick: () => void
@@ -134,12 +137,14 @@ function AppCardComponent({
   isSelected,
   onInstall,
   onUpdate,
+  onChangeGpu,
   onDelete,
   onOpen,
   onClick,
   updateAvailable,
   isOperationPending
 }: AppCardComponentProps) {
+  const { hasPermission } = useAuth()
   const colors = useIconColors(app.name)
   const displayColors = colors.length > 0
     ? colors
@@ -334,6 +339,9 @@ function AppCardComponent({
                   Update
                 </button>
               )}
+              {!app.is_system && hasPermission('apps.install') && (app.name === 'plex' || app.name === 'jellyfin') && (
+                <button type="button" onClick={onChangeGpu} disabled={isOperationPending} className="rounded-lg bg-gray-100 px-3 py-2 text-sm disabled:opacity-50 dark:bg-gray-700">GPU settings</button>
+              )}
               {!app.is_system && (
                 <button
                   onClick={onDelete}
@@ -471,6 +479,7 @@ interface AppDetailPanelProps {
   effectiveState: string
   onInstall: () => void
   onUpdate: () => void
+  onChangeGpu: () => void
   onDelete: () => void
   onRestart: () => void
   onOpen: () => void
@@ -489,6 +498,7 @@ function AppDetailPanel({
   effectiveState,
   onInstall,
   onUpdate,
+  onChangeGpu,
   onDelete,
   onRestart,
   onOpen,
@@ -680,6 +690,9 @@ function AppDetailPanel({
                     >
                       Update
                     </button>
+                  )}
+                  {isInstalled && effectiveState === 'installed' && hasPermission('apps.install') && (app.name === 'plex' || app.name === 'jellyfin') && (
+                    <button type="button" onClick={onChangeGpu} disabled={isOperationPending} className="rounded-xl bg-gray-100 px-4 py-2 text-sm disabled:opacity-50 dark:bg-gray-800">GPU settings</button>
                   )}
                   {!app.is_system && isInstalled && effectiveState === 'installed' && (
                     <button
@@ -1065,11 +1078,12 @@ export default function AppsPage() {
   })
   const [operationStatuses, setOperationStatuses] = useState<Record<string, OperationStatus>>({})
   const [selectedApp, setSelectedApp] = useState<AppConfig | null>(null)
+  const [installDialogApp, setInstallDialogApp] = useState<string | null>(null)
 
   const filter = (searchParams.get('filter') as FilterType) || 'all'
   const categoryFilter = searchParams.get('category') || 'all'
   const activeTab: AppsTab = searchParams.get('tab') === 'operations' ? 'operations' : 'catalog'
-  const activeOperationCount = operations.filter(operation => operation.status === 'queued' || operation.status === 'running').length
+  const activeOperationCount = operations.filter(operation => operation.status === 'queued' || operation.status === 'running' || operation.status === 'paused').length
 
   const setActiveTab = (tab: AppsTab) => {
     const next = new URLSearchParams(searchParams)
@@ -1158,7 +1172,7 @@ export default function AppsPage() {
   const activeOperationsByApp = useMemo(() => {
     const active: Record<string, AppOperation> = {}
     operations.forEach(operation => {
-      if ((operation.status === 'queued' || operation.status === 'running') && !active[operation.app_name]) {
+      if ((operation.status === 'queued' || operation.status === 'running' || operation.status === 'paused') && !active[operation.app_name]) {
         active[operation.app_name] = operation
       }
     })
@@ -1212,6 +1226,53 @@ export default function AppsPage() {
     setTimeout(() => setToast(null), 5000)
   }
 
+  type QueueAction = 'pause' | 'resume' | 'cancel' | 'retry'
+  const canControlOperation = (operation: AppOperation) => {
+    const permission = operation.operation === 'delete' ? 'apps.delete'
+      : operation.operation === 'restart' ? 'apps.restart'
+        : operation.operation === 'install' || operation.operation === 'update' ? 'apps.install' : null
+    return permission !== null && hasPermission(permission)
+  }
+  const [pendingOperationId, setPendingOperationId] = useState<string | null>(null)
+  const operationAction = useMutation({
+    mutationFn: ({ action, operation }: { action: QueueAction; operation: AppOperation }) => {
+      switch (action) {
+        case 'pause': return appsApi.pauseOperation(operation.id)
+        case 'resume': return appsApi.resumeOperation(operation.id)
+        case 'cancel': return appsApi.cancelOperation(operation.id)
+        case 'retry': return appsApi.retryOperation(operation.id)
+      }
+    },
+    onSuccess: (result, { action, operation }) => {
+      queryClient.setQueryData<AppOperation[]>(['app-operations'], current => {
+        const entries = (current || []).map(item => item.id === operation.id
+          ? action === 'retry' ? { ...item, status: 'retried' as const, message: 'A replacement operation was queued.' } : result
+          : item)
+        return action === 'retry' ? [result, ...entries.filter(item => item.id !== result.id)] : entries
+      })
+      showToast(`${operation.app_name}: ${action === 'retry' ? 'new operation queued' : action === 'cancel' && result.status === 'running' && result.stop_requested ? 'stop requested; awaiting worker outcome (not a rollback)' : `${action} successful`}`, 'success')
+    },
+    onError: (error: unknown, { action, operation }) => {
+      showToast(`Could not ${action} ${operation.app_name}: ${operationErrorMessage(error)}. The queue will refresh; review the current state before trying again.`, 'error')
+    },
+    onSettled: (_result, _error, { operation }) => {
+      setPendingOperationId(null)
+      queryClient.invalidateQueries({ queryKey: ['app-operations'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'states'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'installed'] })
+      queryClient.invalidateQueries({ queryKey: ['monitoring', 'pods', operation.app_name] })
+      refreshAppStatuses()
+    },
+  })
+
+  const handleOperationAction = (action: QueueAction, operation: AppOperation) => {
+    if (!canControlOperation(operation) || pendingOperationId || (action === 'cancel' && operation.stop_requested)) return
+    if (action === 'cancel' && operation.status === 'running' && !window.confirm(`Request stop for running ${operation.operation} on ${operation.app_name}? This cannot roll back Helm or Kubernetes changes already made. The worker will attempt to stop and report an indeterminate external outcome; inspect the app afterward.`)) return
+    if (action === 'retry' && !window.confirm(`Retry ${operation.operation} for ${operation.app_name}? The previous attempt failed and may have partially changed the app. Review the app's actual state first; retrying an install, update or removal could repeat destructive work.`)) return
+    setPendingOperationId(operation.id)
+    operationAction.mutate({ action, operation })
+  }
+
   const setOperationState = (appName: string, state: OperationState | null, message?: string) => {
     if (state === null) {
       setOperationStatuses(prev => {
@@ -1227,21 +1288,32 @@ export default function AppsPage() {
   }
 
   const installMutation = useMutation({
-    mutationFn: (appName: string) => {
-      setOperationState(appName, 'installing')
-      return appsApi.install({ app_name: appName, namespace: appName })
+    mutationFn: (request: DeploymentRequest) => {
+      setOperationState(request.app_name, 'installing')
+      return appsApi.install(request)
     },
-    onSuccess: (operation, appName) => {
+    onSuccess: (operation, request) => {
+      const appName = request.app_name
       queryClient.setQueryData<AppOperation[]>(['app-operations'], current => [operation, ...(current || []).filter(item => item.id !== operation.id)])
       setOperationState(appName, null)
       refreshAppStatuses()
       showToast(`${appName} install queued`, 'success')
     },
-    onError: (error: any, appName) => {
+    onError: (error: any, request) => {
+      const appName = request.app_name
       setOperationState(appName, 'error', error.response?.data?.detail || error.message)
       showToast(`Failed to install ${appName}: ${error.response?.data?.detail || error.message}`, 'error')
     },
   })
+
+  const startInstall = (appName: string) => {
+    if (!hasPermission('apps.install')) return
+    if (appName === 'plex' || appName === 'jellyfin') {
+      setInstallDialogApp(appName)
+    } else {
+      installMutation.mutate(installRequest(appName))
+    }
+  }
 
   const updateMutation = useMutation({
     mutationFn: (appName: string) => {
@@ -1257,6 +1329,25 @@ export default function AppsPage() {
     onError: (error: any, appName) => {
       setOperationState(appName, 'error', error.response?.data?.detail || error.message)
       showToast(`Failed to update ${appName}: ${error.response?.data?.detail || error.message}`, 'error')
+    },
+  })
+
+  const [gpuUpdateApp, setGpuUpdateApp] = useState<string | null>(null)
+  const gpuUpdateMutation = useMutation({
+    mutationFn: ({ appName, gpu }: { appName: string; gpu: GpuSelection | null }) => {
+      setOperationState(appName, 'updating')
+      return appsApi.update(appName, gpu)
+    },
+    onSuccess: (operation, { appName }) => {
+      queryClient.setQueryData<AppOperation[]>(['app-operations'], current => [operation, ...(current || []).filter(item => item.id !== operation.id)])
+      setOperationState(appName, null)
+      refreshAppStatuses()
+      showToast(`${appName} GPU change queued`, 'success')
+    },
+    onError: (error: unknown, { appName }) => {
+      const message = operationErrorMessage(error)
+      setOperationState(appName, 'error', message)
+      showToast(`Failed to change ${appName} GPU settings: ${message}`, 'error')
     },
   })
 
@@ -1353,6 +1444,10 @@ export default function AppsPage() {
 
   return (
     <div className="flex h-[calc(100dvh-4rem-2.5rem-1px)] -my-8 -mx-4 sm:-mx-6 lg:-mx-8 xl:-mx-12 2xl:-mx-16">
+      {installDialogApp && <GpuInstallDialog appName={installDialogApp} onClose={() => setInstallDialogApp(null)}
+        onInstall={request => { setInstallDialogApp(null); installMutation.mutate(request) }} />}
+      {gpuUpdateApp && <GpuInstallDialog appName={gpuUpdateApp} onClose={() => setGpuUpdateApp(null)}
+        onUpdate={gpu => { const appName = gpuUpdateApp; setGpuUpdateApp(null); gpuUpdateMutation.mutate({ appName, gpu }) }} />}
       {/* Toast Notification */}
       {toast && (
         <div className={`fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-lg border backdrop-blur-sm ${
@@ -1466,7 +1561,7 @@ export default function AppsPage() {
         {/* Main content */}
         <div className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-8 space-y-8">
           {activeTab === 'operations' ? (
-            <OperationQueue operations={operations} displayNames={appDisplayNames} />
+            <OperationQueue operations={operations} displayNames={appDisplayNames} canManage={canControlOperation} pendingId={pendingOperationId} onAction={handleOperationAction} />
           ) : <>
 
           {/* Empty State */}
@@ -1533,15 +1628,17 @@ export default function AppsPage() {
                         isHealthy={isHealthy}
                         effectiveState={effectiveState}
                         isSelected={selectedApp?.name === app.name}
-                        onInstall={() => installMutation.mutate(app.name)}
+                         onInstall={() => startInstall(app.name)}
                         onUpdate={() => updateMutation.mutate(app.name)}
+                        onChangeGpu={() => { if (canSyncCatalog) setGpuUpdateApp(app.name) }}
                         onDelete={() => deleteMutation.mutate(app.name)}
                         onOpen={() => handleOpen(app)}
                         onClick={() => setSelectedApp(app)}
                         updateAvailable={updateAvailable}
                         isOperationPending={operationsLoading || Boolean(activeOperationsByApp[app.name]) ||
-                          (installMutation.isPending && installMutation.variables === app.name) ||
+                           (installMutation.isPending && installMutation.variables?.app_name === app.name) ||
                           (updateMutation.isPending && updateMutation.variables === app.name) ||
+                          (gpuUpdateMutation.isPending && gpuUpdateMutation.variables?.appName === app.name) ||
                           (deleteMutation.isPending && deleteMutation.variables === app.name) ||
                           (restartMutation.isPending && restartMutation.variables === app.name)}
                       />
@@ -1568,8 +1665,9 @@ export default function AppsPage() {
             isInstalled={isInstalled}
             isHealthy={isHealthy}
             effectiveState={effectiveState}
-            onInstall={() => installMutation.mutate(selectedApp.name)}
+             onInstall={() => startInstall(selectedApp.name)}
             onUpdate={() => updateMutation.mutate(selectedApp.name)}
+            onChangeGpu={() => { if (canSyncCatalog) setGpuUpdateApp(selectedApp.name) }}
             onDelete={() => deleteMutation.mutate(selectedApp.name)}
             onRestart={() => restartMutation.mutate(selectedApp.name)}
             onOpen={() => handleOpen(selectedApp)}
@@ -1577,8 +1675,9 @@ export default function AppsPage() {
             currentVersion={selectedAppState?.installed_chart_version}
             newVersion={selectedAppState?.available_chart_version}
             isOperationPending={operationsLoading || Boolean(activeOperationsByApp[selectedApp.name]) ||
-              (installMutation.isPending && installMutation.variables === selectedApp.name) ||
+               (installMutation.isPending && installMutation.variables?.app_name === selectedApp.name) ||
               (updateMutation.isPending && updateMutation.variables === selectedApp.name) ||
+              (gpuUpdateMutation.isPending && gpuUpdateMutation.variables?.appName === selectedApp.name) ||
               (deleteMutation.isPending && deleteMutation.variables === selectedApp.name) ||
               (restartMutation.isPending && restartMutation.variables === selectedApp.name)}
             onVpnChangeQueued={() => showToast('VPN change queued', 'success')}

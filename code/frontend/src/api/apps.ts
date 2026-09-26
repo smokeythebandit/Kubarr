@@ -1,8 +1,10 @@
 import apiClient from './client';
-import type { AppConfig, AppOperation, AppState, DeploymentRequest } from '../types';
+import type { AppConfig, AppOperation, AppState, DeploymentRequest, GpuSelection } from '../types';
 
 // Export type for convenience
 export type App = AppConfig;
+
+export type GpuDiscovery = { name: string; ready: boolean; schedulable: boolean; allocatable: Record<string, number> }[];
 
 // Named exports for direct usage
 export const getCatalog = async (): Promise<AppConfig[]> => {
@@ -11,6 +13,11 @@ export const getCatalog = async (): Promise<AppConfig[]> => {
 };
 
 export const appsApi = {
+  // Available extended GPU resources on cluster nodes
+  getGpus: async (): Promise<GpuDiscovery> => {
+    const response = await apiClient.get<GpuDiscovery>('/apps/gpu/nodes');
+    return response.data;
+  },
   // Get all apps in catalog
   getCatalog: async (): Promise<AppConfig[]> => {
     const response = await apiClient.get<AppConfig[]>('/apps/catalog');
@@ -42,14 +49,33 @@ export const appsApi = {
   },
 
   // Update app
-  update: async (appName: string): Promise<AppOperation> => {
-    const response = await apiClient.post<AppOperation>(`/apps/${appName}/update`);
+  update: async (appName: string, gpu?: GpuSelection | null): Promise<AppOperation> => {
+    const response = gpu === undefined
+      ? await apiClient.post<AppOperation>(`/apps/${appName}/update`)
+      : await apiClient.post<AppOperation>(`/apps/${appName}/update`, { gpu });
     return response.data;
   },
 
   // Get app operations
   getOperations: async (): Promise<AppOperation[]> => {
     const response = await apiClient.get<AppOperation[]>('/apps/operations');
+    return response.data;
+  },
+
+  pauseOperation: async (id: string): Promise<AppOperation> => {
+    const response = await apiClient.post<AppOperation>(`/apps/operations/${encodeURIComponent(id)}/pause`);
+    return response.data;
+  },
+  resumeOperation: async (id: string): Promise<AppOperation> => {
+    const response = await apiClient.post<AppOperation>(`/apps/operations/${encodeURIComponent(id)}/resume`);
+    return response.data;
+  },
+  cancelOperation: async (id: string): Promise<AppOperation> => {
+    const response = await apiClient.post<AppOperation>(`/apps/operations/${encodeURIComponent(id)}/cancel`);
+    return response.data;
+  },
+  retryOperation: async (id: string): Promise<AppOperation> => {
+    const response = await apiClient.post<AppOperation>(`/apps/operations/${encodeURIComponent(id)}/retry`);
     return response.data;
   },
 

@@ -258,6 +258,7 @@ async fn deploy_app_composes_helm4_flags_and_release_workload_namespaces() {
                     app_name: app_name.into(),
                     custom_config: HashMap::from([("image.tag".into(), "regression".into())]),
                     reuse_values,
+                    gpu: None,
                     wait,
                 };
                 let mut calls = 0;
@@ -352,6 +353,7 @@ async fn assert_vpn_values_lifetime(helm_fails: bool) {
         app_name: app_name.into(),
         custom_config: HashMap::new(),
         reuse_values: false,
+        gpu: None,
         wait: true,
     };
     let mut values_path = None;
@@ -473,6 +475,7 @@ async fn deploy_app_assigned_vpn_explicitly_resets_disabled_port_forwarding() {
         app_name: app_name.into(),
         custom_config: HashMap::new(),
         reuse_values: true,
+        gpu: None,
         wait: false,
     };
 
@@ -849,6 +852,116 @@ async fn deploy_app_without_database_explicitly_disables_reused_vpn_values() {
 }
 
 #[tokio::test]
+async fn gpu_disable_clears_reused_values_and_omission_preserves_them() {
+    let app_name = "plex";
+    let catalog = catalog(app_name, false);
+    for (gpu, expected) in [(None, false), (Some(None), true)] {
+        let (k8s, _) = kube_client(app_name, app_name, false);
+        let request = DeploymentRequest {
+            app_name: app_name.into(),
+            custom_config: HashMap::new(),
+            gpu,
+            reuse_values: true,
+            wait: false,
+        };
+        DeploymentManager::new(&k8s, &catalog)
+            .deploy_app_with_command(&request, None, |args| {
+                assert!(args.contains(&"--reuse-values"));
+                for value in [
+                    "gpu.enabled=false",
+                    "gpu.provider=intel",
+                    "gpu.resourceName=",
+                    "gpu.runtimeClassName=",
+                    "nodeSelector.kubernetes\\.io/hostname=null",
+                    "plex.resources.requests.nvidia\\.com/gpu=null",
+                    "plex.resources.limits.gpu\\.intel\\.com/i915=null",
+                ] {
+                    assert_eq!(
+                        args.windows(2).any(|pair| pair == ["--set", value]),
+                        expected
+                    );
+                }
+                Ok("deployed".into())
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn gpu_install_validates_node_then_sets_chart_provider_and_hostname_label() {
+    let service = service_fn(|request: Request<Body>| async move {
+        let body = match request.uri().path() {
+            "/api/v1/nodes/gpu-node" => json!({
+                "apiVersion":"v1", "kind":"Node",
+                "metadata":{"name":"gpu-node","labels":{"kubernetes.io/hostname":"host-a"}},
+                "status":{"conditions":[{"type":"Ready","status":"True","lastHeartbeatTime":"2026-01-01T00:00:00Z","lastTransitionTime":"2026-01-01T00:00:00Z"}],
+                    "allocatable":{"nvidia.com/gpu.shared":"1"}}
+            }),
+            "/api/v1/namespaces/plex" => {
+                json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"plex"}})
+            }
+            path => panic!("unexpected kube request: {path}"),
+        };
+        Ok::<_, std::convert::Infallible>(Response::new(Body::from(
+            serde_json::to_vec(&body).unwrap(),
+        )))
+    });
+    let k8s = K8sClient::from_client(Client::new(service, "default"));
+    let catalog = catalog("plex", false);
+    let request: DeploymentRequest = serde_json::from_value(json!({
+        "app_name":"plex", "gpu":{"vendor":"nvidia", "node_name":"gpu-node", "resource_name":"nvidia.com/gpu.shared"}
+    }))
+    .unwrap();
+    DeploymentManager::new(&k8s, &catalog)
+        .deploy_app_with_command(&request, None, |args| {
+            for value in [
+                "gpu.enabled=true",
+                "gpu.provider=nvidia",
+                "gpu.resourceName=nvidia.com/gpu.shared",
+                "plex.resources.requests.nvidia\\.com/gpu=null",
+                "plex.resources.limits.nvidia\\.com/gpu\\.shared=null",
+                "nodeSelector.kubernetes\\.io/hostname=host-a",
+            ] {
+                assert!(
+                    args.windows(2).any(|pair| pair == ["--set", value]),
+                    "missing {value}"
+                );
+            }
+            Ok("deployed".into())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn gpu_deploy_rejects_unadvertised_resource_before_helm_or_namespace_changes() {
+    let service = service_fn(|request: Request<Body>| async move {
+        assert_eq!(request.uri().path(), "/api/v1/nodes/gpu-node");
+        let node = json!({
+            "apiVersion":"v1", "kind":"Node",
+            "metadata":{"name":"gpu-node","labels":{"kubernetes.io/hostname":"host-a"}},
+            "status":{"conditions":[{"type":"Ready","status":"True","lastHeartbeatTime":"2026-01-01T00:00:00Z","lastTransitionTime":"2026-01-01T00:00:00Z"}],
+                "allocatable":{"nvidia.com/gpu":"1"}}
+        });
+        Ok::<_, std::convert::Infallible>(Response::new(Body::from(
+            serde_json::to_vec(&node).unwrap(),
+        )))
+    });
+    let k8s = K8sClient::from_client(Client::new(service, "default"));
+    let catalog = catalog("plex", false);
+    let request: DeploymentRequest = serde_json::from_value(json!({
+        "app_name":"plex", "gpu":{"vendor":"nvidia", "node_name":"gpu-node", "resource_name":"nvidia.com/gpu.shared"},
+        "reuse_values":true
+    })).unwrap();
+    let error = DeploymentManager::new(&k8s, &catalog)
+        .deploy_app_with_command(&request, None, |_| panic!("Helm must not run"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("nvidia.com/gpu.shared"));
+}
+
+#[tokio::test]
 async fn deploy_app_rejects_managed_vpn_custom_config_before_api_calls() {
     let app_name = "regression-vpn-overrides";
     let db = database(app_name).await;
@@ -895,6 +1008,7 @@ async fn deploy_app_rejects_managed_vpn_custom_config_before_api_calls() {
             app_name: app_name.into(),
             custom_config: HashMap::from([(key.into(), "false".into())]),
             reuse_values: true,
+            gpu: None,
             wait: false,
         };
         let error = DeploymentManager::with_db(&k8s, &catalog, &db)
@@ -926,6 +1040,7 @@ async fn deploy_app_rejects_managed_vpn_custom_config_before_api_calls() {
             app_name: app_name.into(),
             custom_config: HashMap::from([("image.tag".into(), value.into())]),
             reuse_values: true,
+            gpu: None,
             wait: false,
         };
         let error = DeploymentManager::with_db(&k8s, &catalog, &db)

@@ -9,6 +9,7 @@ pub struct Model {
     pub app_name: String,
     pub operation: String,
     pub status: String,
+    pub stop_requested: bool,
     pub message: Option<String>,
     pub error: Option<String>,
     pub custom_config: Option<String>,

@@ -48,6 +48,14 @@ When you install an app:
 
 Each app runs in complete isolation in its own namespace.
 
+### Operation queue
+
+App installs, updates, restarts, and uninstalls run as queued operations. A queued operation can be **paused** or **canceled**; a paused operation can be **resumed** or **canceled**. These queued/paused cancellations finish immediately. A failed operation can be **retried**, which creates a new operation; first review any partial Helm or Kubernetes effects left by the failed attempt.
+
+Once an operation is running, it cannot be paused, but you can **request stop**. The cancel API returns the operation still `running` with `stop_requested: true`; this acknowledges the request, not completion or rollback. The worker checks for the request, stops Helm if it is still running, and eventually marks the operation `cancelled`. Kubernetes or Helm changes may already have happened, so the external outcome is **indeterminate**: inspect the app and cluster before taking further action. A second stop request is rejected, and only failed operations can be retried through the queue.
+
+The Helm subprocess also has a 12-minute deadline, including a 10-minute Helm wait. If it times out, the outcome may likewise be indeterminate; Kubarr does not automatically replay the operation. Restarting Kubarr is distinct from retrying a task and does not itself retry that task.
+
 ---
 
 ## Charts
@@ -81,7 +89,23 @@ At install time you can override any Helm value. This is passed as a `custom_con
 }
 ```
 
-Anything in the chart's `values.yaml` can be overridden this way.
+Most chart values can be overridden this way. GPU settings are managed separately; use the GPU selector below rather than `custom_config` for those values.
+
+---
+
+## GPU Transcoding
+
+GPU transcoding requires a compatible device resource to be advertised to Kubernetes before installing the media server. Kubarr does **not** install GPU drivers, device plugins, or the NVIDIA Container Toolkit; prepare these on your cluster nodes yourself:
+
+- **Intel:** install the Intel GPU device plugin with `shared-dev-num` greater than 1 if Plex and Jellyfin must use the same GPU concurrently.
+- **NVIDIA:** install the NVIDIA Container Toolkit, configure a working container runtime for GPU pods, and enable time-slicing in the NVIDIA device plugin if the apps must share one GPU.
+- **AMD:** use a shared DRM device plugin that specifically advertises the `amd.com/dri` resource. ROCm devices advertising `amd.com/gpu` are unsupported.
+
+In the Kubarr GUI, select a node and GPU resource when installing Plex or Jellyfin, or use **GPU settings** on an installed app to enable, change, or disable it. The backend lists advertised resources at `GET /api/apps/gpu/nodes`. API clients can include `"gpu": {"vendor": "intel", "node_name": "my-node", "resource_name": "gpu.intel.com/i915"}` in an install or update request; `"gpu": null` explicitly disables acceleration on update. GPU support requires an updated media-server chart version that contains the GPU templates.
+
+After deployment, enable hardware transcoding in the media server itself. Plex hardware transcoding requires Plex Pass; in Plex, enable **Use hardware acceleration when available** in Transcoder settings. In Jellyfin, configure the appropriate hardware acceleration and device under Dashboard → Playback → Transcoding. Test by playing media that requires transcoding and confirm the server reports hardware transcoding in its playback/transcoding information.
+
+One advertised GPU slot is a schedulable resource, **not** a physical GPU, a guaranteed share of one, or a guarantee that every codec/format can be accelerated. Actual capabilities depend on the device, drivers, plugin configuration, and media-server support.
 
 ---
 

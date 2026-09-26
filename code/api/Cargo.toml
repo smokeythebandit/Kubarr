@@ -91,6 +91,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 async-trait = "0.1"
 once_cell = "1"
 parking_lot = "0.12"
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

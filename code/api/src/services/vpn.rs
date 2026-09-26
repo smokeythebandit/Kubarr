@@ -1594,11 +1594,8 @@ mod tests_supported_providers {
     }
 
     #[test]
-    fn default_firewall_subnets_returns_private_ranges() {
-        let s = default_firewall_subnets();
-        assert!(s.contains("10.0.0.0/8"));
-        assert!(s.contains("172.16.0.0/12"));
-        assert!(s.contains("192.168.0.0/16"));
+    fn default_firewall_subnets_does_not_bypass_vpn() {
+        assert!(default_firewall_subnets().is_empty());
     }
 }
 

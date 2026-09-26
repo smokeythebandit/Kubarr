@@ -1926,6 +1926,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "lettre",
+ "libc",
  "once_cell",
  "parking_lot",
  "pastey",
