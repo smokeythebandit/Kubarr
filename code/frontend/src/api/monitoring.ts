@@ -36,6 +36,20 @@ export interface MetricsAvailability {
   message: string;
 }
 
+export interface GpuDeviceMetrics {
+  node: string;
+  vendor: string;
+  device: string;
+  utilization_percent: number | null;
+  memory_used_bytes: number | null;
+  memory_total_bytes: number | null;
+}
+
+export interface GpuMetricsResponse {
+  available: boolean;
+  devices: GpuDeviceMetrics[];
+}
+
 export interface TimeSeriesPoint {
   timestamp: number;
   value: number;
@@ -91,6 +105,10 @@ export interface ClusterMetricsHistory {
 }
 
 export const monitoringApi = {
+  getGpuMetrics: async (): Promise<GpuMetricsResponse> => {
+    const response = await apiClient.get<GpuMetricsResponse>('/monitoring/vm/gpus');
+    return response.data;
+  },
   // Get pod status
   getPodStatus: async (namespace: string = 'media', app?: string): Promise<PodStatus[]> => {
     const response = await apiClient.get<PodStatus[]>('/monitoring/pods', {

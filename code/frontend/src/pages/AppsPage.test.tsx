@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   canInstall: true,
   canDelete: false,
   showPlex: false,
+  showDevelopment: false,
   plexInstalled: false,
   canViewVpn: false,
   canManageVpn: false,
@@ -141,7 +142,8 @@ const queuedRestart: AppOperation = {
 
 vi.mock('../contexts/MonitoringContext', () => ({
   useMonitoring: () => ({
-    catalog: mocks.showPlex ? [app, { ...app, name: 'plex', display_name: 'Plex' }] : [app],
+    catalog: [app, ...(mocks.showPlex ? [{ ...app, name: 'plex', display_name: 'Plex' }] : []),
+      ...(mocks.showDevelopment ? [{ ...app, name: 'redmine', display_name: 'Redmine', category: 'development' }] : [])],
     installedApps: mocks.plexInstalled ? ['sonarr', 'plex'] : ['sonarr'],
     appStates: mocks.plexInstalled ? { sonarr: appState, plex: { ...appState, app_name: 'plex' } } : { sonarr: appState },
     appStatuses: { sonarr: { healthy: true, loading: false, pods: [] } },
@@ -164,6 +166,21 @@ function renderPage() {
 
   return { ...view, queryClient }
 }
+
+describe('AppsPage development category', () => {
+  it('groups development apps under Development and exposes the category filter', async () => {
+    mocks.showDevelopment = true
+    mocks.getOperations.mockResolvedValue([])
+    try {
+      renderPage()
+      expect(await screen.findByRole('heading', { name: 'Development' })).toBeInTheDocument()
+      expect(screen.getByRole('option', { name: 'Development' })).toHaveValue('development')
+      expect(screen.getByText('Redmine')).toBeInTheDocument()
+    } finally {
+      mocks.showDevelopment = false
+    }
+  })
+})
 
 describe('AppsPage restart action', () => {
   beforeEach(() => {
@@ -327,6 +344,8 @@ describe('AppsPage GPU requests', () => {
     mocks.getGpus.mockResolvedValue([{ name: 'gpu-node', ready: true, schedulable: true, allocatable: { 'gpu.intel.com/i915': 1 } }])
     mocks.install.mockReset()
     mocks.update.mockReset()
+    mocks.getGpus.mockReset()
+    mocks.getGpus.mockResolvedValue([{ name: 'gpu-node', ready: true, schedulable: true, allocatable: { 'gpu.intel.com/i915': 1 } }])
   })
 
   it('sends the selected GPU in a Plex install request', async () => {
@@ -342,14 +361,67 @@ describe('AppsPage GPU requests', () => {
     await waitFor(() => expect(mocks.install).toHaveBeenCalledWith({ app_name: 'plex', namespace: 'plex', gpu: { vendor: 'intel', node_name: 'gpu-node', resource_name: 'gpu.intel.com/i915' } }))
   })
 
-  it('sends explicit null when disabling GPU on an installed Plex app', async () => {
+  it('removes card and header GPU buttons, and applies and disables GPU inline in the sidebar', async () => {
     mocks.plexInstalled = true
     mocks.update.mockResolvedValue({ ...queuedRestart, app_name: 'plex', operation: 'update' })
     renderPage()
     fireEvent.click(await screen.findByRole('heading', { name: 'Plex', level: 3 }))
-    fireEvent.click(screen.getAllByRole('button', { name: 'GPU settings' })[0])
+    const sidebar = screen.getByRole('region', { name: 'Plex details' })
+    expect(screen.queryByRole('button', { name: 'GPU settings' })).not.toBeInTheDocument()
+    expect(sidebar).toHaveTextContent('GPU')
+    expect(sidebar).not.toHaveTextContent('VPN')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const select = await screen.findByRole('combobox', { name: 'GPU node and resource' })
+    await waitFor(() => expect(select).toBeEnabled())
+    fireEvent.change(select, { target: { value: JSON.stringify({ vendor: 'intel', node_name: 'gpu-node', resource_name: 'gpu.intel.com/i915' }) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply GPU settings' }))
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('plex', { vendor: 'intel', node_name: 'gpu-node', resource_name: 'gpu.intel.com/i915' }))
+    await screen.findByText('plex GPU change queued')
+    expect(screen.getByRole('button', { name: 'Apply GPU settings' })).toBeDisabled()
+    expect(screen.getByText(/GPU change pending/)).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Disable GPU' }))
+    expect(mocks.update).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends explicit null for disable using the existing queued update', async () => {
+    mocks.plexInstalled = true
+    mocks.update.mockResolvedValue({ ...queuedRestart, app_name: 'plex', operation: 'update' })
+    renderPage()
+    fireEvent.click(await screen.findByRole('heading', { name: 'Plex', level: 3 }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Disable GPU' })).toBeEnabled())
     fireEvent.click(screen.getByRole('button', { name: 'Disable GPU' }))
     await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('plex', null))
+    expect(await screen.findByText('plex GPU change queued')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Disable GPU' })).toBeDisabled()
+  })
+
+  it('shows GPU update errors via the existing mutation', async () => {
+    mocks.plexInstalled = true
+    mocks.update.mockRejectedValue(new Error('unavailable'))
+    renderPage()
+    fireEvent.click(await screen.findByRole('heading', { name: 'Plex', level: 3 }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Disable GPU' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Disable GPU' }))
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('plex', null))
+    expect(await screen.findByText(/Failed to change plex GPU settings: unavailable/)).toBeVisible()
+  })
+
+  it('hides GPU configuration without install permission and blocks changes while queued', async () => {
+    mocks.plexInstalled = true
+    mocks.canInstall = false
+    const { unmount } = renderPage()
+    fireEvent.click(await screen.findByRole('heading', { name: 'Plex', level: 3 }))
+    expect(screen.queryByRole('combobox', { name: 'GPU node and resource' })).not.toBeInTheDocument()
+    expect(mocks.getGpus).not.toHaveBeenCalled()
+    unmount()
+    mocks.canInstall = true
+    mocks.getOperations.mockResolvedValue([{ ...queuedRestart, app_name: 'plex' }])
+    renderPage()
+    fireEvent.click(await screen.findByRole('heading', { name: 'Plex', level: 3 }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Disable GPU' })).toBeDisabled())
+    expect(screen.getByRole('button', { name: 'Apply GPU settings' })).toBeDisabled()
+    expect(screen.getByText(/GPU change pending/)).toBeVisible()
+    expect(mocks.update).not.toHaveBeenCalled()
   })
 })
 

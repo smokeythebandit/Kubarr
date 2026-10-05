@@ -51,7 +51,7 @@ function AppCard({ app, isHealthy, showLoading, hasData }: AppCardProps) {
     // Log access (fire and forget)
     appsApi.logAccess(app.name).catch(() => {})
     // Open the app
-    window.open(`/${app.name}/`, '_blank', 'noopener,noreferrer')
+    window.open(`/auth/host-transfer/start?app=${encodeURIComponent(app.name)}`, '_blank', 'noopener,noreferrer')
   }
 
   // Create iOS-style glass effect with multiple color gradients

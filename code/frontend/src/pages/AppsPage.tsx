@@ -8,7 +8,7 @@ import type { VpnProvider } from '../api/vpn'
 import { VpnProviderForm } from '../components/vpn/VpnProviderForm'
 import { AppIcon, useIconColors } from '../components/AppIcon'
 import { OperationQueue } from '../components/OperationQueue'
-import { GpuInstallDialog, installRequest } from '../components/GpuInstallDialog'
+import { GpuInstallDialog, GpuSelectionForm, installRequest } from '../components/GpuInstallDialog'
 import type { GpuSelection } from '../types'
 import { useAuth } from '../contexts/AuthContext'
 import { useMonitoring } from '../contexts/MonitoringContext'
@@ -86,6 +86,15 @@ const categoryInfo: Record<string, { label: string; icon: JSX.Element; descripti
     ),
     description: 'Metrics, logs, and dashboards'
   },
+  'development': {
+    label: 'Development',
+    icon: (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l-3 3 3 3m8-6l3 3-3 3m-3-9l-2 12" />
+      </svg>
+    ),
+    description: 'Source control, issue tracking, and build automation'
+  },
   'system': {
     label: 'System',
     icon: (
@@ -110,7 +119,7 @@ const defaultCategoryInfo = {
 }
 
 // Category display order
-const categoryOrder = ['media-manager', 'download-client', 'media-server', 'request-manager', 'indexer', 'monitoring', 'system']
+const categoryOrder = ['media-manager', 'download-client', 'media-server', 'request-manager', 'indexer', 'monitoring', 'development', 'system']
 
 // App Card Component with glass effect
 interface AppCardComponentProps {
@@ -121,7 +130,6 @@ interface AppCardComponentProps {
   isSelected: boolean
   onInstall: () => void
   onUpdate: () => void
-  onChangeGpu: () => void
   onDelete: () => void
   onOpen: () => void
   onClick: () => void
@@ -137,14 +145,12 @@ function AppCardComponent({
   isSelected,
   onInstall,
   onUpdate,
-  onChangeGpu,
   onDelete,
   onOpen,
   onClick,
   updateAvailable,
   isOperationPending
 }: AppCardComponentProps) {
-  const { hasPermission } = useAuth()
   const colors = useIconColors(app.name)
   const displayColors = colors.length > 0
     ? colors
@@ -339,9 +345,6 @@ function AppCardComponent({
                   Update
                 </button>
               )}
-              {!app.is_system && hasPermission('apps.install') && (app.name === 'plex' || app.name === 'jellyfin') && (
-                <button type="button" onClick={onChangeGpu} disabled={isOperationPending} className="rounded-lg bg-gray-100 px-3 py-2 text-sm disabled:opacity-50 dark:bg-gray-700">GPU settings</button>
-              )}
               {!app.is_system && (
                 <button
                   onClick={onDelete}
@@ -479,7 +482,7 @@ interface AppDetailPanelProps {
   effectiveState: string
   onInstall: () => void
   onUpdate: () => void
-  onChangeGpu: () => void
+  onChangeGpu: (gpu: GpuSelection | null) => void
   onDelete: () => void
   onRestart: () => void
   onOpen: () => void
@@ -513,6 +516,7 @@ function AppDetailPanel({
   const canViewVpn = hasPermission('vpn.view')
   const canManageVpn = hasPermission('vpn.manage')
   const canRestart = hasPermission('apps.restart')
+  const canChangeGpu = hasPermission('apps.install')
   const queryClient = useQueryClient()
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null)
   const [killSwitchOverride, setKillSwitchOverride] = useState<boolean | null>(null)
@@ -691,9 +695,6 @@ function AppDetailPanel({
                       Update
                     </button>
                   )}
-                  {isInstalled && effectiveState === 'installed' && hasPermission('apps.install') && (app.name === 'plex' || app.name === 'jellyfin') && (
-                    <button type="button" onClick={onChangeGpu} disabled={isOperationPending} className="rounded-xl bg-gray-100 px-4 py-2 text-sm disabled:opacity-50 dark:bg-gray-800">GPU settings</button>
-                  )}
                   {!app.is_system && isInstalled && effectiveState === 'installed' && (
                     <button
                       onClick={onDelete}
@@ -808,6 +809,17 @@ function AppDetailPanel({
           <AppStorageInfo app={app} />
 
           <AppInternalEndpoints app={app} namespace={namespace} enabled={isInstalled || app.is_system} />
+
+          {canChangeGpu && !app.is_system && isInstalled && (app.name === 'plex' || app.name === 'jellyfin') && (
+            <div className="mt-6">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white">GPU</h3>
+              <div className="mt-3 rounded-lg bg-gray-50 p-4 dark:bg-gray-800/50">
+                <GpuSelectionForm key={app.name} appName={app.name} disabled={isOperationPending}
+                  onSubmit={gpu => { if (gpu) onChangeGpu(gpu) }} onDisable={() => onChangeGpu(null)} />
+                {isOperationPending && <p role="status" className="mt-2 text-xs text-amber-600 dark:text-amber-400">GPU change pending while the app operation is queued or running</p>}
+              </div>
+            </div>
+          )}
 
           {/* VPN Configuration */}
           {canViewVpn && !app.is_system && isInstalled && (
@@ -1332,7 +1344,6 @@ export default function AppsPage() {
     },
   })
 
-  const [gpuUpdateApp, setGpuUpdateApp] = useState<string | null>(null)
   const gpuUpdateMutation = useMutation({
     mutationFn: ({ appName, gpu }: { appName: string; gpu: GpuSelection | null }) => {
       setOperationState(appName, 'updating')
@@ -1431,7 +1442,7 @@ export default function AppsPage() {
 
   const handleOpen = (app: AppConfig) => {
     appsApi.logAccess(app.name).catch(() => {})
-    window.open(`/${app.name}/`, '_blank', 'noopener,noreferrer')
+    window.open(`/auth/host-transfer/start?app=${encodeURIComponent(app.name)}`, '_blank', 'noopener,noreferrer')
   }
 
   if (isLoading) {
@@ -1446,8 +1457,6 @@ export default function AppsPage() {
     <div className="flex h-[calc(100dvh-4rem-2.5rem-1px)] -my-8 -mx-4 sm:-mx-6 lg:-mx-8 xl:-mx-12 2xl:-mx-16">
       {installDialogApp && <GpuInstallDialog appName={installDialogApp} onClose={() => setInstallDialogApp(null)}
         onInstall={request => { setInstallDialogApp(null); installMutation.mutate(request) }} />}
-      {gpuUpdateApp && <GpuInstallDialog appName={gpuUpdateApp} onClose={() => setGpuUpdateApp(null)}
-        onUpdate={gpu => { const appName = gpuUpdateApp; setGpuUpdateApp(null); gpuUpdateMutation.mutate({ appName, gpu }) }} />}
       {/* Toast Notification */}
       {toast && (
         <div className={`fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-lg border backdrop-blur-sm ${
@@ -1630,7 +1639,6 @@ export default function AppsPage() {
                         isSelected={selectedApp?.name === app.name}
                          onInstall={() => startInstall(app.name)}
                         onUpdate={() => updateMutation.mutate(app.name)}
-                        onChangeGpu={() => { if (canSyncCatalog) setGpuUpdateApp(app.name) }}
                         onDelete={() => deleteMutation.mutate(app.name)}
                         onOpen={() => handleOpen(app)}
                         onClick={() => setSelectedApp(app)}
@@ -1667,7 +1675,7 @@ export default function AppsPage() {
             effectiveState={effectiveState}
              onInstall={() => startInstall(selectedApp.name)}
             onUpdate={() => updateMutation.mutate(selectedApp.name)}
-            onChangeGpu={() => { if (canSyncCatalog) setGpuUpdateApp(selectedApp.name) }}
+            onChangeGpu={gpu => { if (canSyncCatalog && !gpuUpdateMutation.isPending && !operationsLoading && !activeOperationsByApp[selectedApp.name]) gpuUpdateMutation.mutate({ appName: selectedApp.name, gpu }) }}
             onDelete={() => deleteMutation.mutate(selectedApp.name)}
             onRestart={() => restartMutation.mutate(selectedApp.name)}
             onOpen={() => handleOpen(selectedApp)}

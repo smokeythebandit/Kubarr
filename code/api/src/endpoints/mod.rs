@@ -100,6 +100,7 @@ use crate::state::AppState;
         // Monitoring
         monitoring::get_app_metrics,
         monitoring::get_cluster_metrics,
+        monitoring::get_gpu_metrics,
         monitoring::get_app_detail_metrics,
         monitoring::get_cluster_network_history,
         monitoring::get_cluster_metrics_history,

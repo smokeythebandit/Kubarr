@@ -156,6 +156,42 @@ async fn test_vm_cluster_requires_auth() {
 }
 
 #[tokio::test]
+async fn test_vm_gpus_requires_auth() {
+    let state = build_test_app_state_with_db(create_test_db_with_seed().await).await;
+    let response = create_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/monitoring/vm/gpus")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_vm_gpus_outage_is_explicit() {
+    use http_body_util::BodyExt;
+    let (state, cookie) = setup_authenticated_state().await;
+    let response = create_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/monitoring/vm/gpus")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["available"], false);
+    assert_eq!(json["devices"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn test_vm_app_detail_requires_auth() {
     let state = build_test_app_state_with_db(create_test_db_with_seed().await).await;
     let app = create_router(state);

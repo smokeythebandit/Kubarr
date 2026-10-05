@@ -84,7 +84,7 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
 }
 
 /// Extract session token from cookie (supports multi-session)
-fn extract_token(req: &Request) -> Option<String> {
+pub(crate) fn extract_token(req: &Request) -> Option<String> {
     let cookies = req.headers().get(header::COOKIE)?;
     let cookie_str = cookies.to_str().ok()?;
 
@@ -138,7 +138,10 @@ fn extract_token(req: &Request) -> Option<String> {
 
 /// Authenticate using session token (from cookie)
 /// Validates the signed JWT, looks up session in database, and updates last_accessed_at
-async fn authenticate_session(state: &AppState, token: &str) -> Result<AuthenticatedUser, String> {
+pub(crate) async fn authenticate_session(
+    state: &AppState,
+    token: &str,
+) -> Result<AuthenticatedUser, String> {
     // Decode and validate the session token
     let claims =
         decode_session_token(token).map_err(|_| "Invalid or expired session".to_string())?;

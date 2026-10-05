@@ -22,7 +22,8 @@ import {
   FileText,
   ArrowDownToLine,
   ArrowUpFromLine,
-  Network
+  Network,
+  Microchip
 } from 'lucide-react'
 
 // Format bytes to human readable
@@ -978,11 +979,19 @@ export default function MonitoringPage() {
     enabled: metricsStatus?.available,
   })
 
+  const { data: gpuMetrics, isError: gpuError, refetch: refetchGpus } = useQuery({
+    queryKey: ['monitoring', 'vm', 'gpus'],
+    queryFn: monitoringApi.getGpuMetrics,
+    refetchInterval: autoRefresh ? 10000 : false,
+    enabled: metricsStatus?.available,
+  })
+
   const handleRefresh = () => {
     refetchCluster()
     refetchApps()
     refetchNetworkHistory()
     refetchMetricsHistory()
+    refetchGpus()
   }
 
   // Sort apps by memory usage (descending) - backend already returns only relevant apps
@@ -1029,7 +1038,7 @@ export default function MonitoringPage() {
             <Activity className="text-blue-500 dark:text-blue-400" />
             Resources
           </h1>
-          <p className="text-gray-500 dark:text-gray-400 mt-1">CPU, memory, and resource usage metrics</p>
+          <p className="text-gray-500 dark:text-gray-400 mt-1">CPU, memory, GPU, and resource usage metrics</p>
         </div>
         <div className="flex items-center gap-3">
           <button
@@ -1116,6 +1125,41 @@ export default function MonitoringPage() {
           />
         </div>
       </div>
+
+      {/* GPU telemetry is node/device-wide, not attributed to apps. */}
+      <section aria-label="GPU telemetry">
+        <h2 className="text-xl font-semibold mb-4 flex items-center gap-2 text-gray-900 dark:text-white">
+          <Microchip size={20} /> GPU Telemetry
+        </h2>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">Node-level device usage from GPU exporters; not app allocation.</p>
+        {(gpuError || gpuMetrics?.available === false) && (
+          <p className="text-sm text-yellow-600 dark:text-yellow-400 mb-3">GPU telemetry unavailable (metrics query failed).</p>
+        )}
+        {!gpuError && gpuMetrics?.devices.length ? (
+          <div className="overflow-x-auto bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+            <table className="w-full" aria-label="GPU devices">
+              <thead><tr className="border-b border-gray-200 dark:border-gray-700">
+                {['Node', 'Vendor', 'Device', 'GPU utilization', 'GPU memory'].map(label =>
+                  <th key={label} className="text-left px-4 py-3 text-sm text-gray-500 dark:text-gray-400">{label}</th>
+                )}
+              </tr></thead>
+              <tbody>{gpuMetrics.devices.map(gpu => (
+                <tr key={`${gpu.node}-${gpu.vendor}-${gpu.device}`} className="border-b border-gray-200 dark:border-gray-700/50">
+                  <td className="px-4 py-3">{gpu.node}</td>
+                  <td className="px-4 py-3">{gpu.vendor}</td>
+                  <td className="px-4 py-3 font-mono text-sm">{gpu.device}</td>
+                  <td className="px-4 py-3">{gpu.utilization_percent != null ? formatPercent(gpu.utilization_percent) : 'Unavailable'}</td>
+                  <td className="px-4 py-3">{gpu.memory_used_bytes != null
+                    ? `${formatBytes(gpu.memory_used_bytes)}${gpu.memory_total_bytes != null ? ` / ${formatBytes(gpu.memory_total_bytes)}` : ' / Unavailable'}`
+                    : 'Unavailable'}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        ) : !gpuError && gpuMetrics?.available !== false && (
+          <p className="text-gray-500 dark:text-gray-400">GPU telemetry unavailable. No fresh supported exporter series found.</p>
+        )}
+      </section>
 
       {/* Per-App Metrics */}
       <div>

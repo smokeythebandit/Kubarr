@@ -14,8 +14,9 @@ The catalog is a list of all apps Kubarr knows how to install. Apps are grouped 
 | **Media servers** | Jellyfin, Plex |
 | **Media managers** | Sonarr, Radarr, Lidarr, and others |
 | **Indexers** | Jackett, Prowlarr |
-| **Monitoring** | Grafana, VictoriaMetrics, VictoriaLogs |
-| **System** | PostgreSQL, Fluent-bit, Cloudflared, Kubernetes Dashboard |
+| **Monitoring** | Grafana, VictoriaMetrics, VictoriaLogs, Fluent Bit, Headlamp (optional) |
+| **Development** | Jenkins, Redmine, SCM-Manager |
+| **System** | PostgreSQL, Cloudflared, OpenResty gateway |
 
 The catalog is populated from the Helm charts in the [kubarr-charts](https://github.com/smokeythebandit/kubarr-charts) repository and kept in sync automatically. You can also trigger a manual sync from the UI.
 
@@ -101,7 +102,7 @@ GPU transcoding requires a compatible device resource to be advertised to Kubern
 - **NVIDIA:** install the NVIDIA Container Toolkit, configure a working container runtime for GPU pods, and enable time-slicing in the NVIDIA device plugin if the apps must share one GPU.
 - **AMD:** use a shared DRM device plugin that specifically advertises the `amd.com/dri` resource. ROCm devices advertising `amd.com/gpu` are unsupported.
 
-In the Kubarr GUI, select a node and GPU resource when installing Plex or Jellyfin, or use **GPU settings** on an installed app to enable, change, or disable it. The backend lists advertised resources at `GET /api/apps/gpu/nodes`. API clients can include `"gpu": {"vendor": "intel", "node_name": "my-node", "resource_name": "gpu.intel.com/i915"}` in an install or update request; `"gpu": null` explicitly disables acceleration on update. GPU support requires an updated media-server chart version that contains the GPU templates.
+In the Kubarr GUI, select a node and GPU resource when installing Plex or Jellyfin, or use the **GPU** section of an installed app's details to enable, change, or disable it. The backend lists advertised resources at `GET /api/apps/gpu/nodes`. API clients can include `"gpu": {"vendor": "intel", "node_name": "my-node", "resource_name": "gpu.intel.com/i915"}` in an install or update request; `"gpu": null` explicitly disables acceleration on update. GPU support requires an updated media-server chart version that contains the GPU templates.
 
 After deployment, enable hardware transcoding in the media server itself. Plex hardware transcoding requires Plex Pass; in Plex, enable **Use hardware acceleration when available** in Transcoder settings. In Jellyfin, configure the appropriate hardware acceleration and device under Dashboard → Playback → Transcoding. Test by playing media that requires transcoding and confirm the server reports hardware transcoding in its playback/transcoding information.
 

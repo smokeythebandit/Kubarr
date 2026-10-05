@@ -1,7 +1,7 @@
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, HeaderValue},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post},
     Extension, Json, Router,
 };
@@ -20,8 +20,9 @@ use crate::middleware::auth::{
 };
 use crate::models::prelude::*;
 use crate::models::{
+    app_domain_assignment,
     audit_log::{AuditAction, ResourceType},
-    invite, role, session, two_factor_recovery_code, user, user_role,
+    domain, invite, role, session, two_factor_recovery_code, user, user_role,
 };
 use crate::services::{
     create_session_token, decode_session_token, hash_password, verify_password,
@@ -108,8 +109,395 @@ pub fn auth_routes(state: AppState) -> Router {
         .route("/sessions/{session_id}", delete(revoke_session))
         .route("/switch/{slot}", post(switch_session))
         .route("/accounts", get(list_accounts))
+        .route("/host-transfer/start", get(start_host_transfer))
+        .route("/host-transfer/complete", get(complete_host_transfer))
         .route("/2fa/recover", post(recover_with_code))
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+struct StartTransfer {
+    app: String,
+}
+
+#[derive(Deserialize)]
+struct CompleteTransfer {
+    ticket: String,
+}
+
+const TRANSFER_MARKER: &str = "host-transfer|";
+
+fn transfer_record_id(ticket: uuid::Uuid) -> String {
+    ticket.to_string()
+}
+
+// The sessions.user_agent column is a 255-character string in PostgreSQL.
+fn transfer_metadata(host: &str, app: &str, sid: &str) -> Option<String> {
+    let metadata = format!("{TRANSFER_MARKER}{host}|{app}|{sid}");
+    (metadata.len() <= 255).then_some(metadata)
+}
+
+fn transfer_source<'a>(agent: Option<&'a str>, host: &str) -> Option<(&'a str, &'a str)> {
+    let metadata = agent?.strip_prefix(TRANSFER_MARKER)?;
+    let (expected_host, rest) = metadata.split_once('|')?;
+    let (app, sid) = rest.split_once('|')?;
+    if expected_host != host || !valid_hostname(expected_host) {
+        return None;
+    }
+    if !valid_app_name(app) {
+        return None;
+    }
+    let parsed = uuid::Uuid::parse_str(sid).ok()?;
+    (parsed.to_string() == sid).then_some((app, sid))
+}
+
+fn valid_app_name(app: &str) -> bool {
+    !app.is_empty()
+        && app
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn valid_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+fn request_host(headers: &HeaderMap) -> Option<(String, String)> {
+    let raw = headers.get(header::HOST)?.to_str().ok()?;
+    let (host, port) = match raw.rsplit_once(':') {
+        Some((host, port))
+            if !host.contains(':') && port.parse::<u16>().ok().filter(|p| *p > 0).is_some() =>
+        {
+            (host, format!(":{port}"))
+        }
+        Some(_) => return None,
+        None => (raw, String::new()),
+    };
+    let host = host.to_ascii_lowercase();
+    valid_hostname(&host).then_some((host, port))
+}
+
+fn transfer_target(
+    assignment: &app_domain_assignment::Model,
+    domain: &domain::Model,
+) -> Option<String> {
+    if !assignment.enabled
+        || !domain.enabled
+        || !matches!(assignment.route_mode.as_str(), "exact_host" | "subdomain")
+    {
+        return None;
+    }
+    let hostname = assignment.hostname.as_deref()?.trim().to_ascii_lowercase();
+    let target = if assignment.route_mode == "exact_host" || hostname.contains('.') {
+        hostname
+    } else {
+        format!("{}.{}", hostname, domain.domain.trim_start_matches("*."))
+    };
+    valid_hostname(&target).then_some(target)
+}
+
+fn transfer_port<'a>(source: &str, target: &str, port: &'a str) -> &'a str {
+    // Local *.localhost aliases share the gateway's development port. An
+    // external host has no configured port: use its scheme's default instead.
+    if (source == "localhost" || source.ends_with(".localhost"))
+        && (target == "localhost" || target.ends_with(".localhost"))
+    {
+        port
+    } else {
+        ""
+    }
+}
+
+async fn start_host_transfer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<StartTransfer>,
+) -> Result<Response> {
+    let (source_host, port) =
+        request_host(&headers).ok_or_else(|| AppError::BadRequest("Invalid host".into()))?;
+    if !valid_app_name(&query.app) {
+        return Err(AppError::BadRequest("Invalid app".into()));
+    }
+    let req = axum::extract::Request::builder()
+        .header(
+            header::COOKIE,
+            headers
+                .get(header::COOKIE)
+                .cloned()
+                .unwrap_or_else(|| HeaderValue::from_static("")),
+        )
+        .body(axum::body::Body::empty())
+        .map_err(|_| AppError::Unauthorized("Invalid session".into()))?;
+    let token = crate::middleware::auth::extract_token(&req)
+        .ok_or_else(|| AppError::Unauthorized("Missing session".into()))?;
+    let user = crate::middleware::auth::authenticate_session(&state, &token)
+        .await
+        .map_err(AppError::Unauthorized)?;
+    if !user.has_app_access(&query.app) {
+        return Err(AppError::Forbidden("No app access".into()));
+    }
+    let db = state.get_db().await?;
+    let assignments = AppDomainAssignment::find()
+        .filter(app_domain_assignment::Column::AppName.eq(&query.app))
+        .filter(app_domain_assignment::Column::Enabled.eq(true))
+        .all(&db)
+        .await?;
+    let mut target = None;
+    for assignment in assignments {
+        if let Some(domain) = Domain::find_by_id(assignment.domain_id).one(&db).await? {
+            if let Some(host) = transfer_target(&assignment, &domain) {
+                if assignment.primary || target.is_none() {
+                    target = Some(host);
+                }
+                if assignment.primary {
+                    break;
+                }
+            }
+        }
+    }
+    let Some(target) = target else {
+        return Ok(Redirect::to(&format!("/{}/", query.app)).into_response());
+    };
+    if target == source_host {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let claims = decode_session_token(&token)
+        .map_err(|_| AppError::Unauthorized("Invalid session".into()))?;
+    let metadata = transfer_metadata(&target, &query.app, &claims.sid)
+        .ok_or_else(|| AppError::BadRequest("Transfer target too long".into()))?;
+    let now = Utc::now();
+    let ticket = uuid::Uuid::new_v4();
+    session::ActiveModel {
+        id: Set(transfer_record_id(ticket)),
+        user_id: Set(user.user.id),
+        user_agent: Set(Some(metadata)),
+        ip_address: Set(None),
+        created_at: Set(now),
+        expires_at: Set(now + Duration::seconds(45)),
+        last_accessed_at: Set(now),
+        is_revoked: Set(false),
+    }
+    .insert(&db)
+    .await?;
+    let scheme = if headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        == Some("https")
+    {
+        "https"
+    } else {
+        "http"
+    };
+    let port = transfer_port(&source_host, &target, &port);
+    let url = format!("{scheme}://{target}{port}/auth/host-transfer/complete?ticket={ticket}");
+    let mut response = Redirect::to(&url).into_response();
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+async fn complete_host_transfer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<CompleteTransfer>,
+) -> Result<Response> {
+    let (host, _) =
+        request_host(&headers).ok_or_else(|| AppError::BadRequest("Invalid host".into()))?;
+    let ticket = uuid::Uuid::parse_str(&query.ticket)
+        .map_err(|_| AppError::Unauthorized("Invalid transfer".into()))?;
+    let db = state.get_db().await?;
+    let id = transfer_record_id(ticket);
+    let tx = db.begin().await?;
+    let record = Session::find_by_id(&id)
+        .one(&tx)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Invalid transfer".into()))?;
+    let (app, source_sid) = transfer_source(record.user_agent.as_deref(), &host)
+        .filter(|(_, sid)| *sid != id)
+        .map(|(app, sid)| (app.to_owned(), sid.to_owned()))
+        .ok_or_else(|| AppError::Unauthorized("Invalid transfer host".into()))?;
+    if record.is_revoked || record.expires_at <= Utc::now() {
+        return Err(AppError::Unauthorized("Expired transfer".into()));
+    }
+    let updated = Session::update_many()
+        .col_expr(session::Column::IsRevoked, true.into())
+        .filter(session::Column::Id.eq(&id))
+        .filter(session::Column::IsRevoked.eq(false))
+        .exec(&tx)
+        .await?;
+    if updated.rows_affected != 1 {
+        return Err(AppError::Unauthorized("Used transfer".into()));
+    }
+    let source = Session::find_by_id(&source_sid)
+        .one(&tx)
+        .await?
+        .filter(|s| s.user_id == record.user_id && !s.is_revoked && s.expires_at > Utc::now())
+        .ok_or_else(|| AppError::Unauthorized("Expired session".into()))?;
+    User::find_by_id(source.user_id)
+        .one(&tx)
+        .await?
+        .filter(|u| u.is_active && u.is_approved)
+        .ok_or_else(|| AppError::Unauthorized("Inactive account".into()))?;
+    tx.commit().await?;
+    let assignments = AppDomainAssignment::find()
+        .filter(app_domain_assignment::Column::AppName.eq(&app))
+        .filter(app_domain_assignment::Column::Enabled.eq(true))
+        .all(&db)
+        .await?;
+    let permissions = crate::endpoints::extractors::get_user_permissions(&db, source.user_id).await;
+    let mut authorized = false;
+    for assignment in assignments {
+        let Some(domain) = Domain::find_by_id(assignment.domain_id).one(&db).await? else {
+            continue;
+        };
+        if transfer_target(&assignment, &domain).as_deref() == Some(&host)
+            && permissions
+                .iter()
+                .any(|p| p == "app.*" || p == &format!("app.{app}"))
+        {
+            authorized = true;
+            break;
+        }
+    }
+    if !authorized {
+        return Err(AppError::Forbidden("App access revoked".into()));
+    }
+    let token = create_session_token(&source_sid)?;
+    let secure = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        == Some("https");
+    let mut response = Redirect::to("/").into_response();
+    let cookie_domain = cookie_domain_for_host(&host);
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        session_cookie_for_slot(0, &token, secure, cookie_domain),
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        active_session_cookie(0, secure, cookie_domain),
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        session_cookie(&token, secure, cookie_domain),
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+#[cfg(test)]
+mod host_transfer_tests {
+    use super::*;
+
+    #[test]
+    fn ticket_record_id_fits_session_column() {
+        let ticket = uuid::Uuid::new_v4();
+        let id = transfer_record_id(ticket);
+        assert_eq!(id, ticket.to_string());
+        assert!(id.len() <= 36);
+    }
+
+    #[test]
+    fn ticket_metadata_fits_session_user_agent_column() {
+        let sid = uuid::Uuid::new_v4().to_string();
+        let host = "a".repeat(240);
+        assert!(transfer_metadata(&host, "plex", &sid).is_none());
+        assert!(transfer_metadata("plex.example", "plex", &sid).is_some());
+    }
+
+    #[test]
+    fn cookie_domain_only_applies_to_the_target_parent() {
+        assert!(host_accepts_cookie_domain("example.test", "example.test"));
+        assert!(host_accepts_cookie_domain(
+            "Plex.Example.Test",
+            "example.test"
+        ));
+        assert!(!host_accepts_cookie_domain(
+            "unrelated.test",
+            "example.test"
+        ));
+        assert!(!host_accepts_cookie_domain(
+            "badexample.test",
+            "example.test"
+        ));
+    }
+
+    #[test]
+    fn transfer_metadata_requires_discriminator_host_and_canonical_source_sid() {
+        let sid = uuid::Uuid::new_v4().to_string();
+        let host = "photos.example";
+        let valid = format!("{TRANSFER_MARKER}{host}|plex|{sid}");
+        assert_eq!(
+            transfer_source(Some(&valid), host),
+            Some(("plex", sid.as_str()))
+        );
+        for agent in [
+            None,
+            Some("Mozilla/5.0"),
+            Some("photos.example|source-session"),
+            Some("photos.example|"),
+            Some("host-transfer|photos.example"),
+            Some("host-transfer|other.example|source-session"),
+            Some("host-transfer|photos.example|plex|not-a-uuid"),
+            Some("host-transfer|photos.example|"),
+            Some("host-transfer|photos.example||00000000-0000-0000-0000-000000000000"),
+        ] {
+            assert_eq!(transfer_source(agent, host), None, "{agent:?}");
+        }
+        assert_eq!(transfer_source(Some(&valid), "other.example"), None);
+        assert_eq!(transfer_source(Some(&format!("{valid}|extra")), host), None);
+    }
+
+    #[test]
+    fn host_and_port_validation_rejects_redirect_injection() {
+        for bad in [
+            "evil.test/path",
+            "evil.test@trusted.test",
+            "evil.test:99999",
+            "evil.test:0",
+            "evil.test:80@trusted",
+            "evil.test\r\nLocation:evil.test",
+            "-bad.test",
+            "bad..test",
+            "[::1]:80",
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Ok(host) = HeaderValue::from_str(bad) {
+                headers.insert(header::HOST, host);
+                assert!(request_host(&headers).is_none(), "{bad}");
+            }
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("KUBARR.EXAMPLE:18080"),
+        );
+        assert_eq!(
+            request_host(&headers),
+            Some(("kubarr.example".into(), ":18080".into()))
+        );
+    }
 }
 
 // ============================================================================
@@ -334,14 +722,40 @@ fn cookie_domain_attribute() -> &'static str {
     })
 }
 
+// A configured parent cookie domain is invalid on an unrelated exact-host
+// assignment. Issue host-only cookies there; sibling hosts keep the shared
+// parent-domain cookie behavior.
+fn cookie_domain_for_host(host: &str) -> &'static str {
+    let attribute = cookie_domain_attribute();
+    let Some(domain) = attribute.strip_prefix("; Domain=") else {
+        return "";
+    };
+    if host_accepts_cookie_domain(host, domain) {
+        attribute
+    } else {
+        ""
+    }
+}
+
+fn host_accepts_cookie_domain(host: &str, domain: &str) -> bool {
+    host.eq_ignore_ascii_case(domain)
+        || host
+            .to_ascii_lowercase()
+            .ends_with(&format!(".{}", domain.to_ascii_lowercase()))
+}
+
 /// Create an indexed session cookie with the given token
 fn create_session_cookie_for_slot(slot: usize, token: &str, secure: bool) -> HeaderValue {
+    session_cookie_for_slot(slot, token, secure, cookie_domain_attribute())
+}
+
+fn session_cookie_for_slot(slot: usize, token: &str, secure: bool, domain: &str) -> HeaderValue {
     let cookie = format!(
         "{}_{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{}{}",
         SESSION_COOKIE_BASE,
         slot,
         token,
-        cookie_domain_attribute(),
+        domain,
         if secure { "; Secure" } else { "" }
     );
     HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""))
@@ -349,11 +763,15 @@ fn create_session_cookie_for_slot(slot: usize, token: &str, secure: bool) -> Hea
 
 /// Create the active session cookie
 fn create_active_session_cookie(slot: usize, secure: bool) -> HeaderValue {
+    active_session_cookie(slot, secure, cookie_domain_attribute())
+}
+
+fn active_session_cookie(slot: usize, secure: bool, domain: &str) -> HeaderValue {
     let cookie = format!(
         "{}={}; SameSite=Lax; Path=/; Max-Age=604800{}{}",
         ACTIVE_SESSION_COOKIE,
         slot,
-        cookie_domain_attribute(),
+        domain,
         if secure { "; Secure" } else { "" }
     );
     HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""))
@@ -361,11 +779,15 @@ fn create_active_session_cookie(slot: usize, secure: bool) -> HeaderValue {
 
 /// Legacy: Create a session cookie with the given token (for backwards compatibility)
 fn create_session_cookie(token: &str, secure: bool) -> HeaderValue {
+    session_cookie(token, secure, cookie_domain_attribute())
+}
+
+fn session_cookie(token: &str, secure: bool, domain: &str) -> HeaderValue {
     let cookie = format!(
         "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800{}{}",
         SESSION_COOKIE_NAME,
         token,
-        cookie_domain_attribute(),
+        domain,
         if secure { "; Secure" } else { "" }
     );
     HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""))

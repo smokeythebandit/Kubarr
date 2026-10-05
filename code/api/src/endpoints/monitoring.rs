@@ -4,6 +4,8 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::Result;
 use crate::middleware::permissions::{Authorized, MonitoringView};
@@ -19,6 +21,7 @@ pub fn monitoring_routes(state: AppState) -> Router {
     Router::new()
         .route("/vm/apps", get(get_app_metrics))
         .route("/vm/cluster", get(get_cluster_metrics))
+        .route("/vm/gpus", get(get_gpu_metrics))
         .route("/vm/app/{app_name}", get(get_app_detail_metrics))
         .route(
             "/vm/cluster/network-history",
@@ -71,6 +74,24 @@ pub struct ClusterMetrics {
     pub total_storage_bytes: i64,
     pub used_storage_bytes: i64,
     pub storage_usage_percent: f64,
+}
+
+/// Fresh, node-level exporter telemetry. Null means no recent valid sample.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GpuDeviceMetrics {
+    pub node: String,
+    pub vendor: String,
+    pub device: String,
+    pub utilization_percent: Option<f64>,
+    pub memory_used_bytes: Option<u64>,
+    pub memory_total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GpuMetricsResponse {
+    /// False when VictoriaMetrics could not answer all GPU queries.
+    pub available: bool,
+    pub devices: Vec<GpuDeviceMetrics>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -210,6 +231,228 @@ async fn query_vm_range(query: &str, start: f64, end: f64, step: &str) -> Vec<se
 // ============================================================================
 // Endpoint Handlers
 // ============================================================================
+
+// Do not accept an arbitrary PromQL expression or URL from the request. The
+// instant-query response timestamp is the evaluation time, NOT the scrape time.
+const GPU_MAX_AGE_SECONDS: f64 = 120.0;
+const GPU_MAX_DEVICES: usize = 256;
+const GPU_QUERIES: [(&str, &str); 3] = [
+    (
+        "default_rollup(DCGM_FI_DEV_GPU_UTIL[120s])",
+        "tlast_over_time(DCGM_FI_DEV_GPU_UTIL[120s])",
+    ),
+    (
+        "default_rollup(DCGM_FI_DEV_FB_USED[120s])",
+        "tlast_over_time(DCGM_FI_DEV_FB_USED[120s])",
+    ),
+    (
+        "default_rollup(DCGM_FI_DEV_FB_FREE[120s])",
+        "tlast_over_time(DCGM_FI_DEV_FB_FREE[120s])",
+    ),
+];
+
+async fn query_gpu_series(
+    query: &'static str,
+    now: f64,
+) -> std::result::Result<Vec<serde_json::Value>, ()> {
+    let client = reqwest::Client::new();
+    let mut response = client
+        .get(format!("{VICTORIAMETRICS_URL}/api/v1/query"))
+        .query(&[("query", query), ("time", &now.to_string())])
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|_| ())?;
+    if !response.status().is_success() {
+        return Err(());
+    }
+    // Bound the response as well as the number of devices accepted below.
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
+        if body.len().saturating_add(chunk.len()) > 1_048_576 {
+            return Err(());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    parse_gpu_response(&body)
+}
+
+fn parse_gpu_response(body: &[u8]) -> std::result::Result<Vec<serde_json::Value>, ()> {
+    let json: serde_json::Value = serde_json::from_slice(body).map_err(|_| ())?;
+    if json["status"] != "success" || json["data"]["resultType"] != "vector" {
+        return Err(());
+    }
+    let results = json["data"]["result"].as_array().ok_or(())?;
+    if results.len() > GPU_MAX_DEVICES {
+        return Err(());
+    }
+    Ok(results.clone())
+}
+
+fn gpu_sample(result: &serde_json::Value, now: f64) -> Option<(String, String, String, f64)> {
+    let labels = result.get("metric")?;
+    // Hostname and UUID are exporter labels, not app/pod allocation labels.
+    let node = labels.get("Hostname")?.as_str()?.trim();
+    let uuid = labels.get("UUID")?.as_str()?.trim();
+    if node.is_empty() || uuid.is_empty() {
+        return None;
+    }
+    let instance = labels
+        .get("GPU_I_ID")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let profile = labels
+        .get("GPU_I_PROFILE")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let values = result.get("value")?.as_array()?;
+    let ts = values.first()?.as_f64()?;
+    let value = values.get(1)?.as_str()?.parse::<f64>().ok()?;
+    if !ts.is_finite() || !value.is_finite() || ts > now + 30.0 || now - ts > GPU_MAX_AGE_SECONDS {
+        return None;
+    }
+    let device = if instance.is_empty() {
+        uuid.to_string()
+    } else {
+        format!("{uuid} (MIG {profile} instance {instance})")
+    };
+    Some((node.to_string(), uuid.to_string(), device, value))
+}
+
+fn gpu_series_identity(result: &serde_json::Value) -> Option<String> {
+    let mut labels = result.get("metric")?.as_object()?.clone();
+    // Rollup functions can differ in whether they retain the metric name.
+    labels.remove("__name__");
+    serde_json::to_string(&labels).ok()
+}
+
+fn with_scrape_timestamps(
+    values: &[serde_json::Value],
+    timestamps: &[serde_json::Value],
+    now: f64,
+) -> Vec<serde_json::Value> {
+    let source_times: BTreeMap<_, _> = timestamps
+        .iter()
+        .filter_map(|series| {
+            let key = gpu_series_identity(series)?;
+            let source = series["value"][1].as_str()?.parse::<f64>().ok()?;
+            if !source.is_finite() || source > now + 30.0 || now - source > GPU_MAX_AGE_SECONDS {
+                return None;
+            }
+            Some((key, source))
+        })
+        .collect();
+    values
+        .iter()
+        .filter_map(|series| {
+            let source = source_times.get(&gpu_series_identity(series)?)?;
+            let mut series = series.clone();
+            // gpu_sample must validate the *source* time, not the eval time.
+            series["value"][0] = serde_json::json!(source);
+            Some(series)
+        })
+        .collect()
+}
+
+fn assemble_gpu_metrics(
+    utilization: &[serde_json::Value],
+    used: &[serde_json::Value],
+    free: &[serde_json::Value],
+    now: f64,
+) -> Vec<GpuDeviceMetrics> {
+    // Key on the full device identity (including MIG instance); never merge
+    // samples from different nodes or instances with the same GPU index.
+    let mut devices: BTreeMap<(String, String), (GpuDeviceMetrics, Option<u64>)> = BTreeMap::new();
+    for (series, kind) in [(utilization, 0), (used, 1), (free, 2)] {
+        for result in series {
+            let Some((node, _uuid, device, value)) = gpu_sample(result, now) else {
+                continue;
+            };
+            let entry = devices
+                .entry((node.clone(), device.clone()))
+                .or_insert_with(|| {
+                    (
+                        GpuDeviceMetrics {
+                            node,
+                            vendor: "NVIDIA".to_string(),
+                            device,
+                            utilization_percent: None,
+                            memory_used_bytes: None,
+                            memory_total_bytes: None,
+                        },
+                        None,
+                    )
+                });
+            match kind {
+                0 if (0.0..=100.0).contains(&value) => entry.0.utilization_percent = Some(value),
+                1 | 2 if value >= 0.0 && value <= (u64::MAX / 1_048_576) as f64 => {
+                    let bytes = (value * 1_048_576.0) as u64;
+                    if kind == 1 {
+                        entry.0.memory_used_bytes = Some(bytes);
+                    } else {
+                        entry.1 = Some(bytes);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    devices
+        .into_values()
+        .map(|(mut device, free)| {
+            device.memory_total_bytes = device
+                .memory_used_bytes
+                .zip(free)
+                .and_then(|(used, free)| used.checked_add(free));
+            device
+        })
+        .collect()
+}
+
+/// Get fresh NVIDIA DCGM node/device telemetry from VictoriaMetrics.
+#[utoipa::path(
+    get,
+    path = "/api/monitoring/vm/gpus",
+    tag = "Monitoring",
+    responses((status = 200, body = GpuMetricsResponse))
+)]
+async fn get_gpu_metrics(_auth: Authorized<MonitoringView>) -> Result<Json<GpuMetricsResponse>> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let (utilization, utilization_time, used, used_time, free, free_time) = tokio::join!(
+        query_gpu_series(GPU_QUERIES[0].0, now),
+        query_gpu_series(GPU_QUERIES[0].1, now),
+        query_gpu_series(GPU_QUERIES[1].0, now),
+        query_gpu_series(GPU_QUERIES[1].1, now),
+        query_gpu_series(GPU_QUERIES[2].0, now),
+        query_gpu_series(GPU_QUERIES[2].1, now),
+    );
+    let available = utilization.is_ok()
+        && utilization_time.is_ok()
+        && used.is_ok()
+        && used_time.is_ok()
+        && free.is_ok()
+        && free_time.is_ok();
+    let utilization = with_scrape_timestamps(
+        &utilization.unwrap_or_default(),
+        &utilization_time.unwrap_or_default(),
+        now,
+    );
+    let used = with_scrape_timestamps(
+        &used.unwrap_or_default(),
+        &used_time.unwrap_or_default(),
+        now,
+    );
+    let free = with_scrape_timestamps(
+        &free.unwrap_or_default(),
+        &free_time.unwrap_or_default(),
+        now,
+    );
+    let devices = assemble_gpu_metrics(&utilization, &used, &free, now);
+    Ok(Json(GpuMetricsResponse { available, devices }))
+}
 
 /// Get resource metrics for all installed apps from VictoriaMetrics
 #[utoipa::path(
@@ -1118,6 +1361,147 @@ async fn check_metrics_available(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample(metric_value: &str, ts: f64, node: &str, instance: &str) -> serde_json::Value {
+        serde_json::json!({
+            "metric": { "Hostname": node, "UUID": "GPU-123", "gpu": "0",
+                "GPU_I_ID": instance, "GPU_I_PROFILE": "1g.5gb" },
+            "value": [ts, metric_value]
+        })
+    }
+
+    #[test]
+    fn gpu_samples_join_by_node_and_mig_identity_and_keep_real_zeros() {
+        let now = 1_800_000_000.0;
+        let utilization = vec![
+            sample("0", now - 60.0, "node-a", ""),
+            sample("75", now - 20.0, "node-a", "2"),
+            sample("20", now - 10.0, "node-b", ""),
+        ];
+        let used = vec![
+            sample("0", now - 60.0, "node-a", ""),
+            sample("128", now - 10.0, "node-a", "2"),
+        ];
+        let free = vec![
+            sample("1024", now - 20.0, "node-a", ""),
+            sample("384", now - 10.0, "node-a", "2"),
+        ];
+        let devices = assemble_gpu_metrics(&utilization, &used, &free, now);
+        assert_eq!(devices.len(), 3);
+        assert_eq!(devices[0].utilization_percent, Some(0.0));
+        assert_eq!(devices[0].memory_used_bytes, Some(0));
+        assert_eq!(devices[0].memory_total_bytes, Some(1024 * 1_048_576));
+        assert!(devices[1].device.contains("MIG 1g.5gb instance 2"));
+        assert_eq!(devices[1].memory_total_bytes, Some(512 * 1_048_576));
+        assert_eq!(devices[2].memory_used_bytes, None);
+        assert_eq!(
+            serde_json::to_value(&devices[2]).unwrap()["memory_used_bytes"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn gpu_stale_invalid_and_missing_samples_are_not_zero() {
+        let now = 1_800_000_000.0;
+        let stale = sample("80", now - 121.0, "node-a", "");
+        let future = sample("80", now + 31.0, "node-a", "");
+        let nan = sample("NaN", now, "node-a", "");
+        let missing = serde_json::json!({"metric": {"UUID": "GPU-123"}, "value": [now, "50"]});
+        assert!(assemble_gpu_metrics(&[stale, future, nan, missing], &[], &[], now).is_empty());
+        let devices = assemble_gpu_metrics(
+            &[sample("101", now, "node-a", "")],
+            &[sample("10", now, "node-a", "")],
+            &[sample("-2", now, "node-a", "")],
+            now,
+        );
+        assert_eq!(devices[0].utilization_percent, None);
+        assert_eq!(devices[0].memory_total_bytes, None);
+        assert_eq!(devices[0].memory_used_bytes, Some(10 * 1_048_576));
+    }
+
+    #[test]
+    fn gpu_queries_pair_bounded_values_with_raw_sample_timestamps() {
+        for (metric, (value_query, timestamp_query)) in [
+            "DCGM_FI_DEV_GPU_UTIL",
+            "DCGM_FI_DEV_FB_USED",
+            "DCGM_FI_DEV_FB_FREE",
+        ]
+        .iter()
+        .zip(GPU_QUERIES)
+        {
+            assert_eq!(value_query, format!("default_rollup({metric}[120s])"));
+            assert_eq!(timestamp_query, format!("tlast_over_time({metric}[120s])"));
+        }
+    }
+
+    #[test]
+    fn gpu_fresh_evaluation_with_stale_source_sample_is_unavailable() {
+        let now = 1_800_000_000.0;
+        // VM's instant response timestamps are *evaluation* times. The actual
+        // scrape may be older even when value[0] says "now".
+        let values = vec![sample("87", now, "node-a", "")];
+        let source_times = vec![sample(&(now - 180.0).to_string(), now, "node-a", "")];
+        assert!(assemble_gpu_metrics(
+            &with_scrape_timestamps(&values, &source_times, now),
+            &[],
+            &[],
+            now
+        )
+        .is_empty());
+
+        // A timestamp from another target (even on the same node/device)
+        // cannot authenticate this sample; a missing timestamp cannot either.
+        let mut wrong_target = sample(&(now - 30.0).to_string(), now, "node-a", "");
+        wrong_target["metric"]["job"] = serde_json::json!("other");
+        assert!(with_scrape_timestamps(&values, &[wrong_target], now).is_empty());
+        assert!(with_scrape_timestamps(&values, &[], now).is_empty());
+
+        let fresh_times = vec![sample(&(now - 30.0).to_string(), now, "node-a", "")];
+        let verified = with_scrape_timestamps(&values, &fresh_times, now);
+        assert_eq!(
+            assemble_gpu_metrics(&verified, &[], &[], now)[0].utilization_percent,
+            Some(87.0)
+        );
+
+        let used = vec![sample("100", now, "node-a", "")];
+        let free = vec![sample("900", now, "node-a", "")];
+        let stale_free = vec![sample(&(now - 180.0).to_string(), now, "node-a", "")];
+        let device = assemble_gpu_metrics(
+            &verified,
+            &with_scrape_timestamps(&used, &fresh_times, now),
+            &with_scrape_timestamps(&free, &stale_free, now),
+            now,
+        )
+        .remove(0);
+        assert_eq!(device.memory_used_bytes, Some(100 * 1_048_576));
+        assert_eq!(device.memory_total_bytes, None);
+    }
+
+    #[test]
+    fn gpu_vm_response_rejects_errors_malformed_payloads_and_excessive_series() {
+        assert!(parse_gpu_response(
+            br#"{"status":"error","data":{"resultType":"vector","result":[]}}"#
+        )
+        .is_err());
+        assert!(parse_gpu_response(
+            br#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#
+        )
+        .is_err());
+        assert!(parse_gpu_response(
+            br#"{"status":"success","data":{"resultType":"vector","result":{}}}"#
+        )
+        .is_err());
+        assert!(parse_gpu_response(b"garbage").is_err());
+        assert!(parse_gpu_response(
+            br#"{"status":"success","data":{"resultType":"vector","result":[]}}"#
+        )
+        .unwrap()
+        .is_empty());
+        let excessive = serde_json::json!({"status": "success", "data": {
+            "resultType": "vector", "result": vec![serde_json::json!({}); GPU_MAX_DEVICES + 1]
+        }});
+        assert!(parse_gpu_response(&serde_json::to_vec(&excessive).unwrap()).is_err());
+    }
 
     // -------------------------------------------------------------------------
     // TimeSeriesPoint serialization
