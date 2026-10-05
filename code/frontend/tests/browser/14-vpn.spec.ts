@@ -42,7 +42,7 @@ for (const vpnType of ['wireguard', 'openvpn'] as const) {
     api.on('POST', '/api/vpn/providers', request => {
       expect(request.postDataJSON()).toEqual({
         name: 'New VPN', vpn_type: vpnType, service_provider: 'custom',
-        enabled: true, kill_switch: true, firewall_outbound_subnets: provider.firewall_outbound_subnets,
+        enabled: true, kill_switch: true, firewall_outbound_subnets: '',
         credentials: vpnType === 'wireguard'
           ? { private_key: 'fixture-key', addresses: ['10.2.0.2/32', '10.2.0.3/32'] }
           : { username: 'fixture-user', password: 'fixture-password' },

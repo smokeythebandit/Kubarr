@@ -136,7 +136,11 @@ async fn permitted_endpoints_persist_exact_queued_operation_and_linked_state() {
         } else {
             json!({})
         };
-        let body = json!({"app_name": APP, "custom_config": config}).to_string();
+        let body = if kind == "install" {
+            json!({"app_name": APP, "custom_config": config}).to_string()
+        } else {
+            "{}".to_string()
+        };
         let before = Utc::now();
         let (status, response) = request(&app, Some(&auth), method, &uri, &body).await;
         let after = Utc::now();
@@ -251,8 +255,18 @@ async fn malformed_install_and_unknown_catalog_requests_leave_no_rows() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_no_rows(&db).await;
     for uri in ["/install", "/missing/update", "/missing/restart"] {
-        let (status, body) =
-            request(&app, Some(&auth), "POST", uri, r#"{"app_name":"missing"}"#).await;
+        let (status, body) = request(
+            &app,
+            Some(&auth),
+            "POST",
+            uri,
+            if uri == "/install" {
+                r#"{"app_name":"missing"}"#
+            } else {
+                "{}"
+            },
+        )
+        .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert_no_rows(&db).await;
     }

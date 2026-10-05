@@ -368,7 +368,7 @@ impl AppManager {
             let result = app_operation::Entity::find_by_id(id)
                 .one(&transaction)
                 .await?
-                .unwrap();
+                .ok_or_else(|| AppError::NotFound(format!("Operation '{id}' not found")))?;
             transaction.commit().await?;
             return Ok(result.into());
         }
@@ -439,7 +439,7 @@ impl AppManager {
         let result = app_operation::Entity::find_by_id(id)
             .one(&transaction)
             .await?
-            .unwrap();
+            .ok_or_else(|| AppError::NotFound(format!("Operation '{id}' not found")))?;
         transaction.commit().await?;
         Ok(result.into())
     }

@@ -90,7 +90,7 @@ fn resource_counts(
     map: Option<&BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>>,
 ) -> BTreeMap<String, i64> {
     GPU_RESOURCES
-        .into_iter()
+        .iter()
         .filter_map(|(name, _)| {
             map.and_then(|map| map.get(*name))
                 .and_then(|quantity| quantity.0.parse::<i64>().ok())
@@ -260,7 +260,7 @@ pub fn validate_gpu_scheduling_config(custom_config: &HashMap<String, String>) -
 }
 
 /// None means preserve on upgrade; Some(None) explicitly disables and clears reused values.
-pub fn helm_values(selection: Option<(&GpuSelection, &str)>) -> Vec<String> {
+pub fn helm_values(selection: Option<(&GpuSelection, &str)>) -> Result<Vec<String>> {
     let mut values = vec![
         "gpu.enabled=false".into(),
         "gpu.provider=intel".into(),
@@ -281,13 +281,13 @@ pub fn helm_values(selection: Option<(&GpuSelection, &str)>) -> Vec<String> {
     }
     if let Some((selection, hostname)) = selection {
         // Validation occurs at enqueue and again immediately before deployment.
-        let resource = selected_resource(selection).expect("validated GPU selection");
+        let resource = selected_resource(selection)?;
         values[0] = "gpu.enabled=true".into();
         values[1] = format!("gpu.provider={}", selection.vendor.as_str());
         values[2] = format!("gpu.resourceName={resource}");
         values[4] = format!("nodeSelector.kubernetes\\.io/hostname={hostname}");
     }
-    values
+    Ok(values)
 }
 
 #[cfg(test)]
@@ -445,7 +445,7 @@ mod tests {
                 validate_selection(&client, &selection).await.unwrap(),
                 "host-a"
             );
-            let values = helm_values(Some((&selection, "host-a")));
+            let values = helm_values(Some((&selection, "host-a"))).unwrap();
             assert!(values.contains(&format!("gpu.resourceName={resource}")));
         }
         for (vendor, resource) in [
@@ -490,7 +490,16 @@ mod tests {
             "stable,gpu.enabled=true".into()
         )]))
         .is_err());
-        let cleared = helm_values(None);
+        let cleared = helm_values(None).unwrap();
+        assert!(helm_values(Some((
+            &GpuSelection {
+                vendor: GpuVendor::Amd,
+                node_name: "gpu-node".into(),
+                resource_name: None,
+            },
+            "host-a",
+        )))
+        .is_err());
         assert_eq!(
             &cleared[..5],
             [

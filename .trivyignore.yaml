@@ -1,0 +1,9 @@
+misconfigurations:
+  - id: DS-0002
+    paths:
+      - tests/acceptance/vpn/Dockerfile
+    statement: >-
+      Acceptance-only WireGuard server fixture: server.sh creates a network interface
+      and configures iptables, requiring root and NET_ADMIN. The lab runs only in
+      an explicitly authorized disposable Kind cluster on isolated Docker networks;
+      the server drops all other capabilities and reads a root-owned 0600 key.

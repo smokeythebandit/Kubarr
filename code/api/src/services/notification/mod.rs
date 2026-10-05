@@ -119,6 +119,8 @@ pub struct SendResult {
 }
 
 /// Trait for notification providers
+// async_trait generates a must_use boxed Future; Clippy 1.99 considers that redundant.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait NotificationProvider: Send + Sync {
     fn channel_type(&self) -> ChannelType;

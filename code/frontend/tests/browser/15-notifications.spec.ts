@@ -136,13 +136,14 @@ for (const success of [true, false]) {
     await expect(page.getByText('Please enter a test destination', { exact: true })).toBeVisible();
     expect(api.calls).not.toContain('POST /api/notifications/channels/email/test');
     await page.getByPlaceholder('test@example.com', { exact: true }).fill('recipient@example.test');
-    const dialog = success ? page.waitForEvent('dialog') : undefined;
+    if (success) {
+      page.once('dialog', async alert => {
+        expect(alert.message()).toBe('Test notification sent successfully!');
+        await alert.accept();
+      });
+    }
     await page.getByRole('button', { name: 'Test', exact: true }).click();
-    if (dialog) {
-      const alert = await dialog;
-      expect(alert.message()).toBe('Test notification sent successfully!');
-      await alert.accept();
-    } else {
+    if (!success) {
       await expect(page.getByText('Fixture SMTP rejected recipient', { exact: true })).toBeVisible();
     }
     await expect(page.getByRole('button', { name: 'Test', exact: true })).toBeEnabled();

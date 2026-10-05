@@ -70,12 +70,20 @@ fn run_command_with_stop(
     let mut child = command
         .spawn()
         .map_err(|e| AppError::Internal(format!("Failed to run helm: {e}")))?;
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Internal("Helm stdout pipe unavailable".into()))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Internal("Helm stderr pipe unavailable".into()))?;
     let stdout = std::thread::spawn({
-        let pipe = child.stdout.take().unwrap();
+        let pipe = stdout_pipe;
         move || drain(pipe)
     });
     let stderr = std::thread::spawn({
-        let pipe = child.stderr.take().unwrap();
+        let pipe = stderr_pipe;
         move || drain(pipe)
     });
     let start = Instant::now();

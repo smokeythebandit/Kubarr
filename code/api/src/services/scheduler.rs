@@ -69,6 +69,8 @@ impl PeriodicTask for AuditRetentionTask {
 }
 
 /// Trait for periodic background tasks
+// async_trait generates a must_use boxed Future; Clippy 1.99 considers that redundant.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PeriodicTask: Send + Sync {
     /// Task name for logging

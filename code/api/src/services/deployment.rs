@@ -284,7 +284,7 @@ impl<'a> DeploymentManager<'a> {
                         .as_ref()
                         .and_then(Option::as_ref)
                         .zip(gpu_hostname.as_deref()),
-                ));
+                )?);
             }
         }
         let mut vpn_values_file = None;

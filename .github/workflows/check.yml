@@ -139,6 +139,9 @@ jobs:
           scan-ref: .
           scanners: vuln,secret,misconfig
           severity: CRITICAL,HIGH
+          # Only the acceptance VPN fixture's DS-0002 finding is excepted;
+          # vulnerability and secret scanning still cover the entire checkout.
+          trivyignores: .trivyignore.yaml
           exit-code: '1'
 
   dockerfiles:
