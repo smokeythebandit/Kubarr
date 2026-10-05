@@ -69,7 +69,7 @@ async fn cleanup_postgres_tables(db: &DatabaseConnection) {
     for table in tables {
         let sql = format!("DROP TABLE IF EXISTS \"{}\" CASCADE", table);
         let _ = db
-            .execute(Statement::from_string(DbBackend::Postgres, sql))
+            .execute_raw(Statement::from_string(DbBackend::Postgres, sql))
             .await;
     }
 }
@@ -88,7 +88,7 @@ async fn get_table_names(db: &DatabaseConnection) -> Vec<String> {
     };
 
     let result: Vec<QueryResult> = db
-        .query_all(Statement::from_string(backend, sql))
+        .query_all_raw(Statement::from_string(backend, sql))
         .await
         .expect("Failed to query tables");
 
@@ -111,7 +111,7 @@ async fn get_table_columns(db: &DatabaseConnection, table: &str) -> Vec<(String,
     };
 
     let result: Vec<QueryResult> = db
-        .query_all(Statement::from_string(backend, sql))
+        .query_all_raw(Statement::from_string(backend, sql))
         .await
         .expect("Failed to query table info");
 
@@ -133,7 +133,7 @@ async fn get_foreign_keys(db: &DatabaseConnection, table: &str) -> Vec<(String, 
         DbBackend::Sqlite => {
             let sql = format!("PRAGMA foreign_key_list({})", table);
             let result: Vec<QueryResult> = db
-                .query_all(Statement::from_string(backend, sql))
+                .query_all_raw(Statement::from_string(backend, sql))
                 .await
                 .expect("Failed to query foreign keys");
 
@@ -167,7 +167,7 @@ async fn get_foreign_keys(db: &DatabaseConnection, table: &str) -> Vec<(String, 
                 table
             );
             let result: Vec<QueryResult> = db
-                .query_all(Statement::from_string(backend, sql))
+                .query_all_raw(Statement::from_string(backend, sql))
                 .await
                 .expect("Failed to query foreign keys");
 
@@ -202,7 +202,7 @@ async fn get_indexes(db: &DatabaseConnection, table: &str) -> Vec<String> {
     };
 
     let result: Vec<QueryResult> = db
-        .query_all(Statement::from_string(backend, sql))
+        .query_all_raw(Statement::from_string(backend, sql))
         .await
         .expect("Failed to query indexes");
 
@@ -314,9 +314,16 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
     let tables = get_table_names(db).await;
 
     let expected_tables = [
+        "app_audit_outbox",
+        "app_domain_assignments",
+        "app_operations",
+        "app_states",
         "app_vpn_configs",
         "audit_logs",
+        "domains",
+        "dynamic_dns_profiles",
         "invites",
+        "letsencrypt_profiles",
         "notification_channels",
         "notification_events",
         "notification_logs",
@@ -325,7 +332,6 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
         "role_app_permissions",
         "role_permissions",
         "roles",
-        "server_config",
         "sessions",
         "storage_config",
         "system_settings",
@@ -336,7 +342,6 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
         "users",
         "vpn_providers",
         "two_factor_recovery_codes",
-        "cloudflare_tunnels",
     ];
 
     for table in expected_tables {
@@ -617,7 +622,7 @@ async fn can_insert_user_impl(db: &DatabaseConnection) {
         _ => panic!("Unsupported database backend"),
     };
 
-    let result = db.execute(Statement::from_string(backend, sql)).await;
+    let result = db.execute_raw(Statement::from_string(backend, sql)).await;
     assert!(
         result.is_ok(),
         "Should be able to insert user: {:?}",
@@ -640,7 +645,7 @@ async fn can_insert_role_and_assign_to_user_impl(db: &DatabaseConnection) {
         DbBackend::Postgres => "INSERT INTO users (username, email, hashed_password, is_active, is_approved, totp_enabled, created_at, updated_at) VALUES ('testuser', 'test@example.com', 'hashed', true, true, false, NOW(), NOW())".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    db.execute(Statement::from_string(backend, user_sql))
+    db.execute_raw(Statement::from_string(backend, user_sql))
         .await
         .expect("Failed to insert user");
 
@@ -650,7 +655,7 @@ async fn can_insert_role_and_assign_to_user_impl(db: &DatabaseConnection) {
         DbBackend::Postgres => "INSERT INTO roles (name, is_system, requires_2fa, created_at) VALUES ('test_role_unique', false, false, NOW())".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    db.execute(Statement::from_string(backend, role_sql))
+    db.execute_raw(Statement::from_string(backend, role_sql))
         .await
         .expect("Failed to insert role");
 
@@ -661,7 +666,7 @@ async fn can_insert_role_and_assign_to_user_impl(db: &DatabaseConnection) {
         _ => panic!("Unsupported database backend"),
     };
     let result = db
-        .execute(Statement::from_string(backend, assign_sql))
+        .execute_raw(Statement::from_string(backend, assign_sql))
         .await;
 
     assert!(
@@ -691,7 +696,7 @@ async fn can_insert_notification_data_impl(db: &DatabaseConnection) {
         DbBackend::Postgres => "INSERT INTO users (username, email, hashed_password, is_active, is_approved, totp_enabled, created_at, updated_at) VALUES ('testuser', 'test@example.com', 'hashed', true, true, false, NOW(), NOW())".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    db.execute(Statement::from_string(backend, user_sql))
+    db.execute_raw(Statement::from_string(backend, user_sql))
         .await
         .expect("Failed to insert user");
 
@@ -701,7 +706,7 @@ async fn can_insert_notification_data_impl(db: &DatabaseConnection) {
         DbBackend::Postgres => "INSERT INTO notification_channels (channel_type, enabled, config, created_at, updated_at) VALUES ('email', true, '{}', NOW(), NOW())".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    db.execute(Statement::from_string(backend, channel_sql))
+    db.execute_raw(Statement::from_string(backend, channel_sql))
         .await
         .expect("Failed to insert notification channel");
 
@@ -711,7 +716,7 @@ async fn can_insert_notification_data_impl(db: &DatabaseConnection) {
         DbBackend::Postgres => "INSERT INTO notification_events (event_type, enabled, severity) VALUES ('user_login', true, 'info')".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    db.execute(Statement::from_string(backend, event_sql))
+    db.execute_raw(Statement::from_string(backend, event_sql))
         .await
         .expect("Failed to insert notification event");
 
@@ -721,7 +726,9 @@ async fn can_insert_notification_data_impl(db: &DatabaseConnection) {
         DbBackend::Postgres => "INSERT INTO user_notifications (user_id, title, message, severity, read, created_at) SELECT id, 'Test', 'Test message', 'info', false, NOW() FROM users WHERE username = 'testuser'".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    let result = db.execute(Statement::from_string(backend, notif_sql)).await;
+    let result = db
+        .execute_raw(Statement::from_string(backend, notif_sql))
+        .await;
 
     assert!(
         result.is_ok(),
@@ -747,7 +754,7 @@ async fn can_insert_audit_log_impl(db: &DatabaseConnection) {
         _ => panic!("Unsupported database backend"),
     };
 
-    let result = db.execute(Statement::from_string(backend, sql)).await;
+    let result = db.execute_raw(Statement::from_string(backend, sql)).await;
     assert!(
         result.is_ok(),
         "Should be able to insert audit log: {:?}",
@@ -766,7 +773,7 @@ async fn cascade_delete_user_removes_related_data_impl(db: &DatabaseConnection) 
 
     // Enable foreign keys for SQLite
     if backend == DbBackend::Sqlite {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "PRAGMA foreign_keys = ON".to_string(),
         ))
@@ -780,7 +787,7 @@ async fn cascade_delete_user_removes_related_data_impl(db: &DatabaseConnection) 
         DbBackend::Postgres => "INSERT INTO users (username, email, hashed_password, is_active, is_approved, totp_enabled, created_at, updated_at) VALUES ('testuser', 'test@example.com', 'hashed', true, true, false, NOW(), NOW())".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    db.execute(Statement::from_string(backend, user_sql))
+    db.execute_raw(Statement::from_string(backend, user_sql))
         .await
         .expect("Failed to insert user");
 
@@ -790,7 +797,7 @@ async fn cascade_delete_user_removes_related_data_impl(db: &DatabaseConnection) 
         DbBackend::Postgres => "INSERT INTO roles (name, is_system, requires_2fa, created_at) VALUES ('test_role_unique', false, false, NOW())".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    db.execute(Statement::from_string(backend, role_sql))
+    db.execute_raw(Statement::from_string(backend, role_sql))
         .await
         .expect("Failed to insert role");
 
@@ -800,7 +807,7 @@ async fn cascade_delete_user_removes_related_data_impl(db: &DatabaseConnection) 
         DbBackend::Postgres => "INSERT INTO user_roles (user_id, role_id) SELECT u.id, r.id FROM users u, roles r WHERE u.username = 'testuser' AND r.name = 'test_role_unique'".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    db.execute(Statement::from_string(backend, assign_sql))
+    db.execute_raw(Statement::from_string(backend, assign_sql))
         .await
         .expect("Failed to assign role");
 
@@ -810,12 +817,12 @@ async fn cascade_delete_user_removes_related_data_impl(db: &DatabaseConnection) 
         DbBackend::Postgres => "INSERT INTO user_notifications (user_id, title, message, severity, read, created_at) SELECT id, 'Test', 'Test message', 'info', false, NOW() FROM users WHERE username = 'testuser'".to_string(),
         _ => panic!("Unsupported database backend"),
     };
-    db.execute(Statement::from_string(backend, notif_sql))
+    db.execute_raw(Statement::from_string(backend, notif_sql))
         .await
         .expect("Failed to insert notification");
 
     // Delete user
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         "DELETE FROM users WHERE username = 'testuser'".to_string(),
     ))
@@ -824,7 +831,7 @@ async fn cascade_delete_user_removes_related_data_impl(db: &DatabaseConnection) 
 
     // Verify user_roles was cascaded (check for orphan records referencing non-existent users)
     let user_roles: Vec<QueryResult> = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT COUNT(*) as cnt FROM user_roles WHERE user_id NOT IN (SELECT id FROM users)"
                 .to_string(),
@@ -840,7 +847,7 @@ async fn cascade_delete_user_removes_related_data_impl(db: &DatabaseConnection) 
 
     // Verify user_notifications was cascaded (check for orphan records referencing non-existent users)
     let notifications: Vec<QueryResult> = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT COUNT(*) as cnt FROM user_notifications WHERE user_id NOT IN (SELECT id FROM users)".to_string(),
         ))
@@ -870,7 +877,7 @@ async fn migration_count_impl(db: &DatabaseConnection) {
 
     let backend = db.get_database_backend();
     let result: Vec<QueryResult> = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT COUNT(*) as cnt FROM seaql_migrations".to_string(),
         ))

@@ -2374,9 +2374,7 @@ mod tests_db {
     async fn get_app_vpn_config_orphaned_config_returns_error() {
         use crate::models::{app_vpn_config, vpn_provider};
         use chrono::Utc;
-        use sea_orm::{
-            ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, Set, Statement,
-        };
+        use sea_orm::{ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, Set};
         use sea_orm_migration::MigratorTrait;
 
         // Use a single-connection pool to ensure FK PRAGMA works consistently
@@ -2422,26 +2420,20 @@ mod tests_db {
         .expect("insert app config");
 
         // Disable FK checks temporarily to delete provider and create orphan
-        db.execute(Statement::from_string(
-            sea_orm::DatabaseBackend::Sqlite,
-            "PRAGMA foreign_keys = OFF".to_string(),
-        ))
-        .await
-        .expect("disable FK");
+        db.execute_unprepared("PRAGMA foreign_keys = OFF")
+            .await
+            .expect("disable FK");
 
-        db.execute(Statement::from_string(
-            sea_orm::DatabaseBackend::Sqlite,
-            format!("DELETE FROM vpn_providers WHERE id = {}", provider.id),
+        db.execute_unprepared(&format!(
+            "DELETE FROM vpn_providers WHERE id = {}",
+            provider.id
         ))
         .await
         .expect("delete provider");
 
-        db.execute(Statement::from_string(
-            sea_orm::DatabaseBackend::Sqlite,
-            "PRAGMA foreign_keys = ON".to_string(),
-        ))
-        .await
-        .expect("re-enable FK");
+        db.execute_unprepared("PRAGMA foreign_keys = ON")
+            .await
+            .expect("re-enable FK");
 
         let result = get_app_vpn_config(&db, "orphan_app").await;
         assert!(result.is_err(), "expected error for orphaned config");

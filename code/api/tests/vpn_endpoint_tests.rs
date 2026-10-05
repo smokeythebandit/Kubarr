@@ -22,9 +22,7 @@ use axum::{
     http::{header, Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, Statement,
-};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
 use tower::util::ServiceExt;
 
 mod common;
@@ -1204,12 +1202,9 @@ async fn test_vpn_assignment_rolls_back_when_enqueue_fails() {
     .await;
     let cookie = cookie.expect("login cookie");
 
-    db.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "DROP TABLE app_states".to_string(),
-    ))
-    .await
-    .expect("drop app_states to force queue failure");
+    db.execute_unprepared("DROP TABLE app_states")
+        .await
+        .expect("drop app_states to force queue failure");
 
     let (status, _) = authenticated_put(
         create_router(state),

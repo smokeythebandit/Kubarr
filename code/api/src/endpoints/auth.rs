@@ -7,7 +7,8 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, ExprTrait, PaginatorTrait, QueryFilter, Set,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

@@ -32,7 +32,7 @@ FROM builder AS built
 RUN pnpm run build
 
 # Production stage - minimal BusyBox httpd (~1MB total)
-FROM public.ecr.aws/docker/library/busybox:1.37
+FROM public.ecr.aws/docker/library/busybox:1.38
 
 WORKDIR /var/www
 
@@ -46,7 +46,7 @@ RUN adduser -D -u 1000 kubarr
 EXPOSE 8080
 
 # Run as non-root user
-USER kubarr
+USER 1000:1000
 
 # Run BusyBox httpd in foreground on unprivileged port 8080
 # SPA routing handled by the backend proxy (intercepts 404s and serves index.html)

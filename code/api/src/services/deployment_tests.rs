@@ -37,7 +37,7 @@ async fn database(app_name: &str) -> DatabaseConnection {
         schema.create_table_from_entity(vpn_provider::Entity),
         schema.create_table_from_entity(app_vpn_config::Entity),
     ] {
-        db.execute(DbBackend::Sqlite.build(&table)).await.unwrap();
+        db.execute(&table).await.unwrap();
     }
     app_state::ActiveModel {
         app_name: Set(app_name.to_owned()),

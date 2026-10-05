@@ -20,7 +20,7 @@ async fn test_migrations_create_tables() {
 
     // Check users table exists
     let result = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT COUNT(*) FROM users".to_string(),
         ))
@@ -29,7 +29,7 @@ async fn test_migrations_create_tables() {
 
     // Check roles table exists
     let result = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT COUNT(*) FROM roles".to_string(),
         ))
@@ -38,7 +38,7 @@ async fn test_migrations_create_tables() {
 
     // Check oauth tables exist (oauth2_* replaced by oauth_providers and oauth_accounts)
     let result = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT COUNT(*) FROM oauth_providers".to_string(),
         ))
@@ -47,7 +47,7 @@ async fn test_migrations_create_tables() {
 
     // Check notification tables exist
     let result = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT COUNT(*) FROM notification_channels".to_string(),
         ))
@@ -65,7 +65,7 @@ async fn test_migrations_are_idempotent() {
 
     // Tables should still exist and be usable
     let result = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT 1 FROM users LIMIT 1".to_string(),
         ))

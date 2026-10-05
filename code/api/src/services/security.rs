@@ -4,9 +4,9 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use rand::RngExt;
-use rand_core::OsRng;
 use rsa::{
     pkcs8::{DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding},
+    rand_core::OsRng,
     RsaPrivateKey, RsaPublicKey,
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -343,39 +343,35 @@ const TOTP_ISSUER: &str = "Kubarr";
 /// Generate a new TOTP secret (base32 encoded)
 pub fn generate_totp_secret() -> String {
     use totp_rs::Secret;
-    Secret::generate_secret().to_encoded().to_string()
+    Secret::generate().to_base32()
 }
 
 /// Create a TOTP instance for verification
-fn create_totp(secret: &str, account_name: &str) -> Result<totp_rs::TOTP> {
-    use totp_rs::{Algorithm, Secret, TOTP};
+fn create_totp(secret: &str, account_name: &str) -> Result<totp_rs::Totp> {
+    use totp_rs::{Builder, Secret};
 
-    let secret_bytes = Secret::Encoded(secret.to_string())
-        .to_bytes()
+    let secret_bytes = Secret::try_from_base32(secret)
         .map_err(|e| AppError::Internal(format!("Invalid TOTP secret: {}", e)))?;
 
-    TOTP::new(
-        Algorithm::SHA1,
-        6,  // digits
-        1,  // skew (allow 1 step before/after for clock drift)
-        30, // step (30 seconds)
-        secret_bytes,
-        Some(TOTP_ISSUER.to_string()),
-        account_name.to_string(),
-    )
-    .map_err(|e| AppError::Internal(format!("Failed to create TOTP: {}", e)))
+    Builder::new()
+        .with_secret(secret_bytes)
+        .with_issuer(Some(TOTP_ISSUER))
+        .with_account_name(account_name)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to create TOTP: {}", e)))
 }
 
 /// Verify a TOTP code
 pub fn verify_totp(secret: &str, code: &str, account_name: &str) -> Result<bool> {
     let totp = create_totp(secret, account_name)?;
-    Ok(totp.check_current(code).unwrap_or(false))
+    Ok(totp.check_current(code).is_some())
 }
 
 /// Get TOTP provisioning URI for QR code generation
 pub fn get_totp_provisioning_uri(secret: &str, account_name: &str) -> Result<String> {
     let totp = create_totp(secret, account_name)?;
-    Ok(totp.get_url())
+    totp.to_url()
+        .map_err(|e| AppError::Internal(format!("Failed to create TOTP URI: {}", e)))
 }
 
 /// Generate a 2FA challenge token

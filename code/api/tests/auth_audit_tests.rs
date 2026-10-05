@@ -12,10 +12,7 @@ use kubarr::{
     models::prelude::*,
     services::{decode_session_token, init_jwt_keys},
 };
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Set,
-    Statement,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 use std::net::SocketAddr;
 use tower::ServiceExt;
 
@@ -154,19 +151,15 @@ async fn valid_totp_emits_verified_and_login_but_failed_totp_does_not() {
     assert_eq!(prior.len(), 1);
     assert_eq!(prior[0].action, "2fa_failed");
 
-    use totp_rs::{Algorithm, Secret, TOTP};
-    let code = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        Secret::Encoded(secret.clone()).to_bytes().unwrap(),
-        Some("Kubarr".to_string()),
-        "totp@example.com".to_string(),
-    )
-    .unwrap()
-    .generate_current()
-    .unwrap();
+    use totp_rs::{Builder, Secret};
+    let code = Builder::new()
+        .with_secret(Secret::try_from_base32(&secret).unwrap())
+        .with_issuer(Some("Kubarr"))
+        .with_account_name("totp@example.com")
+        .build()
+        .unwrap()
+        .generate_current()
+        .to_string();
     let success = app.oneshot(Request::builder().uri("/auth/login").method("POST")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::json!({"username":"totpactor", "password":"totp-password-SENTINEL", "totp_code":code}).to_string())).unwrap()).await.unwrap();
@@ -237,12 +230,9 @@ async fn recovery_verification_audit_failure_does_not_consume_code_or_create_ses
     .await
     .unwrap();
     let app = create_router(build_test_app_state_with_db(db.clone()).await);
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        "DROP TABLE audit_logs".to_string(),
-    ))
-    .await
-    .unwrap();
+    db.execute_unprepared("DROP TABLE audit_logs")
+        .await
+        .unwrap();
     let response = app.oneshot(Request::builder().uri("/auth/2fa/recover").method("POST")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::json!({"username":"rollback2fa", "password":"correct-password", "recovery_code":code}).to_string())).unwrap()).await.unwrap();
@@ -551,12 +541,9 @@ async fn revoke_session_audits_only_authorized_deletions_and_rolls_back_on_audit
     let survivor_id = decode_session_token(second_owner_cookie.split('=').nth(1).unwrap())
         .unwrap()
         .sid;
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        "DROP TABLE audit_logs".to_string(),
-    ))
-    .await
-    .unwrap();
+    db.execute_unprepared("DROP TABLE audit_logs")
+        .await
+        .unwrap();
     let response = app
         .oneshot(
             Request::builder()
