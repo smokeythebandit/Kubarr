@@ -47,5 +47,5 @@ ENV BUILD_TIME=${BUILD_TIME}
 ENV CHANNEL=${CHANNEL}
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 EXPOSE 8000
-USER kubarr
+USER 1000:1000
 ENTRYPOINT ["/app/kubarr-api"]
