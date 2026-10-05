@@ -2,11 +2,11 @@ use base64::prelude::{Engine, BASE64_STANDARD};
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::DecodePrivateKey;
+use rsa::sha2::Sha512;
 use rsa::signature::{RandomizedSigner, SignatureEncoding};
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::Sha512;
 
 use super::DomainReconciler;
 use crate::error::{AppError, Result};

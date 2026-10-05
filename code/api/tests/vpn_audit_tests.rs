@@ -10,9 +10,7 @@ use kubarr::{
     services::vpn::{self, AssignVpnRequest, CreateVpnProviderRequest, UpdateVpnProviderRequest},
     state::AppState,
 };
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, Statement,
-};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
 use tower::ServiceExt;
 
 mod common;
@@ -333,12 +331,9 @@ async fn provider_mutations_roll_back_if_audit_insert_fails() {
                 .unwrap(),
             )
         };
-        db.execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "DROP TABLE audit_logs".to_string(),
-        ))
-        .await
-        .unwrap();
+        db.execute_unprepared("DROP TABLE audit_logs")
+            .await
+            .unwrap();
 
         let uri = existing
             .as_ref()

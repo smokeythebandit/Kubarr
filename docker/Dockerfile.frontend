@@ -32,7 +32,7 @@ FROM builder AS built
 RUN pnpm run build
 
 # Production stage - minimal BusyBox httpd (~1MB total)
-FROM public.ecr.aws/docker/library/busybox:1.37
+FROM public.ecr.aws/docker/library/busybox:1.38
 
 WORKDIR /var/www
 

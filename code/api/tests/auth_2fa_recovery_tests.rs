@@ -457,21 +457,15 @@ async fn test_login_with_valid_totp_code_succeeds() {
 
     // Generate a valid TOTP code using the known secret
     let code = {
-        use totp_rs::{Algorithm, Secret, TOTP};
-        let secret_bytes = Secret::Encoded(totp_secret.clone())
-            .to_bytes()
-            .expect("decode TOTP secret");
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            secret_bytes,
-            Some("Kubarr".to_string()),
-            "totp_login@test.com".to_string(),
-        )
-        .expect("create TOTP");
-        totp.generate_current().expect("generate TOTP code")
+        use totp_rs::{Builder, Secret};
+        let secret_bytes = Secret::try_from_base32(&totp_secret).expect("decode TOTP secret");
+        let totp = Builder::new()
+            .with_secret(secret_bytes)
+            .with_issuer(Some("Kubarr"))
+            .with_account_name("totp_login@test.com")
+            .build()
+            .expect("create TOTP");
+        totp.generate_current().to_string()
     };
 
     let body = serde_json::json!({

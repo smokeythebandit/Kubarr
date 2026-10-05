@@ -1989,22 +1989,16 @@ async fn test_enable_2fa_success_generates_recovery_codes() {
 
     // Step 2: generate the current TOTP code for this secret
     let code = {
-        use totp_rs::{Algorithm, Secret, TOTP};
+        use totp_rs::{Builder, Secret};
 
-        let secret_bytes = Secret::Encoded(secret.to_string())
-            .to_bytes()
-            .expect("decode TOTP secret");
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            secret_bytes,
-            Some("Kubarr".to_string()),
-            "enable2fauser@example.com".to_string(),
-        )
-        .expect("create TOTP");
-        totp.generate_current().expect("generate TOTP code")
+        let secret_bytes = Secret::try_from_base32(secret).expect("decode TOTP secret");
+        let totp = Builder::new()
+            .with_secret(secret_bytes)
+            .with_issuer(Some("Kubarr"))
+            .with_account_name("enable2fauser@example.com")
+            .build()
+            .expect("create TOTP");
+        totp.generate_current().to_string()
     };
 
     // Step 3: enable 2FA with the just-generated code

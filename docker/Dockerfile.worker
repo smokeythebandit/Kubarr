@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM public.ecr.aws/docker/library/rust:1.92-alpine AS builder
+FROM public.ecr.aws/docker/library/rust:1.96-alpine AS builder
 
 RUN apk add --no-cache musl-dev pkgconf openssl-dev openssl-libs-static
 
@@ -24,7 +24,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
 
 FROM alpine/helm:4.3.0 AS helm-source
 
-FROM public.ecr.aws/docker/library/alpine:3.23
+FROM public.ecr.aws/docker/library/alpine:3.24
 ARG COMMIT_HASH=unknown
 ARG BUILD_TIME=unknown
 ARG CHANNEL=dev

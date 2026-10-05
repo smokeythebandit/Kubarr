@@ -1,6 +1,6 @@
 use sea_orm::{
-    sea_query::Expr, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    sea_query::Expr, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, ExprTrait,
+    FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -404,7 +404,7 @@ pub struct AuditLogResponse {
 
 /// Get audit logs with filtering and pagination
 pub async fn get_audit_logs(db: &DbConn, query: AuditLogQuery) -> Result<AuditLogResponse> {
-    let page = query.page.unwrap_or(1).max(1);
+    let page = std::cmp::Ord::max(query.page.unwrap_or(1), 1);
     let per_page = query.per_page.unwrap_or(50).clamp(1, 100);
     let offset = (page - 1)
         .checked_mul(per_page)

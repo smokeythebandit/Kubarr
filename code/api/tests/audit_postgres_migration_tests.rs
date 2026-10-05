@@ -33,7 +33,7 @@ async fn postgres_audit_details_migration_and_transactional_insert() {
         .expect("connect to disposable PostgreSQL audit_test database");
     assert_eq!(db.get_database_backend(), DbBackend::Postgres);
     let existing = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
             "SELECT count(*) AS tables FROM pg_tables WHERE schemaname = 'public'".to_owned(),
         ))
@@ -50,7 +50,7 @@ async fn postgres_audit_details_migration_and_transactional_insert() {
         .await
         .expect("apply all migrations, including audit details TEXT migration 000030");
     let details_column = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
             "SELECT data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'audit_logs' AND column_name = 'details'".to_owned(),
         ))
@@ -64,7 +64,7 @@ async fn postgres_audit_details_migration_and_transactional_insert() {
         "text"
     );
     let outbox = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
             "SELECT to_regclass('public.app_audit_outbox')::text AS table_name".to_owned(),
         ))
