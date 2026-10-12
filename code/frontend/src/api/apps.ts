@@ -1,5 +1,6 @@
 import apiClient from './client';
 import type { AppConfig, AppOperation, AppState, DeploymentRequest, GpuSelection } from '../types';
+import type { InstallOptions } from '../types/app';
 
 // Export type for convenience
 export type App = AppConfig;
@@ -27,6 +28,11 @@ export const appsApi = {
   // Get specific app from catalog
   getApp: async (appName: string): Promise<AppConfig> => {
     const response = await apiClient.get<AppConfig>(`/apps/catalog/${appName}`);
+    return response.data;
+  },
+
+  getInstallOptions: async (appName: string): Promise<InstallOptions> => {
+    const response = await apiClient.get<InstallOptions>(`/apps/catalog/${encodeURIComponent(appName)}/install-options`);
     return response.data;
   },
 

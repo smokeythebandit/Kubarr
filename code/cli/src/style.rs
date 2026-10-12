@@ -38,13 +38,10 @@ pub fn print_banner() {
     );
 }
 
-pub fn wizard_section(title: &str, message: &str) {
-    println!();
-    println!("{} {}", paint("::", CYAN), paint(title, BOLD));
-    println!("   {}", paint(message, DIM));
-}
-
 pub fn step(name: &str, message: &str) {
+    if install_events::stage(name) {
+        return;
+    }
     if install_events::emit(format!(">> {name}\n   {message}")) {
         return;
     }

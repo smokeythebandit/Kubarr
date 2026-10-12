@@ -14,18 +14,27 @@ use crate::middleware::permissions::{
     AppsDelete, AppsInstall, AppsRestart, AppsView, Authenticated, Authorized,
 };
 use crate::models::audit_log::AuditAction;
+use crate::services::app_storage;
 use crate::services::gpu::{self, GpuNode, GpuSelection};
+use crate::services::install_options::{self, InstallStorage};
+use crate::services::vpn::AssignVpnRequest;
 use crate::services::{
-    AppConfig, AppManager, AppOperationResponse, AppStateResponse, DeploymentManager,
-    DeploymentRequest, OP_DELETE, OP_INSTALL, OP_RESTART, OP_UPDATE,
+    AppConfig, AppManager, AppOperationResponse, AppStateResponse, DeploymentManager, OP_DELETE,
+    OP_INSTALL, OP_RESTART, OP_UPDATE,
 };
 use crate::state::AppState;
+use sea_orm::TransactionTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 /// Create apps routes
 pub fn apps_routes(state: AppState) -> Router {
     Router::new()
         .route("/catalog", get(list_catalog))
         .route("/catalog/{app_name}", get(get_app_from_catalog))
+        .route(
+            "/catalog/{app_name}/install-options",
+            get(get_install_options),
+        )
         .route("/catalog/{app_name}/icon", get(get_app_icon))
         .route("/installed", get(list_installed_apps))
         .route("/gpu/nodes", get(gpu_nodes))
@@ -66,6 +75,55 @@ pub struct NamespaceQuery {
 struct UpdateAppRequest {
     #[serde(default, deserialize_with = "gpu::gpu_field")]
     gpu: Option<Option<GpuSelection>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallRequest {
+    app_name: String,
+    #[serde(default)]
+    _namespace: Option<String>,
+    #[serde(default)]
+    chart_version: Option<String>,
+    #[serde(default)]
+    storage: Option<InstallStorage>,
+    // Outer option distinguishes omitted (legacy: retain existing assignment)
+    // from null (explicit No VPN). A null needs vpn.manage if assigned.
+    #[serde(default, deserialize_with = "vpn_choice")]
+    vpn: Option<Option<AssignVpnRequest>>,
+    #[serde(default)]
+    custom_config: HashMap<String, String>,
+    #[serde(default, deserialize_with = "gpu::gpu_field")]
+    gpu: Option<Option<GpuSelection>>,
+}
+
+fn vpn_choice<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<Option<AssignVpnRequest>>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    if value.is_null() {
+        Ok(Some(None))
+    } else {
+        AssignVpnRequest::deserialize(value)
+            .map(|vpn| Some(Some(vpn)))
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[utoipa::path(get, path = "/api/apps/catalog/{app_name}/install-options", tag = "Apps", params(("app_name" = String, Path)), responses((status = 200, body = install_options::InstallOptions)))]
+async fn get_install_options(
+    State(state): State<AppState>,
+    Path(app_name): Path<String>,
+    _auth: Authorized<AppsView>,
+) -> Result<Json<install_options::InstallOptions>> {
+    let catalog = state.catalog.read().await;
+    let mut options = install_options::load(&catalog, &app_name)?;
+    drop(catalog);
+    if let Some(saved) = app_storage::get(&state.get_db().await?, &options.app_name).await? {
+        options.saved_storage = Some(saved.storage);
+        options.saved_chart_version = Some(saved.chart_version);
+    }
+    Ok(Json(options))
 }
 
 /// Discover supported Intel/NVIDIA/AMD node resources and Kubernetes node readiness.
@@ -203,19 +261,113 @@ async fn list_installed_apps(
 async fn install_app(
     State(state): State<AppState>,
     auth: Authorized<AppsInstall>,
-    Json(request): Json<DeploymentRequest>,
+    Json(request): Json<InstallRequest>,
 ) -> Result<Json<AppOperationResponse>> {
     let db = state.get_db().await?;
-    let manager = AppManager::new(db, state.k8s_client.clone(), state.catalog.clone());
-    let operation = manager
-        .enqueue_gpu_operation(
-            &request.app_name,
-            OP_INSTALL,
-            request.custom_config,
-            request.gpu,
-            Some(auth.user_id()),
-        )
-        .await?;
+    let manager = AppManager::new(db.clone(), state.k8s_client.clone(), state.catalog.clone());
+    let has_choices =
+        request.chart_version.is_some() || request.storage.is_some() || request.vpn.is_some();
+    if has_choices && !request.custom_config.is_empty() {
+        return Err(AppError::BadRequest(
+            "Wizard choices cannot be mixed with custom_config".into(),
+        ));
+    }
+    let operation = if has_choices {
+        let options = {
+            let catalog = state.catalog.read().await;
+            install_options::load(&catalog, &request.app_name)?
+        };
+        if request.chart_version.as_deref() != Some(options.chart_version.as_str()) {
+            return Err(AppError::Conflict(
+                "Chart changed; reload install options and review again".into(),
+            ));
+        }
+        let requested_storage = request.storage.unwrap_or_default();
+        install_options::validate(&options, &requested_storage)?;
+        if request.gpu.is_some() && !options.gpu_supported {
+            return Err(AppError::BadRequest(
+                "GPU is unsupported for this chart".into(),
+            ));
+        }
+        if request.vpn.as_ref().is_some_and(|v| v.is_some()) && !options.vpn_supported {
+            return Err(AppError::BadRequest(
+                "VPN is unsupported for this chart".into(),
+            ));
+        }
+        let permissions =
+            crate::endpoints::extractors::get_user_permissions(&db, auth.user_id()).await;
+        let can_manage_vpn = permissions.iter().any(|p| p == "vpn.manage");
+        if request.vpn.as_ref().is_some_and(|v| v.is_some()) && !can_manage_vpn {
+            return Err(AppError::Forbidden(
+                "vpn.manage required for install-time VPN".into(),
+            ));
+        }
+        let tx = db.begin().await?;
+        let active = crate::models::app_operation::Entity::find()
+            .filter(crate::models::app_operation::Column::AppName.eq(&request.app_name))
+            .filter(
+                crate::models::app_operation::Column::Status.is_in(["queued", "running", "paused"]),
+            )
+            .one(&tx)
+            .await?;
+        if active.is_some() {
+            return Err(AppError::Conflict(
+                "An app operation is already in progress".into(),
+            ));
+        }
+        let saved = app_storage::get(&tx, &request.app_name).await?;
+        let storage = app_storage::materialize(
+            &options,
+            &requested_storage,
+            saved.as_ref().map(|s| &s.storage),
+        )?;
+        let fresh_private_config = saved
+            .as_ref()
+            .is_some_and(|s| s.fresh_private_config && s.storage.config == storage.config);
+        let existing = crate::models::app_vpn_config::Entity::find_by_id(&request.app_name)
+            .one(&tx)
+            .await?;
+        if existing.is_some() && !options.vpn_supported && !matches!(request.vpn, Some(None)) {
+            return Err(AppError::BadRequest("This chart cannot install with its existing VPN assignment; remove it explicitly with vpn.manage".into()));
+        }
+        if matches!(request.vpn, Some(None)) && existing.is_some() && !can_manage_vpn {
+            return Err(AppError::Forbidden(
+                "vpn.manage required to remove an existing VPN assignment".into(),
+            ));
+        }
+        if let Some(vpn) = request.vpn {
+            if let Some(vpn) = vpn {
+                crate::services::vpn::assign_vpn_to_app(&tx, &request.app_name, vpn).await?;
+            } else {
+                crate::services::vpn::remove_vpn_from_app(&tx, &request.app_name).await?;
+            }
+        }
+        let result = manager
+            .enqueue_install_in_transaction(
+                &tx,
+                &request.app_name,
+                &options.chart_version,
+                storage.clone(),
+                fresh_private_config,
+                request.gpu,
+                auth.user_id(),
+            )
+            .await?;
+        // Queue, VPN assignment and durable desired storage are all-or-nothing.
+        app_storage::save(&tx, &request.app_name, &options.chart_version, &storage).await?;
+        tx.commit().await?;
+        result
+    } else {
+        manager
+            .enqueue_gpu_operation(
+                &request.app_name,
+                OP_INSTALL,
+                request.custom_config,
+                request.gpu,
+                Some(auth.user_id()),
+            )
+            .await?
+    };
     state.endpoint_cache.invalidate(&request.app_name).await;
 
     Ok(Json(operation))

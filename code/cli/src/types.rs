@@ -34,11 +34,22 @@ pub struct InstallOptions {
     pub release: String,
     pub frontend_node_port: Option<u16>,
     pub backend_node_port: Option<u16>,
+    /// Set only by the browser wizard; flag-driven installs retain their legacy defaults.
+    pub web_access: Option<WebAccess>,
+    /// Web LoadBalancer probe's chart version; pin the gateway install to it.
+    pub gateway_chart_version: Option<String>,
     pub values_files: Vec<String>,
     pub server_name: Option<String>,
     pub admin: Option<AdminUser>,
     pub wait: bool,
     pub dry_run: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebAccess {
+    NodePort(u16),
+    LoadBalancer,
+    PortForward,
 }
 
 pub struct AdminUser {
@@ -52,7 +63,6 @@ pub struct BootstrapOptions {
     pub install: InstallOptions,
     pub storage: BootstrapStorageOptions,
     pub skip_cluster_check: bool,
-    pub interactive: bool,
     pub grafana_enabled: bool,
 }
 

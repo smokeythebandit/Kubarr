@@ -1,4 +1,5 @@
 pub mod app_manager;
+pub mod app_storage;
 pub mod audit;
 pub mod cadvisor;
 pub mod catalog;
@@ -6,6 +7,7 @@ pub mod chart_sync;
 pub mod deployment;
 pub mod domain_reconciler;
 pub mod gpu;
+pub mod install_options;
 pub mod k8s;
 pub mod network_broadcaster;
 pub mod notification;

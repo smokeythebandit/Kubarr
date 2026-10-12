@@ -44,6 +44,7 @@ async fn create_postgres_db() -> Option<DatabaseConnection> {
 async fn cleanup_postgres_tables(db: &DatabaseConnection) {
     // Drop all tables in reverse dependency order
     let tables = [
+        "app_storage_configs",
         "user_notifications",
         "notification_logs",
         "user_notification_prefs",
@@ -318,6 +319,7 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
         "app_domain_assignments",
         "app_operations",
         "app_states",
+        "app_storage_configs",
         "app_vpn_configs",
         "audit_logs",
         "domains",

@@ -75,6 +75,7 @@ use crate::state::AppState;
         // Apps
         apps::list_catalog,
         apps::get_app_from_catalog,
+        apps::get_install_options,
         apps::get_app_icon,
         apps::list_installed_apps,
         apps::gpu_nodes,

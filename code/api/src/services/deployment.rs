@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
-use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
+use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Secret, Service};
 use kube::api::{Api, DeleteParams, ListParams};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
@@ -12,9 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::config::CONFIG;
 use crate::error::{AppError, Result};
 use crate::models::{app_state, app_vpn_config};
+use crate::services::app_storage;
 use crate::services::catalog::{kubarr_system_component, lifecycle_for_app_name, AppCatalog};
 use crate::services::gpu::{self, GpuSelection};
 use crate::services::helm_process;
+use crate::services::install_options::{self, InstallStorage};
 use crate::services::storage_config::{self, PersistedStorageConfig};
 use crate::services::vpn;
 use crate::services::K8sClient;
@@ -108,6 +110,9 @@ impl<'a> DeploymentManager<'a> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if let Some(error) = storage_migration_error(&stderr) {
+                return Err(error);
+            }
             return Err(AppError::Internal(format!(
                 "Helm command failed: {}",
                 stderr
@@ -121,6 +126,32 @@ impl<'a> DeploymentManager<'a> {
         self.catalog.get_app(app_name)?;
         let lifecycle = lifecycle_for_app_name(app_name);
         installed_version_from_metadata(self.release_metadata(&lifecycle).ok().flatten())
+    }
+
+    /// A failed or pending release is not a new install. Only an explicit
+    /// release-not-found response proves absence; other Helm errors fail closed.
+    pub fn release_absent(&self, app_name: &str) -> Result<bool> {
+        self.catalog
+            .get_app(app_name)
+            .ok_or_else(|| AppError::NotFound(format!("App '{app_name}' not found")))?;
+        Ok(self
+            .release_metadata(&lifecycle_for_app_name(app_name))?
+            .is_none())
+    }
+
+    /// A retained/private PVC can outlive a Helm release. Absence of a
+    /// release alone cannot prove that private config was created afresh.
+    pub async fn private_claim_absent(&self, app_name: &str, claim_name: &str) -> Result<bool> {
+        let namespace = lifecycle_for_app_name(app_name).namespace;
+        let claims: Api<PersistentVolumeClaim> =
+            Api::namespaced(self.k8s.client().clone(), &namespace);
+        match claims.get(claim_name).await {
+            Ok(_) => Ok(false),
+            Err(kube::Error::Api(error)) if error.code == 404 => Ok(true),
+            Err(error) => Err(AppError::Internal(format!(
+                "Cannot verify private claim before install: {error}"
+            ))),
+        }
     }
 
     fn release_metadata(
@@ -184,10 +215,26 @@ impl<'a> DeploymentManager<'a> {
         storage_config: Option<&PersistedStorageConfig>,
         stop: Option<&CancellationToken>,
     ) -> Result<DeploymentStatus> {
+        self.deploy_install_with_stop(request, storage_config, stop, None, false)
+            .await
+    }
+
+    pub async fn deploy_install_with_stop(
+        &self,
+        request: &DeploymentRequest,
+        storage_config: Option<&PersistedStorageConfig>,
+        stop: Option<&CancellationToken>,
+        install: Option<(&str, &InstallStorage, Option<Option<i64>>, bool)>,
+        grant_fresh_private_config: bool,
+    ) -> Result<DeploymentStatus> {
         let result = self
-            .deploy_app_with_command(request, storage_config, |args| {
-                self.run_helm_command_with_stop(args, stop)
-            })
+            .deploy_app_with_install(
+                request,
+                storage_config,
+                install,
+                grant_fresh_private_config,
+                |args| self.run_helm_command_with_stop(args, stop),
+            )
             .await?;
         if stop.is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Internal(
@@ -203,12 +250,36 @@ impl<'a> DeploymentManager<'a> {
         storage_config: Option<&PersistedStorageConfig>,
         run_helm: impl FnOnce(&[&str]) -> Result<String>,
     ) -> Result<DeploymentStatus> {
+        self.deploy_app_with_install(request, storage_config, None, false, run_helm)
+            .await
+    }
+
+    async fn deploy_app_with_install(
+        &self,
+        request: &DeploymentRequest,
+        storage_config: Option<&PersistedStorageConfig>,
+        install: Option<(&str, &InstallStorage, Option<Option<i64>>, bool)>,
+        grant_fresh_private_config: bool,
+        run_helm: impl FnOnce(&[&str]) -> Result<String>,
+    ) -> Result<DeploymentStatus> {
         // Get app config from catalog
         let app_config = self.catalog.get_app(&request.app_name).ok_or_else(|| {
             AppError::NotFound(format!("App '{}' not found in catalog", request.app_name))
         })?;
 
         validate_custom_config(&request.custom_config)?;
+        if grant_fresh_private_config
+            && !install.is_some_and(|(_, choice, _, _)| {
+                choice
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.create && config.existing_claim.is_empty())
+            })
+        {
+            return Err(AppError::BadRequest(
+                "Cannot grant private config proof without a fresh private claim".into(),
+            ));
+        }
         if request.gpu.is_some() && !matches!(request.app_name.as_str(), "plex" | "jellyfin") {
             return Err(AppError::BadRequest(
                 "GPU is supported only for Plex and Jellyfin".into(),
@@ -230,6 +301,19 @@ impl<'a> DeploymentManager<'a> {
             Some(db) => vpn::get_vpn_deployment_config(db, &request.app_name).await?,
             None => None,
         };
+        if let Some((_, _, Some(expected), _)) = install {
+            let actual = app_vpn_config::Entity::find_by_id(&request.app_name)
+                .one(self.db.ok_or_else(|| {
+                    AppError::Internal("Database unavailable for pinned VPN".into())
+                })?)
+                .await?
+                .map(|assignment| assignment.vpn_provider_id);
+            if actual != expected || vpn_config.is_some() != expected.is_some() {
+                return Err(AppError::Conflict(
+                    "VPN assignment changed since install was queued".into(),
+                ));
+            }
+        }
         let cleanup_unassigned_vpn_secret = self.db.is_some() && vpn_config.is_none();
 
         let chart_ref = self.get_chart_ref(&request.app_name);
@@ -237,7 +321,16 @@ impl<'a> DeploymentManager<'a> {
         let release = lifecycle.release_name.as_str();
         let release_namespace = lifecycle.release_namespace.as_str();
         let namespace = lifecycle.namespace.as_str();
-        let chart_version = if let Some(db) = self.db {
+        let chart_version = if let Some((pinned, choices, _, _)) = install {
+            let options = install_options::load(self.catalog, &request.app_name)?;
+            if options.chart_version != pinned {
+                return Err(AppError::Conflict(
+                    "Chart changed since install was queued".into(),
+                ));
+            }
+            install_options::validate(&options, choices)?;
+            Some(pinned.to_string())
+        } else if let Some(db) = self.db {
             app_state::Entity::find_by_id(request.app_name.clone())
                 .one(db)
                 .await
@@ -249,9 +342,23 @@ impl<'a> DeploymentManager<'a> {
         }
         .or_else(|| self.catalog.chart_version(&request.app_name));
 
-        // VPN credentials are a namespaced Secret and must exist before Helm
-        // renders the release. Helm's --create-namespace happens too late.
-        self.k8s.ensure_namespace(namespace).await?;
+        // Bootstrap system releases own their workload namespaces even though
+        // their Helm release metadata lives in default. Removing the Namespace
+        // from an upgrade manifest deletes that namespace and all its contents.
+        // User apps instead use namespaces created by the API before VPN setup.
+        let helm_owns_namespace = if app_config.is_system {
+            let namespaces: Api<Namespace> = Api::all(self.k8s.client().clone());
+            let live = namespaces.get(namespace).await.map_err(|error| {
+                AppError::Conflict(format!(
+                    "Cannot update system release {release}: verify namespace {namespace} exists and is owned by this release ({error})"
+                ))
+            })?;
+            namespace_owned_by_release(&live, release, release_namespace)?
+        } else {
+            // VPN credentials must exist before Helm renders an app release.
+            self.k8s.ensure_namespace(namespace).await?;
+            false
+        };
 
         // Keep Helm 3's client-side apply and readiness checks explicit under Helm 4.
         let mut helm_args = helm_upgrade_install_args(
@@ -271,9 +378,10 @@ impl<'a> DeploymentManager<'a> {
         }
 
         // Collect --set arguments
-        // The API creates the namespace above, so the chart must not render and
-        // make Helm adopt that cluster-scoped resource during upgrades.
-        let mut set_args: Vec<String> = namespace_helm_values(namespace).into();
+        // A prior Helm-owned Namespace must remain in the manifest on upgrade;
+        // an API-created namespace must never be adopted by the chart.
+        let mut set_args: Vec<String> =
+            namespace_helm_values(namespace, helm_owns_namespace).into();
         if matches!(request.app_name.as_str(), "plex" | "jellyfin") {
             // An omitted GPU on update preserves the release; install and explicit null
             // both reset previously reused managed values.
@@ -302,6 +410,14 @@ impl<'a> DeploymentManager<'a> {
                 set_args.push(format!("storage.media.nfs.server={server}"));
             }
         }
+        // This is only set after a previously absent Helm release finished a
+        // first install with new private config. It is not a user-supplied or
+        // legacy migration acknowledgement.
+        if install.is_some_and(|(_, choices, _, proven_fresh)| {
+            proven_fresh_private_config(proven_fresh, choices)
+        }) {
+            set_args.push("storage.config.migrationConfirmed=true".to_string());
+        }
 
         // LinuxServer-based app images use s6 init to switch to PUID/PGID and
         // adjust mounted config directories. The app charts are intentionally
@@ -321,8 +437,13 @@ impl<'a> DeploymentManager<'a> {
             })?;
             // Secret creation is part of the deployment boundary: never invoke
             // Helm if credentials could not be installed.
-            let secret_name =
-                vpn::create_vpn_secret_for_app(self.k8s, db, &request.app_name).await?;
+            let secret_name = vpn::create_vpn_secret_for_app_checked(
+                self.k8s,
+                db,
+                &request.app_name,
+                install.and_then(|(_, _, expected, _)| expected.flatten()),
+            )
+            .await?;
             tracing::info!(
                 "Created VPN secret {} for app {}",
                 secret_name,
@@ -343,9 +464,7 @@ impl<'a> DeploymentManager<'a> {
                     "firewallOutboundSubnets": vpn_config.firewall_outbound_subnets
                 }
             }))?;
-            fs::write(&path, values).map_err(|error| {
-                AppError::Internal(format!("Failed to write Helm values file: {error}"))
-            })?;
+            write_private_values(&path, &values)?;
             vpn_values_file = Some(path);
         } else {
             // These must be explicit even with --reuse-values, otherwise a
@@ -372,18 +491,49 @@ impl<'a> DeploymentManager<'a> {
             helm_args.extend(["--values", path]);
         }
 
+        // Lists must replace chart defaults as YAML, not Helm --set comma syntax.
+        // Keep the temporary file private even if future fields become sensitive.
+        let install_values_file = if let Some((_, choices, _, _)) = install {
+            let path = std::env::temp_dir().join(format!(
+                "kubarr-install-values-{}.yaml",
+                uuid::Uuid::new_v4()
+            ));
+            let values = serde_yaml::to_string(&install_options::helm_values(choices))?;
+            if let Err(error) = write_private_values(&path, &values) {
+                if let Some(path) = vpn_values_file.as_ref() {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(error);
+            }
+            Some(path)
+        } else {
+            None
+        };
+        let install_path = install_values_file
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+        if let Some(path) = install_path.as_deref() {
+            helm_args.extend(["--values", path]);
+        }
+
         // Run helm command
         let args_str: Vec<&str> = helm_args.iter().map(|s| s.as_ref()).collect();
         let result = run_helm(&args_str);
         if let Some(path) = vpn_values_file {
             let _ = fs::remove_file(path);
         }
-        result?;
-
-        if cleanup_unassigned_vpn_secret {
-            self.cleanup_unassigned_vpn_secret(&request.app_name, namespace)
-                .await?;
+        if let Some(path) = install_values_file {
+            let _ = fs::remove_file(path);
         }
+        self.finish_helm_result(
+            result,
+            &request.app_name,
+            namespace,
+            install.map(|(version, _, _, _)| version),
+            grant_fresh_private_config,
+            cleanup_unassigned_vpn_secret,
+        )
+        .await?;
 
         Ok(DeploymentStatus {
             app_name: request.app_name.clone(),
@@ -392,6 +542,45 @@ impl<'a> DeploymentManager<'a> {
             message: format!("Deploying {}", app_config.display_name),
             timestamp: Utc::now(),
         })
+    }
+
+    /// Runs only after the Helm process has completed. Persist the safe fresh
+    /// config proof before attempting independent Secret cleanup; neither a
+    /// cleanup error nor a failed cleanup retry can erase it.
+    async fn finish_helm_result(
+        &self,
+        helm: Result<String>,
+        app_name: &str,
+        namespace: &str,
+        chart_version: Option<&str>,
+        grant_fresh: bool,
+        cleanup_unused_secret: bool,
+    ) -> Result<()> {
+        helm?;
+        let proof = if grant_fresh {
+            match (self.db, chart_version) {
+                (Some(db), Some(version)) => {
+                    app_storage::mark_fresh_private_config(db, app_name, version).await
+                }
+                _ => Err(AppError::Internal(
+                    "Missing database or chart version for fresh config proof".into(),
+                )),
+            }
+        } else {
+            Ok(())
+        };
+        let cleanup = if cleanup_unused_secret {
+            self.cleanup_unassigned_vpn_secret(app_name, namespace)
+                .await
+        } else {
+            Ok(())
+        };
+        match (proof, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(proof), Ok(())) => Err(AppError::Internal(format!("Helm succeeded, but fresh private config proof could not be persisted: {proof}"))),
+            (Ok(()), Err(cleanup)) => Err(AppError::Internal(format!("Helm succeeded; VPN Secret cleanup failed: {cleanup}"))),
+            (Err(proof), Err(cleanup)) => Err(AppError::Internal(format!("Helm succeeded, but fresh private config proof could not be persisted: {proof}; VPN Secret cleanup also failed: {cleanup}"))),
+        }
     }
 
     async fn cleanup_unassigned_vpn_secret(&self, app_name: &str, namespace: &str) -> Result<()> {
@@ -782,17 +971,58 @@ impl<'a> DeploymentManager<'a> {
     }
 }
 
+fn write_private_values(path: &std::path::Path, values: &str) -> Result<()> {
+    use std::io::Write;
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut file = open
+        .open(path)
+        .map_err(|e| AppError::Internal(format!("Cannot create temporary Helm values: {e}")))?;
+    if let Err(error) = file.write_all(values.as_bytes()) {
+        let _ = fs::remove_file(path);
+        return Err(AppError::Internal(format!(
+            "Cannot write temporary Helm values: {error}"
+        )));
+    }
+    Ok(())
+}
+
+fn proven_fresh_private_config(proven_fresh: bool, choices: &InstallStorage) -> bool {
+    proven_fresh
+        && choices
+            .config
+            .as_ref()
+            .is_some_and(|config| config.create && config.existing_claim.is_empty())
+}
+
+fn storage_migration_error(stderr: &str) -> Option<AppError> {
+    if [
+        " was removed; ",
+        "private config upgrade requires storage.config.migrationConfirmed",
+        "storage.media.create=false would remove Helm-owned",
+    ]
+    .iter()
+    .any(|message| stderr.contains(message))
+    {
+        Some(AppError::BadRequest(format!(
+            "Storage migration requires a manual, reviewed Helm upgrade: stop writers, back up and copy/verify state, then upgrade with new values and --reset-values as described in kubarr-charts/STORAGE-MIGRATION.md. Kubarr cannot migrate data or acknowledge the copy automatically. Helm: {}",
+            stderr.trim()
+        )))
+    } else {
+        None
+    }
+}
+
 pub fn media_storage_helm_values(storage: &PersistedStorageConfig) -> Result<Vec<String>> {
-    let mut values = vec![
-        format!(
-            "storage.media.existingClaim={}",
-            storage_config::MEDIA_PVC_NAME
-        ),
-        format!(
-            "storage.media.mountPath={}",
-            storage_config::STORAGE_MOUNT_PATH
-        ),
-    ];
+    let mut values = vec![format!(
+        "storage.media.existingClaim={}",
+        storage_config::MEDIA_PVC_NAME
+    )];
 
     match storage.mode {
         storage_config::StorageMode::ExternalNfs => {
@@ -861,15 +1091,34 @@ fn helm_release_not_found(stderr: &str) -> bool {
     stderr.contains("release: not found") || stderr.contains("release not found")
 }
 
-fn namespace_helm_values(namespace: &str) -> [String; 2] {
+fn namespace_owned_by_release(
+    namespace: &Namespace,
+    release: &str,
+    release_namespace: &str,
+) -> Result<bool> {
+    let annotations = namespace.metadata.annotations.as_ref();
+    let owner = annotations.and_then(|a| a.get("meta.helm.sh/release-name"));
+    let owner_namespace = annotations.and_then(|a| a.get("meta.helm.sh/release-namespace"));
+    match (owner, owner_namespace) {
+        (Some(name), Some(ns)) if name == release && ns == release_namespace => Ok(true),
+        (None, None) => Ok(false),
+        _ => Err(AppError::Conflict(format!(
+            "Namespace {} is owned by another Helm release; refusing to change its ownership",
+            namespace.metadata.name.as_deref().unwrap_or_default()
+        ))),
+    }
+}
+
+fn namespace_helm_values(namespace: &str, helm_owns_namespace: bool) -> [String; 2] {
     [
         format!("namespace.name={namespace}"),
-        "namespace.create=false".to_string(),
+        format!("namespace.create={helm_owns_namespace}"),
     ]
 }
 
 fn validate_custom_config(custom_config: &HashMap<String, String>) -> Result<()> {
     gpu::validate_custom_gpu_keys(custom_config)?;
+    install_options::validate_custom_storage_keys(custom_config)?;
     if let Some(key) = custom_config.keys().find(|key| is_vpn_helm_key(key)) {
         return Err(AppError::BadRequest(format!(
             "custom_config key '{key}' is managed by Kubarr; use VPN settings instead"
@@ -1141,7 +1390,7 @@ mod tests {
     #[test]
     fn namespace_values_disable_chart_managed_namespaces() {
         assert_eq!(
-            namespace_helm_values("victoriametrics"),
+            namespace_helm_values("victoriametrics", false),
             [
                 "namespace.name=victoriametrics".to_string(),
                 "namespace.create=false".to_string(),
@@ -1150,10 +1399,72 @@ mod tests {
     }
 
     #[test]
+    fn temporary_helm_values_are_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("values.yaml");
+        write_private_values(&path, "storage:\n  mounts: []\n").unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("mounts: []"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(write_private_values(&path, "overwrite").is_err());
+    }
+
+    #[test]
+    fn migration_confirmation_requires_a_proven_fresh_private_claim() {
+        let config = InstallStorage {
+            config: Some(install_options::PrivateConfig {
+                create: true,
+                existing_claim: "".into(),
+                storage_class_name: "".into(),
+                size: "5Gi".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(!proven_fresh_private_config(false, &config));
+        assert!(proven_fresh_private_config(true, &config));
+        assert!(!proven_fresh_private_config(
+            true,
+            &InstallStorage::default()
+        ));
+        let existing = InstallStorage {
+            config: Some(install_options::PrivateConfig {
+                create: false,
+                existing_claim: "old-config".into(),
+                storage_class_name: "".into(),
+                size: "5Gi".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(!proven_fresh_private_config(true, &existing));
+    }
+
+    #[test]
     fn upgrade_install_plain_http_is_opt_in() {
         let secure = helm_upgrade_install_args("app", "oci://registry/app", "app", false);
         assert!(!secure.contains(&"--plain-http"));
         let plain = helm_upgrade_install_args("app", "oci://registry/app", "app", true);
         assert_eq!(plain.last(), Some(&"--plain-http"));
+    }
+
+    #[test]
+    fn storage_upgrade_errors_explain_the_manual_migration_without_masking_other_failures() {
+        for message in [
+            "storage.layout was removed; see the declarative storage migration",
+            "private config upgrade requires storage.config.migrationConfirmed=true",
+            "storage.media.create=false would remove Helm-owned PersistentVolumeClaim",
+        ] {
+            let error = storage_migration_error(message).expect("migration error");
+            let output = error.to_string();
+            assert!(output.contains("--reset-values"));
+            assert!(output.contains("STORAGE-MIGRATION.md"));
+            assert!(output.contains(message));
+        }
+        assert!(storage_migration_error("Kubernetes API unavailable").is_none());
     }
 }

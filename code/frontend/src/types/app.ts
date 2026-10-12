@@ -32,8 +32,29 @@ export interface VolumeConfig {
 export interface DeploymentRequest {
   app_name: string;
   namespace?: string;
-  custom_config?: Record<string, any>;
+  chart_version?: string;
+  storage?: InstallStorage;
+  vpn?: { vpn_provider_id: number; kill_switch_override?: boolean; port_forwarding?: boolean } | null;
+  custom_config?: Record<string, string>;
   gpu?: GpuSelection;
+}
+
+export interface StorageMount { name: string; source: string; target: string; mode: 'read' | 'read-write' }
+export interface PrivateConfig { create: boolean; existing_claim: string; storage_class_name: string; size: string }
+export interface InstallStorage { mounts?: StorageMount[]; workloads?: Record<string, { mounts: StorageMount[] }>; config?: PrivateConfig }
+export interface InstallOptions {
+  app_name: string;
+  chart_version: string;
+  mounts: StorageMount[] | null;
+  workloads: Record<string, StorageMount[]>;
+  config: PrivateConfig | null;
+  private_claim: string | null;
+  required: Record<string, string[]>;
+  reserved: Record<string, string[]>;
+  vpn_supported: boolean;
+  gpu_supported: boolean;
+  saved_storage?: InstallStorage;
+  saved_chart_version?: string;
 }
 
 export interface GpuSelection {

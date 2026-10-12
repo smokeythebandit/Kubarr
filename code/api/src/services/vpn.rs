@@ -119,6 +119,7 @@ pub struct VpnProviderResponse {
 
 /// Request to assign VPN to an app
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AssignVpnRequest {
     pub vpn_provider_id: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -512,11 +513,25 @@ pub async fn create_vpn_secret_for_app(
     db: &DbConn,
     app_name: &str,
 ) -> Result<String> {
+    create_vpn_secret_for_app_checked(k8s, db, app_name, None).await
+}
+
+pub async fn create_vpn_secret_for_app_checked(
+    k8s: &K8sClient,
+    db: &DbConn,
+    app_name: &str,
+    expected_provider_id: Option<i64>,
+) -> Result<String> {
     // Get app VPN config
     let config = AppVpnConfig::find_by_id(app_name)
         .one(db)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("No VPN config for app {}", app_name)))?;
+    if expected_provider_id.is_some_and(|id| config.vpn_provider_id != id) {
+        return Err(AppError::Conflict(
+            "VPN provider changed since install was queued".into(),
+        ));
+    }
 
     // Get provider
     let provider = VpnProvider::find_by_id(config.vpn_provider_id)
@@ -525,6 +540,11 @@ pub async fn create_vpn_secret_for_app(
         .ok_or_else(|| {
             AppError::Internal(format!("VPN provider {} not found", config.vpn_provider_id))
         })?;
+    if !provider.enabled {
+        return Err(AppError::BadRequest(
+            "Assigned VPN provider is disabled".into(),
+        ));
+    }
 
     // Parse credentials
     let credentials: serde_json::Value = serde_json::from_str(&provider.credentials_json)

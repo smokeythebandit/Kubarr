@@ -18,11 +18,13 @@ use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 use crate::models::audit_log::{AuditAction, ResourceType};
-use crate::models::{app_operation, app_state, audit_outbox, user};
+use crate::models::{app_operation, app_state, app_vpn_config, audit_outbox, user};
+use crate::services::app_storage;
 use crate::services::audit::log_on_transaction;
 use crate::services::catalog::AppCatalog;
 use crate::services::deployment::{DeploymentManager, DeploymentRequest};
 use crate::services::gpu::{self, GpuSelection, QUEUED_GPU_KEY};
+use crate::services::install_options::{self, InstallStorage};
 use crate::services::k8s::K8sClient;
 use crate::services::storage_config;
 use crate::state::{SharedCatalog, SharedK8sClient};
@@ -31,6 +33,25 @@ pub const OP_INSTALL: &str = "install";
 pub const OP_UPDATE: &str = "update";
 pub const OP_DELETE: &str = "delete";
 pub const OP_RESTART: &str = "restart";
+const QUEUED_INSTALL_KEY: &str = "__kubarr_install_choices";
+const QUEUED_STORAGE_KEY: &str = "__kubarr_storage_snapshot";
+
+#[derive(Serialize, Deserialize)]
+struct QueuedInstall {
+    chart_version: String,
+    storage: InstallStorage,
+    vpn_provider_id: Option<i64>,
+    #[serde(default)]
+    fresh_private_config: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct QueuedStorage {
+    chart_version: Option<String>,
+    storage: Option<InstallStorage>,
+    #[serde(default)]
+    fresh_private_config: bool,
+}
 
 pub const STATUS_QUEUED: &str = "queued";
 pub const STATUS_RUNNING: &str = "running";
@@ -136,6 +157,12 @@ impl AppManager {
         created_by: Option<i64>,
     ) -> Result<AppOperationResponse> {
         gpu::validate_custom_gpu_keys(&custom_config)?;
+        install_options::validate_custom_storage_keys(&custom_config)?;
+        if custom_config.contains_key(QUEUED_INSTALL_KEY)
+            || custom_config.contains_key(QUEUED_STORAGE_KEY)
+        {
+            return Err(AppError::BadRequest("Reserved install key".into()));
+        }
         self.enqueue_operation_unchecked(app_name, operation, custom_config, created_by)
             .await
     }
@@ -144,7 +171,7 @@ impl AppManager {
         &self,
         app_name: &str,
         operation: &str,
-        custom_config: HashMap<String, String>,
+        mut custom_config: HashMap<String, String>,
         created_by: Option<i64>,
     ) -> Result<AppOperationResponse> {
         if operation != OP_DELETE {
@@ -157,6 +184,13 @@ impl AppManager {
             }
         }
 
+        let transaction = self.db.begin().await?;
+        if matches!(operation, OP_INSTALL | OP_UPDATE) {
+            let snapshot = self.storage_snapshot(&transaction, app_name).await?;
+            if snapshot.storage.is_some() {
+                custom_config.insert(QUEUED_STORAGE_KEY.into(), serde_json::to_string(&snapshot)?);
+            }
+        }
         let now = Utc::now();
         let operation_model = app_operation::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
@@ -177,7 +211,6 @@ impl AppManager {
             updated_at: Set(now),
         };
 
-        let transaction = self.db.begin().await?;
         let inserted = operation_model.insert(&transaction).await?;
         self.mark_state_for_operation(&transaction, app_name, operation, &inserted.id)
             .await?;
@@ -195,6 +228,12 @@ impl AppManager {
         created_by: Option<i64>,
     ) -> Result<AppOperationResponse> {
         gpu::validate_custom_gpu_keys(&custom_config)?;
+        install_options::validate_custom_storage_keys(&custom_config)?;
+        if custom_config.contains_key(QUEUED_INSTALL_KEY)
+            || custom_config.contains_key(QUEUED_STORAGE_KEY)
+        {
+            return Err(AppError::BadRequest("Reserved install key".into()));
+        }
         if gpu.is_some() && !matches!(app_name, "plex" | "jellyfin") {
             return Err(AppError::BadRequest(
                 "GPU is supported only for Plex and Jellyfin".into(),
@@ -216,6 +255,104 @@ impl AppManager {
         // Only this method may insert the reserved queue key.
         self.enqueue_operation_unchecked(app_name, operation, custom_config, created_by)
             .await
+    }
+
+    async fn storage_snapshot(
+        &self,
+        tx: &DatabaseTransaction,
+        app_name: &str,
+    ) -> Result<QueuedStorage> {
+        let saved = app_storage::get(tx, app_name).await?;
+        let Some(saved) = saved else {
+            return Ok(QueuedStorage {
+                chart_version: None,
+                storage: None,
+                fresh_private_config: false,
+            });
+        };
+        let catalog = self.catalog.read().await;
+        let options = install_options::load(&catalog, app_name)?;
+        install_options::validate(&options, &saved.storage)?;
+        Ok(QueuedStorage {
+            chart_version: Some(options.chart_version),
+            storage: Some(saved.storage),
+            fresh_private_config: saved.fresh_private_config,
+        })
+    }
+
+    /// The VPN assignment and install operation share the caller's transaction.
+    pub async fn enqueue_install_in_transaction(
+        &self,
+        tx: &DatabaseTransaction,
+        app_name: &str,
+        version: &str,
+        storage: InstallStorage,
+        fresh_private_config: bool,
+        gpu: Option<Option<GpuSelection>>,
+        actor: i64,
+    ) -> Result<AppOperationResponse> {
+        if gpu.is_some() && !matches!(app_name, "plex" | "jellyfin") {
+            return Err(AppError::BadRequest("GPU is unsupported".into()));
+        }
+        if let Some(selection) = gpu.as_ref().and_then(Option::as_ref) {
+            let guard = self.k8s_client.read().await;
+            let client = guard
+                .as_ref()
+                .ok_or_else(|| AppError::Internal("Kubernetes client not available".into()))?;
+            gpu::validate_selection(client, selection).await?;
+        }
+        let catalog = self.catalog.read().await;
+        let app = catalog
+            .get_app(app_name)
+            .ok_or_else(|| AppError::NotFound("App not found".into()))?;
+        if app.is_system
+            || app.is_hidden
+            || catalog.chart_version(app_name).as_deref() != Some(version)
+        {
+            return Err(AppError::Conflict(
+                "Chart changed; review install options again".into(),
+            ));
+        }
+        drop(catalog);
+        let vpn_provider_id = app_vpn_config::Entity::find_by_id(app_name)
+            .one(tx)
+            .await?
+            .map(|assignment| assignment.vpn_provider_id);
+        let mut config = HashMap::from([(
+            QUEUED_INSTALL_KEY.to_string(),
+            serde_json::to_string(&QueuedInstall {
+                chart_version: version.into(),
+                storage,
+                vpn_provider_id,
+                fresh_private_config,
+            })?,
+        )]);
+        if gpu.is_some() {
+            config.insert(QUEUED_GPU_KEY.into(), serde_json::to_string(&gpu)?);
+        }
+        let now = Utc::now();
+        let operation = app_operation::ActiveModel {
+            id: Set(Uuid::new_v4().to_string()),
+            app_name: Set(app_name.into()),
+            operation: Set(OP_INSTALL.into()),
+            status: Set(STATUS_QUEUED.into()),
+            stop_requested: Set(false),
+            message: Set(Some(format!("Queued install for {app_name}"))),
+            error: Set(None),
+            custom_config: Set(Some(serde_json::to_string(&config)?)),
+            attempts: Set(0),
+            created_by: Set(Some(actor)),
+            created_at: Set(now),
+            started_at: Set(None),
+            finished_at: Set(None),
+            updated_at: Set(now),
+        }
+        .insert(tx)
+        .await?;
+        self.mark_state_for_operation(tx, app_name, OP_INSTALL, &operation.id)
+            .await?;
+        log_queued(tx, &operation).await?;
+        Ok(operation.into())
     }
 
     async fn enqueue_operation_unchecked(
@@ -253,9 +390,32 @@ impl AppManager {
             }
             catalog.chart_version(app_name)
         };
+        if app_operation::Entity::find()
+            .filter(app_operation::Column::AppName.eq(app_name))
+            .filter(app_operation::Column::Status.is_in([
+                STATUS_QUEUED,
+                STATUS_RUNNING,
+                STATUS_PAUSED,
+            ]))
+            .one(transaction)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Conflict(
+                "An app operation is already in progress".into(),
+            ));
+        }
 
         let now = Utc::now();
         let id = Uuid::new_v4().to_string();
+        let snapshot = self.storage_snapshot(transaction, app_name).await?;
+        let mut queued_config = HashMap::new();
+        if snapshot.storage.is_some() {
+            queued_config.insert(
+                QUEUED_STORAGE_KEY.to_string(),
+                serde_json::to_string(&snapshot)?,
+            );
+        }
         let operation = app_operation::ActiveModel {
             id: Set(id.clone()),
             app_name: Set(app_name.to_string()),
@@ -264,7 +424,7 @@ impl AppManager {
             stop_requested: Set(false),
             message: Set(Some(format!("Queued {} for {}", OP_UPDATE, app_name))),
             error: Set(None),
-            custom_config: Set(Some("{}".to_string())),
+            custom_config: Set(Some(serde_json::to_string(&queued_config)?)),
             attempts: Set(0),
             created_by: Set(created_by),
             created_at: Set(now),
@@ -456,6 +616,21 @@ impl AppManager {
                 original.status
             )));
         }
+        if app_operation::Entity::find()
+            .filter(app_operation::Column::AppName.eq(&original.app_name))
+            .filter(app_operation::Column::Status.is_in([
+                STATUS_QUEUED,
+                STATUS_RUNNING,
+                STATUS_PAUSED,
+            ]))
+            .one(&transaction)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Conflict(
+                "An app operation is already in progress".into(),
+            ));
+        }
         // Validate stored input before copying it, including the reserved internal GPU
         // marker. It must never be accepted from a new public custom-config request.
         validate_operation(&original.operation)?;
@@ -469,12 +644,90 @@ impl AppManager {
         {
             return Err(AppError::Forbidden("Cannot delete system app".into()));
         }
-        let config: HashMap<String, String> =
+        let mut config: HashMap<String, String> =
             serde_json::from_str(original.custom_config.as_deref().unwrap_or("{}"))
                 .map_err(|_| AppError::BadRequest("Invalid stored operation config".into()))?;
         let mut public_config = config.clone();
+        let mut promoted_config: Option<String> = None;
         public_config.remove(QUEUED_GPU_KEY);
+        if let Some(raw) = public_config.remove(QUEUED_STORAGE_KEY) {
+            let snapshot: QueuedStorage = serde_json::from_str(&raw)
+                .map_err(|_| AppError::BadRequest("Invalid stored storage snapshot".into()))?;
+            if let Some(storage) = snapshot.storage {
+                let saved = app_storage::get(&transaction, &original.app_name).await?;
+                if saved.as_ref().is_none_or(|saved| {
+                    saved.storage != storage
+                        || saved.fresh_private_config != snapshot.fresh_private_config
+                }) {
+                    return Err(AppError::Conflict(
+                        "Saved storage changed since this operation; review it before retrying"
+                            .into(),
+                    ));
+                }
+                let catalog = self.catalog.read().await;
+                let options = install_options::load(&catalog, &original.app_name)?;
+                if snapshot.chart_version.as_deref() != Some(options.chart_version.as_str()) {
+                    return Err(AppError::Conflict(
+                        "Chart changed; review saved storage settings".into(),
+                    ));
+                }
+                install_options::validate(&options, &storage)?;
+            }
+        }
+        if let Some(raw) = public_config.remove(QUEUED_INSTALL_KEY) {
+            let mut pinned: QueuedInstall = serde_json::from_str(&raw)
+                .map_err(|_| AppError::BadRequest("Invalid stored install options".into()))?;
+            let catalog = self.catalog.read().await;
+            let options = install_options::load(&catalog, &original.app_name)?;
+            if options.chart_version != pinned.chart_version {
+                return Err(AppError::Conflict(
+                    "Chart changed; review install options again".into(),
+                ));
+            }
+            install_options::validate(&options, &pinned.storage)?;
+            let saved = app_storage::get(&transaction, &original.app_name).await?;
+            let proof_promoted = saved.as_ref().is_some_and(|saved| {
+                original.operation == OP_INSTALL
+                    && !pinned.fresh_private_config
+                    && saved.fresh_private_config
+                    && saved.storage == pinned.storage
+                    && saved.chart_version == pinned.chart_version
+                    && pinned
+                        .storage
+                        .config
+                        .as_ref()
+                        .is_some_and(|config| config.create && config.existing_claim.is_empty())
+            });
+            if saved.as_ref().is_none_or(|saved| {
+                saved.storage != pinned.storage
+                    || (saved.fresh_private_config != pinned.fresh_private_config
+                        && !proof_promoted)
+            }) {
+                return Err(AppError::Conflict(
+                    "Saved storage changed since this install; review it before retrying".into(),
+                ));
+            }
+            if proof_promoted {
+                // The original request remains immutable. A new retry can use
+                // the separately persisted proof of its successful Helm install.
+                pinned.fresh_private_config = true;
+                config.insert(QUEUED_INSTALL_KEY.into(), serde_json::to_string(&pinned)?);
+                promoted_config = Some(serde_json::to_string(&config)?);
+            }
+        }
+        if matches!(original.operation.as_str(), OP_INSTALL | OP_UPDATE)
+            && !config.contains_key(QUEUED_INSTALL_KEY)
+            && !config.contains_key(QUEUED_STORAGE_KEY)
+            && app_storage::get(&transaction, &original.app_name)
+                .await?
+                .is_some()
+        {
+            return Err(AppError::Conflict(
+                "Storage was configured after this legacy operation; review before retrying".into(),
+            ));
+        }
         gpu::validate_custom_gpu_keys(&public_config)?;
+        install_options::validate_custom_storage_keys(&public_config)?;
         if let Some(gpu) = config.get(QUEUED_GPU_KEY) {
             if !matches!(original.app_name.as_str(), "plex" | "jellyfin") {
                 return Err(AppError::BadRequest("Invalid stored GPU app".into()));
@@ -512,7 +765,7 @@ impl AppManager {
             stop_requested: Set(false),
             message: Set(Some(format!("Retry of {id}"))),
             error: Set(None),
-            custom_config: Set(original.custom_config.clone()),
+            custom_config: Set(promoted_config.or_else(|| original.custom_config.clone())),
             attempts: Set(0),
             created_by: Set(Some(actor_id)),
             created_at: Set(now),
@@ -1017,6 +1270,68 @@ impl AppManager {
                     .map_err(|_| AppError::BadRequest("Invalid queued GPU selection".into()))
             })
             .transpose()?;
+        let install: Option<QueuedInstall> = custom_config
+            .remove(QUEUED_INSTALL_KEY)
+            .map(|raw| {
+                serde_json::from_str(&raw)
+                    .map_err(|_| AppError::BadRequest("Invalid queued install choices".into()))
+            })
+            .transpose()?;
+        let saved_snapshot: Option<QueuedStorage> = custom_config
+            .remove(QUEUED_STORAGE_KEY)
+            .map(|raw| {
+                serde_json::from_str(&raw)
+                    .map_err(|_| AppError::BadRequest("Invalid queued storage snapshot".into()))
+            })
+            .transpose()?;
+        if let Some(ref snapshot) = saved_snapshot {
+            if let Some(storage) = &snapshot.storage {
+                let options = install_options::load(catalog, &operation.app_name)?;
+                if snapshot.chart_version.as_deref() != Some(options.chart_version.as_str()) {
+                    return Err(AppError::Conflict(
+                        "Chart changed since storage settings were queued".into(),
+                    ));
+                }
+                install_options::validate(&options, storage)?;
+                let current = app_storage::get(&self.db, &operation.app_name).await?;
+                if current.as_ref().is_none_or(|row| {
+                    row.storage != *storage
+                        || row.fresh_private_config != snapshot.fresh_private_config
+                }) {
+                    return Err(AppError::Conflict(
+                        "Saved storage changed after this job was queued".into(),
+                    ));
+                }
+            }
+        }
+        if let Some(ref pinned) = install {
+            let options = install_options::load(catalog, &operation.app_name)?;
+            if options.chart_version != pinned.chart_version {
+                return Err(AppError::Conflict(
+                    "Chart changed since install was queued; review options again".into(),
+                ));
+            }
+            install_options::validate(&options, &pinned.storage)?;
+            let current = app_storage::get(&self.db, &operation.app_name).await?;
+            if current.as_ref().is_none_or(|row| {
+                row.storage != pinned.storage
+                    || row.fresh_private_config != pinned.fresh_private_config
+            }) {
+                return Err(AppError::Conflict(
+                    "Saved storage is missing or changed since this install was queued".into(),
+                ));
+            }
+            let assigned = app_vpn_config::Entity::find_by_id(&operation.app_name)
+                .one(&self.db)
+                .await?
+                .map(|config| config.vpn_provider_id);
+            if assigned != pinned.vpn_provider_id {
+                return Err(AppError::Conflict(
+                    "VPN assignment changed since install was queued; review before retrying"
+                        .into(),
+                ));
+            }
+        }
 
         let app_config = catalog.get_app(&operation.app_name).ok_or_else(|| {
             AppError::NotFound(format!("App '{}' not found in catalog", operation.app_name))
@@ -1052,8 +1367,56 @@ impl AppManager {
             storage.as_ref()
         };
         check_stop(stop)?;
+        let proven_fresh = if operation.operation == OP_INSTALL
+            && install
+                .as_ref()
+                .and_then(|choice| choice.storage.config.as_ref())
+                .is_some_and(|config| config.create && config.existing_claim.is_empty())
+        {
+            if manager.release_absent(&operation.app_name)? {
+                let options = install_options::load(catalog, &operation.app_name)?;
+                match options.private_claim {
+                    Some(claim) => {
+                        manager
+                            .private_claim_absent(&operation.app_name, &claim)
+                            .await?
+                    }
+                    None => false,
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let status = manager
-            .deploy_app_with_stop(&request, deployment_storage, Some(stop))
+            .deploy_install_with_stop(
+                &request,
+                deployment_storage,
+                Some(stop),
+                install
+                    .as_ref()
+                    .map(|choice| {
+                        (
+                            choice.chart_version.as_str(),
+                            &choice.storage,
+                            Some(choice.vpn_provider_id),
+                            choice.fresh_private_config,
+                        )
+                    })
+                    .or_else(|| {
+                        saved_snapshot.as_ref().and_then(|snapshot| {
+                            snapshot
+                                .storage
+                                .as_ref()
+                                .zip(snapshot.chart_version.as_deref())
+                                .map(|(storage, version)| {
+                                    (version, storage, None, snapshot.fresh_private_config)
+                                })
+                        })
+                    }),
+                proven_fresh,
+            )
             .await?;
 
         Ok(status.message)

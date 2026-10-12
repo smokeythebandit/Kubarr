@@ -53,12 +53,12 @@ async fn storage_config_db_roundtrip_preserves_validation() {
 }
 
 #[test]
-fn media_chart_values_mount_media_data_at_data() {
+fn media_chart_values_select_existing_claim_without_overriding_mounts() {
     let storage = managed_storage_config();
     let values = media_storage_helm_values(&storage).expect("helm values");
 
     assert!(values.contains(&"storage.media.existingClaim=media-data".to_string()));
-    assert!(values.contains(&"storage.media.mountPath=/data".to_string()));
+    assert!(!values.iter().any(|v| v.contains("mountPath")));
 }
 
 #[test]

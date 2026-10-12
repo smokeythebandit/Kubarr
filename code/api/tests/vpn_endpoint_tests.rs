@@ -1096,6 +1096,28 @@ async fn test_vpn_assignment_and_removal_enqueue_atomic_updates_without_k8s() {
         Some(assign_operation_id)
     );
 
+    let (status, _) = authenticated_delete(
+        create_router(state.clone()),
+        "/api/vpn/apps/sonarr",
+        &cookie,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "cannot change VPN while the prior operation is queued"
+    );
+    assert!(app_vpn_config::Entity::find_by_id("sonarr")
+        .one(&db)
+        .await
+        .unwrap()
+        .is_some());
+    app_operation::Entity::update_many()
+        .col_expr(app_operation::Column::Status, "succeeded".into())
+        .filter(app_operation::Column::Id.eq(assign_operation_id))
+        .exec(&db)
+        .await
+        .unwrap();
     let (status, body) =
         authenticated_delete(create_router(state), "/api/vpn/apps/sonarr", &cookie).await;
     assert_eq!(status, StatusCode::OK, "removal failed: {body}");

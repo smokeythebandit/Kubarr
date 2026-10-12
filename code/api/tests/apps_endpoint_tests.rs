@@ -353,12 +353,12 @@ async fn test_get_app_icon_returns_404_for_missing_icon() {
     let (status, _) = make_request(
         app,
         "GET",
-        "/api/apps/catalog/sonarr/icon",
+        "/api/apps/catalog/definitely-missing-kubarr-icon-887100/icon",
         Some(&cookie),
         None,
     )
     .await;
-    // The icon file doesn't exist in test environment
+    // Use a non-catalog path: chart sync may populate Sonarr's icon concurrently.
     assert_eq!(
         status,
         StatusCode::NOT_FOUND,

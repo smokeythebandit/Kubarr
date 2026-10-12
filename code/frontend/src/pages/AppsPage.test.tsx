@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppConfig, AppOperation, AppState } from '../types'
@@ -8,6 +8,7 @@ import AppsPage from './AppsPage'
 const mocks = vi.hoisted(() => ({
   restart: vi.fn(),
   install: vi.fn(),
+  getInstallOptions: vi.fn(),
   update: vi.fn(),
   getGpus: vi.fn(),
   pauseOperation: vi.fn(),
@@ -43,6 +44,7 @@ vi.mock('../api/apps', () => ({
     retryOperation: (...args: unknown[]) => mocks.retryOperation(...args),
     syncCatalog: vi.fn(),
     install: (...args: unknown[]) => mocks.install(...args),
+    getInstallOptions: (...args: unknown[]) => mocks.getInstallOptions(...args),
     update: (...args: unknown[]) => mocks.update(...args),
     getGpus: (...args: unknown[]) => mocks.getGpus(...args),
     delete: vi.fn(),
@@ -152,6 +154,9 @@ vi.mock('../contexts/MonitoringContext', () => ({
 }))
 
 function renderPage() {
+  if (!mocks.getInstallOptions.getMockImplementation()) {
+    mocks.getInstallOptions.mockImplementation(async (name: string) => ({ app_name: name, chart_version: '1.0.0', mounts: [], workloads: {}, config: null, required: { main: [] }, reserved: { main: ['/config'] }, vpn_supported: false, gpu_supported: name === 'plex' }))
+  }
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
@@ -342,6 +347,7 @@ describe('AppsPage GPU requests', () => {
     mocks.canInstall = true
     mocks.getOperations.mockResolvedValue([])
     mocks.getGpus.mockResolvedValue([{ name: 'gpu-node', ready: true, schedulable: true, allocatable: { 'gpu.intel.com/i915': 1 } }])
+    mocks.getInstallOptions.mockImplementation(async (name: string) => ({ app_name: name, chart_version: '1.0.0', mounts: [{ name: 'library', source: 'media', target: '/data', mode: 'read' }], workloads: {}, config: { create: true, existing_claim: '', storage_class_name: '', size: '5Gi' }, required: { main: [] }, reserved: { main: ['/config'] }, vpn_supported: false, gpu_supported: name === 'plex' }))
     mocks.install.mockReset()
     mocks.update.mockReset()
     mocks.getGpus.mockReset()
@@ -353,12 +359,30 @@ describe('AppsPage GPU requests', () => {
     renderPage()
     fireEvent.click(await screen.findByRole('heading', { name: 'Plex', level: 3 }))
     fireEvent.click(screen.getAllByRole('button', { name: 'Install', exact: true })[0])
+    expect(mocks.install).not.toHaveBeenCalled()
+    await screen.findByRole('dialog', { name: 'Install plex' })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     fireEvent.click(screen.getByRole('checkbox', { name: /Enable hardware acceleration/ }))
     const select = await screen.findByRole('combobox', { name: 'GPU node and resource' })
     await waitFor(() => expect(select).toBeEnabled())
     fireEvent.change(select, { target: { value: JSON.stringify({ vendor: 'intel', node_name: 'gpu-node', resource_name: 'gpu.intel.com/i915' }) } })
-    fireEvent.click(screen.getByRole('dialog').querySelector('button:last-child')!)
-    await waitFor(() => expect(mocks.install).toHaveBeenCalledWith({ app_name: 'plex', namespace: 'plex', gpu: { vendor: 'intel', node_name: 'gpu-node', resource_name: 'gpu.intel.com/i915' } }))
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    expect(mocks.install).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm install' }))
+    await waitFor(() => expect(mocks.install).toHaveBeenCalledWith({ app_name: 'plex', chart_version: '1.0.0', storage: { mounts: [{ name: 'library', source: 'media', target: '/data', mode: 'read' }], config: { create: true, existing_claim: '', storage_class_name: '', size: '5Gi' } }, vpn: null, gpu: { vendor: 'intel', node_name: 'gpu-node', resource_name: 'gpu.intel.com/i915' } }))
+  })
+
+  it('opens the same wizard from the Plex detail panel without queuing', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('heading', { name: 'Plex', level: 3 }))
+    const panel = screen.getByRole('region', { name: 'Plex details' })
+    fireEvent.click(within(panel).getByRole('button', { name: 'Install', exact: true }))
+    expect(await screen.findByRole('dialog', { name: 'Install plex' })).toBeInTheDocument()
+    expect(mocks.install).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(mocks.install).not.toHaveBeenCalled()
   })
 
   it('removes card and header GPU buttons, and applies and disables GPU inline in the sidebar', async () => {

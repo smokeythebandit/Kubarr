@@ -8,7 +8,8 @@ import type { VpnProvider } from '../api/vpn'
 import { VpnProviderForm } from '../components/vpn/VpnProviderForm'
 import { AppIcon, useIconColors } from '../components/AppIcon'
 import { OperationQueue } from '../components/OperationQueue'
-import { GpuInstallDialog, GpuSelectionForm, installRequest } from '../components/GpuInstallDialog'
+import { GpuSelectionForm } from '../components/GpuInstallDialog'
+import { InstallWizard } from '../components/InstallWizard'
 import type { GpuSelection } from '../types'
 import { useAuth } from '../contexts/AuthContext'
 import { useMonitoring } from '../contexts/MonitoringContext'
@@ -135,6 +136,7 @@ interface AppCardComponentProps {
   onClick: () => void
   updateAvailable: boolean
   isOperationPending: boolean
+  canInstall: boolean
 }
 
 function AppCardComponent({
@@ -149,7 +151,8 @@ function AppCardComponent({
   onOpen,
   onClick,
   updateAvailable,
-  isOperationPending
+  isOperationPending,
+  canInstall
 }: AppCardComponentProps) {
   const colors = useIconColors(app.name)
   const displayColors = colors.length > 0
@@ -359,7 +362,7 @@ function AppCardComponent({
                 </button>
               )}
             </>
-          ) : effectiveState === 'idle' || effectiveState === 'error' ? (
+          ) : canInstall && (effectiveState === 'idle' || effectiveState === 'error') ? (
             <button
               onClick={onInstall}
               className="w-full bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
@@ -369,6 +372,8 @@ function AppCardComponent({
               </svg>
               {effectiveState === 'error' ? 'Retry Install' : 'Install'}
             </button>
+          ) : (effectiveState === 'idle' || effectiveState === 'error') ? (
+            <button disabled className="w-full rounded-lg bg-gray-100 px-4 py-2.5 text-sm text-gray-500 dark:bg-gray-800">Requires apps.install permission</button>
           ) : (
             <button
               disabled
@@ -384,7 +389,13 @@ function AppCardComponent({
 }
 
 function AppStorageInfo({ app }: { app: AppConfig }) {
-  const volumes = app.volumes || []
+  const { data: options, isLoading } = useQuery({
+    queryKey: ['apps', 'install-options', app.name],
+    queryFn: () => appsApi.getInstallOptions(app.name),
+    enabled: !app.is_system,
+    retry: false,
+    staleTime: 30000,
+  })
 
   return (
     <div className="mt-6">
@@ -396,29 +407,17 @@ function AppStorageInfo({ app }: { app: AppConfig }) {
       </h3>
 
       <div className="rounded-lg bg-gray-50 p-4 dark:bg-gray-800/50">
-        {volumes.length > 0 ? (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-              <span className="font-medium">Shared NFS claim</span>
-              <code className="rounded-md bg-white px-2 py-1 font-mono text-gray-700 dark:bg-gray-900 dark:text-gray-200">media-data</code>
+        {app.is_system ? <p className="text-sm text-gray-500">System storage is managed separately.</p>
+          : isLoading ? <p className="text-sm text-gray-500">Loading chart storage defaults…</p>
+          : options ? <div className="space-y-3 text-sm">
+              <p className="text-xs text-gray-500">{options.saved_storage ? `Saved desired settings (original chart ${options.saved_chart_version}); a failed operation may not have applied them.` : `Chart ${options.chart_version} defaults; an installed release may use different values.`}</p>
+              <p>Shared NFS claim: <code>media-data</code></p>
+              {(options.saved_storage?.mounts ?? options.mounts)?.map(mount => <p key={mount.name}><strong>{mount.name}</strong>: <code>{mount.source}</code> → <code>{mount.target}</code> ({mount.mode})</p>)}
+              {Object.entries(options.workloads).map(([name, defaults]) => <div key={name}><strong>{name}</strong>{(options.saved_storage?.workloads?.[name]?.mounts ?? defaults).map(mount => <p key={mount.name}><code>{mount.source}</code> → <code>{mount.target}</code> ({mount.mode})</p>)}</div>)}
+              {(options.saved_storage?.config ?? options.config) && <p>Private config: {(options.saved_storage?.config ?? options.config)!.create ? `${(options.saved_storage?.config ?? options.config)!.size} RWO claim` : (options.saved_storage?.config ?? options.config)!.existing_claim}</p>}
+              {options.mounts?.length === 0 && Object.keys(options.workloads).length === 0 && <p>No shared NFS mounts by default.</p>}
             </div>
-            <div className="space-y-2">
-              {volumes.map((volume) => (
-                <div key={`${volume.name}-${volume.mount_path}`} className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2 text-sm dark:bg-gray-900/70">
-                  <div className="min-w-0">
-                    <div className="font-medium capitalize text-gray-900 dark:text-white">{volume.name}</div>
-                    <code className="block truncate text-xs text-gray-500 dark:text-gray-400">{volume.mount_path}</code>
-                  </div>
-                  <span className="shrink-0 text-xs font-medium text-gray-500 dark:text-gray-400">{volume.size}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            This component does not define shared storage mounts.
-          </p>
-        )}
+          : <p className="text-sm text-gray-500">Chart storage defaults unavailable. Refresh the catalog to review install options.</p>}
       </div>
     </div>
   )
@@ -517,6 +516,7 @@ function AppDetailPanel({
   const canManageVpn = hasPermission('vpn.manage')
   const canRestart = hasPermission('apps.restart')
   const canChangeGpu = hasPermission('apps.install')
+  const canInstall = hasPermission('apps.install')
   const queryClient = useQueryClient()
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null)
   const [killSwitchOverride, setKillSwitchOverride] = useState<boolean | null>(null)
@@ -707,7 +707,7 @@ function AppDetailPanel({
                       Uninstall
                     </button>
                   )}
-                  {!isInstalled && (effectiveState === 'idle' || effectiveState === 'error') && (
+                   {canInstall && !isInstalled && (effectiveState === 'idle' || effectiveState === 'error') && (
                     <button
                       onClick={onInstall}
                       className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-2 px-4 rounded-xl transition-colors flex items-center gap-1.5"
@@ -1091,6 +1091,7 @@ export default function AppsPage() {
   const [operationStatuses, setOperationStatuses] = useState<Record<string, OperationStatus>>({})
   const [selectedApp, setSelectedApp] = useState<AppConfig | null>(null)
   const [installDialogApp, setInstallDialogApp] = useState<string | null>(null)
+  const [installError, setInstallError] = useState<string | null>(null)
 
   const filter = (searchParams.get('filter') as FilterType) || 'all'
   const categoryFilter = searchParams.get('category') || 'all'
@@ -1306,25 +1307,28 @@ export default function AppsPage() {
     },
     onSuccess: (operation, request) => {
       const appName = request.app_name
+      setInstallDialogApp(null)
+      setInstallError(null)
       queryClient.setQueryData<AppOperation[]>(['app-operations'], current => [operation, ...(current || []).filter(item => item.id !== operation.id)])
       setOperationState(appName, null)
+      queryClient.invalidateQueries({ queryKey: ['apps', 'states'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'installed'] })
+      queryClient.invalidateQueries({ queryKey: ['apps', 'install-options', appName] })
       refreshAppStatuses()
-      showToast(`${appName} install queued`, 'success')
+      showToast(`${appName} install queued (${operation.id}). Track progress under Operations.`, 'success')
     },
     onError: (error: any, request) => {
       const appName = request.app_name
       setOperationState(appName, 'error', error.response?.data?.detail || error.message)
+      setInstallError(operationErrorMessage(error))
       showToast(`Failed to install ${appName}: ${error.response?.data?.detail || error.message}`, 'error')
     },
   })
 
   const startInstall = (appName: string) => {
-    if (!hasPermission('apps.install')) return
-    if (appName === 'plex' || appName === 'jellyfin') {
-      setInstallDialogApp(appName)
-    } else {
-      installMutation.mutate(installRequest(appName))
-    }
+    if (!hasPermission('apps.install') || operationsLoading || activeOperationsByApp[appName] || installMutation.isPending) return
+    setInstallError(null)
+    setInstallDialogApp(appName)
   }
 
   const updateMutation = useMutation({
@@ -1455,8 +1459,8 @@ export default function AppsPage() {
 
   return (
     <div className="flex h-[calc(100dvh-4rem-2.5rem-1px)] -my-8 -mx-4 sm:-mx-6 lg:-mx-8 xl:-mx-12 2xl:-mx-16">
-      {installDialogApp && <GpuInstallDialog appName={installDialogApp} onClose={() => setInstallDialogApp(null)}
-        onInstall={request => { setInstallDialogApp(null); installMutation.mutate(request) }} />}
+      {installDialogApp && <InstallWizard appName={installDialogApp} onClose={() => setInstallDialogApp(null)}
+        pending={installMutation.isPending} error={installError} onSubmit={request => installMutation.mutate(request)} />}
       {/* Toast Notification */}
       {toast && (
         <div className={`fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-lg border backdrop-blur-sm ${
@@ -1648,7 +1652,8 @@ export default function AppsPage() {
                           (updateMutation.isPending && updateMutation.variables === app.name) ||
                           (gpuUpdateMutation.isPending && gpuUpdateMutation.variables?.appName === app.name) ||
                           (deleteMutation.isPending && deleteMutation.variables === app.name) ||
-                          (restartMutation.isPending && restartMutation.variables === app.name)}
+                           (restartMutation.isPending && restartMutation.variables === app.name)}
+                        canInstall={hasPermission('apps.install')}
                       />
                     )
                   })}

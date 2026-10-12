@@ -10,8 +10,12 @@ use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, DbBackend, Schema, Se
 use serde_json::{json, Value};
 use tower::service_fn;
 
-use crate::models::{app_vpn_config, vpn_provider};
+use crate::models::{app_storage_config, app_vpn_config, vpn_provider};
 use crate::services::catalog::AppConfig;
+use crate::services::{
+    app_storage,
+    install_options::{InstallStorage, PrivateConfig},
+};
 
 const VERSION: &str = "1.29.2-rc.1+5.1";
 const SUBNETS: &str = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
@@ -34,6 +38,7 @@ async fn database(app_name: &str) -> DatabaseConnection {
     let schema = Schema::new(DbBackend::Sqlite);
     for table in [
         schema.create_table_from_entity(app_state::Entity),
+        schema.create_table_from_entity(app_storage_config::Entity),
         schema.create_table_from_entity(vpn_provider::Entity),
         schema.create_table_from_entity(app_vpn_config::Entity),
     ] {
@@ -62,13 +67,24 @@ fn kube_client(
     app_name: &str,
     with_vpn: bool,
 ) -> (K8sClient, Arc<Mutex<Vec<Value>>>) {
+    kube_client_with_owner(namespace, app_name, with_vpn, None)
+}
+
+fn kube_client_with_owner(
+    namespace: &str,
+    app_name: &str,
+    with_vpn: bool,
+    owner: Option<(&str, &str)>,
+) -> (K8sClient, Arc<Mutex<Vec<Value>>>) {
     let namespace = namespace.to_owned();
     let app_name = app_name.to_owned();
+    let owner = owner.map(|(name, ns)| (name.to_owned(), ns.to_owned()));
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let recorded = bodies.clone();
     let service = service_fn(move |request: Request<Body>| {
         let namespace = namespace.clone();
         let app_name = app_name.clone();
+        let owner = owner.clone();
         let recorded = recorded.clone();
         async move {
             let ns_path = format!("/api/v1/namespaces/{namespace}");
@@ -106,7 +122,14 @@ fn kube_client(
             } else if *method == "POST" {
                 body
             } else {
-                json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}})
+                let mut ns = json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}});
+                if let Some((name, release_namespace)) = owner {
+                    ns["metadata"]["annotations"] = json!({
+                        "meta.helm.sh/release-name": name,
+                        "meta.helm.sh/release-namespace": release_namespace
+                    });
+                }
+                ns
             };
             Ok::<_, std::convert::Infallible>(
                 Response::builder()
@@ -145,6 +168,38 @@ fn ready_postgresql_client() -> K8sClient {
         )
     });
     K8sClient::from_client(Client::new(service, "default"))
+}
+
+#[tokio::test]
+async fn fresh_private_claim_proof_rejects_retained_claim_and_lookup_errors() {
+    for (status, expected) in [(404, Some(true)), (200, Some(false)), (403, None)] {
+        let service = service_fn(move |request: Request<Body>| async move {
+            assert_eq!(request.method(), "GET");
+            assert_eq!(
+                request.uri().path(),
+                "/api/v1/namespaces/plex/persistentvolumeclaims/plex-config"
+            );
+            let body = if status == 200 {
+                json!({"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"plex-config"}})
+            } else {
+                json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":if status == 404 {"NotFound"} else {"Forbidden"},"code":status})
+            };
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(status)
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+        });
+        let k8s = K8sClient::from_client(Client::new(service, "default"));
+        let catalog = catalog("plex", false);
+        let manager = DeploymentManager::new(&k8s, &catalog);
+        let result = manager.private_claim_absent("plex", "plex-config").await;
+        match expected {
+            Some(expected) => assert_eq!(result.unwrap(), expected),
+            None => assert!(result.is_err(), "RBAC denial must not prove absence"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -321,6 +376,63 @@ async fn deploy_app_composes_helm4_flags_and_release_workload_namespaces() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn bootstrap_owned_namespace_stays_in_system_upgrade_manifest() {
+    let app_name = "postgresql";
+    let db = database(app_name).await;
+    let catalog = catalog(app_name, true);
+    let (k8s, bodies) = kube_client_with_owner(
+        "kubarr-database",
+        app_name,
+        false,
+        Some((app_name, "default")),
+    );
+    let manager = DeploymentManager::with_db(&k8s, &catalog, &db);
+    let request = DeploymentRequest {
+        app_name: app_name.into(),
+        custom_config: HashMap::new(),
+        reuse_values: true,
+        gpu: None,
+        wait: false,
+    };
+    manager
+        .deploy_app_with_command(&request, None, |args| {
+            let values: Vec<_> = args
+                .windows(2)
+                .filter(|pair| pair[0] == "--set")
+                .map(|pair| pair[1])
+                .collect();
+            assert!(values.contains(&"namespace.name=kubarr-database"));
+            assert!(values.contains(&"namespace.create=true"));
+            assert!(!values.contains(&"namespace.create=false"));
+            Ok("deployed".into())
+        })
+        .await
+        .unwrap();
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn foreign_helm_namespace_cannot_be_adopted_by_system_release() {
+    let namespace: k8s_openapi::api::core::v1::Namespace = serde_json::from_value(json!({
+        "metadata": {
+            "name": "kubarr-backend",
+            "annotations": {
+                "meta.helm.sh/release-name": "another-release",
+                "meta.helm.sh/release-namespace": "default"
+            }
+        }
+    }))
+    .unwrap();
+    assert!(super::namespace_owned_by_release(&namespace, "kubarr-backend", "default").is_err());
+    assert!(!super::namespace_owned_by_release(
+        &k8s_openapi::api::core::v1::Namespace::default(),
+        "kubarr-backend",
+        "default"
+    )
+    .unwrap());
 }
 
 async fn assert_vpn_values_lifetime(helm_fails: bool) {
@@ -654,6 +766,126 @@ async fn deploy_app_vpn_secret_cleanup_forbidden_fails_after_successful_helm() {
     assert!(error.contains("VPN sidecar was removed"), "{error}");
     assert!(error.contains("failed to delete managed Secret"), "{error}");
     assert!(error.contains("injected cleanup denial"), "{error}");
+}
+
+#[tokio::test]
+async fn helm_success_persists_fresh_proof_before_secret_cleanup_failure() {
+    let app_name = "regression-proof-cleanup";
+    let service = service_fn(move |request: Request<Body>| async move {
+        assert_eq!(request.method(), "DELETE");
+        assert_eq!(
+            request.uri().path(),
+            format!("/api/v1/namespaces/{app_name}/secrets/vpn-{app_name}")
+        );
+        Ok::<_, std::convert::Infallible>(Response::builder().status(403).body(Body::from(
+            serde_json::to_vec(&json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":403,"reason":"Forbidden","message":"injected cleanup denial"})).unwrap()
+        )).unwrap())
+    });
+    let k8s = K8sClient::from_client(Client::new(service, "default"));
+    let db = database(app_name).await;
+    let storage = InstallStorage {
+        config: Some(PrivateConfig {
+            create: true,
+            existing_claim: "".into(),
+            storage_class_name: "".into(),
+            size: "5Gi".into(),
+        }),
+        ..Default::default()
+    };
+    app_storage::save(&db, app_name, VERSION, &storage)
+        .await
+        .unwrap();
+    let catalog = catalog(app_name, false);
+    let manager = DeploymentManager::with_db(&k8s, &catalog, &db);
+    // The injected Helm result succeeds; the K8s mock denies only subsequent
+    // cleanup. The error remains visible and the proof remains durable.
+    let error = manager
+        .finish_helm_result(
+            Ok("deployed".into()),
+            app_name,
+            app_name,
+            Some(VERSION),
+            true,
+            true,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Helm succeeded"), "{error}");
+    assert!(error.contains("VPN Secret cleanup failed"), "{error}");
+    assert!(
+        app_storage::get(&db, app_name)
+            .await
+            .unwrap()
+            .unwrap()
+            .fresh_private_config
+    );
+}
+
+#[tokio::test]
+async fn helm_or_proof_write_failure_never_grants_fresh_proof() {
+    let app_name = "regression-proof-write-denied";
+    let db = database(app_name).await;
+    let storage = InstallStorage {
+        config: Some(PrivateConfig {
+            create: true,
+            existing_claim: "".into(),
+            storage_class_name: "".into(),
+            size: "5Gi".into(),
+        }),
+        ..Default::default()
+    };
+    app_storage::save(&db, app_name, VERSION, &storage)
+        .await
+        .unwrap();
+    let (k8s, _) = kube_client(app_name, app_name, false);
+    let catalog = catalog(app_name, false);
+    let manager = DeploymentManager::with_db(&k8s, &catalog, &db);
+    let pre_helm = manager
+        .finish_helm_result(
+            Err(AppError::Internal("injected Helm failure".into())),
+            app_name,
+            app_name,
+            Some(VERSION),
+            true,
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(pre_helm.contains("injected Helm failure"), "{pre_helm}");
+    assert!(
+        !app_storage::get(&db, app_name)
+            .await
+            .unwrap()
+            .unwrap()
+            .fresh_private_config
+    );
+    db.execute_unprepared("CREATE TRIGGER reject_proof BEFORE UPDATE ON app_storage_configs BEGIN SELECT RAISE(ABORT, 'injected proof write failure'); END").await.unwrap();
+    let post_helm = manager
+        .finish_helm_result(
+            Ok("deployed".into()),
+            app_name,
+            app_name,
+            Some(VERSION),
+            true,
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(post_helm.contains("Helm succeeded"), "{post_helm}");
+    assert!(
+        post_helm.contains("injected proof write failure"),
+        "{post_helm}"
+    );
+    assert!(
+        !app_storage::get(&db, app_name)
+            .await
+            .unwrap()
+            .unwrap()
+            .fresh_private_config
+    );
 }
 
 #[tokio::test]

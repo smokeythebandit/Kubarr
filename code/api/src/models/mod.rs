@@ -1,6 +1,7 @@
 pub mod app_domain_assignment;
 pub mod app_operation;
 pub mod app_state;
+pub mod app_storage_config;
 pub mod app_vpn_config;
 pub mod audit_log;
 pub mod audit_outbox;
@@ -33,6 +34,7 @@ pub mod prelude {
     pub use super::app_domain_assignment::{self, Entity as AppDomainAssignment};
     pub use super::app_operation::{self, Entity as AppOperation};
     pub use super::app_state::{self, Entity as AppState};
+    pub use super::app_storage_config::{self, Entity as AppStorageConfig};
     pub use super::app_vpn_config::{self, Entity as AppVpnConfig};
     pub use super::audit_log::{self, Entity as AuditLog};
     pub use super::audit_outbox::{self, Entity as AuditOutbox};
