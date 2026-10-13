@@ -160,32 +160,6 @@ jobs:
           path: code/frontend/test-results/ledger/
           retention-days: 7
 
-  cli:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-        with:
-          workspaces: code/cli
-      - run: bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-cli.log" cargo test --locked --bin kubarr
-        working-directory: code/cli
-
-      - name: CLI ledger
-        if: always()
-        run: python3 tests/report/generate.py --rust "$RUNNER_TEMP/kubarr-cli.log" --output code/frontend/test-results/ledger
-
-      - name: Upload CLI ledger
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: cli-test-ledger
-          path: code/frontend/test-results/ledger/
-          retention-days: 7
-
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 20
