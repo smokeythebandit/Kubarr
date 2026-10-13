@@ -444,7 +444,32 @@ non_owned_context_is_rejected() {
   require_owned_context
 }
 
+test_bootstrap_chart_env() {
+  local test_dir
+  test_dir=$(mktemp -d)
+  mkdir -p "$test_dir/charts/system/kubarr-backend" "$test_dir/charts/system/kubarr-worker"
+  printf 'env:\n  - name: KUBARR_CHARTS_SOURCE_DIR\n    value: /catalog-source\n' >"$test_dir/override.yaml"
+  printf 'replicaCount: 1\nimage:\n  repository: backend\nenv: []\n' >"$test_dir/charts/system/kubarr-backend/values.yaml"
+  printf 'replicaCount: 1\nterminationGracePeriodSeconds: 660\nenv:\n  - name: OLD_VALUE\n    value: old\n' >"$test_dir/charts/system/kubarr-worker/values.yaml"
+  bootstrap_chart_env "$test_dir/override.yaml" "$test_dir/charts"
+  python3 - "$test_dir/charts" <<'PY'
+import pathlib
+import sys
+import yaml
+
+root = pathlib.Path(sys.argv[1]) / "system"
+backend = yaml.safe_load((root / "kubarr-backend/values.yaml").read_text())
+worker = yaml.safe_load((root / "kubarr-worker/values.yaml").read_text())
+assert backend["env"] == worker["env"] == [{"name": "KUBARR_CHARTS_SOURCE_DIR", "value": "/catalog-source"}]
+assert backend["image"]["repository"] == "backend"
+assert backend["replicaCount"] == worker["replicaCount"] == 1
+assert worker["terminationGracePeriodSeconds"] == 660
+PY
+  rm -rf "$test_dir"
+}
+
 test_opt_in_guard
+test_bootstrap_chart_env
 test_operation_succeeded_polling
 test_frontend_operation_result_contract
 test_operation_running_statuses

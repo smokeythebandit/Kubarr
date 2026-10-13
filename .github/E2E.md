@@ -8,8 +8,9 @@ targets. Release publishing requires successful live E2E and the separate
 `vpn-acceptance.yml` WireGuard lab. Non-tag publishing
 requires the checks, fast tests, and build, but does not run live E2E.
 
-The E2E job builds the repository's CLI and uses `kubarr bootstrap` with the
-Playwright driver in `code/frontend/tests/bootstrap.mjs` to complete the web
+The E2E job builds the pinned standalone [kubarr-cli](https://github.com/smokeythebandit/kubarr-cli)
+through `.github/actions/setup-cli/action.yml` and uses `kubarr bootstrap` with
+the Playwright driver in `code/frontend/tests/bootstrap.mjs` to complete the web
 wizard. The driver selects the job's Kind context, waits for prerequisite checks,
 configures port-forward access, and waits for the finished screen. It installs
 managed NFS (5Gi on Kind's `standard` storage
@@ -46,10 +47,13 @@ The job uses its own kubeconfig, unique Kind cluster, and tracked port-forward
 process. Cleanup must stay scoped to those resources, not other clusters or
 Docker containers on the machine.
 
-For checks without a cluster, use `actionlint .github/workflows/test.yml`, build
-`code/cli` with `cargo build --locked`, run `cargo test --locked` there, and run
-`node --test code/cli/src/bootstrap_web.test.mjs` from the repository root.
+For checks without a cluster, use `actionlint .github/workflows/test.yml`. In the
+standalone CLI checkout, run `cargo build --locked`, `cargo test --locked`, and
+`node --test src/bootstrap_web.test.mjs`.
 Check the browser deployment driver with `node --check code/frontend/tests/bootstrap.mjs`.
+The driver uses `KUBARR_CLI` when set, otherwise `kubarr` on `PATH`. The setup action
+sets this variable to its pinned build. Live acceptance uses the same driver and
+supplies its run-specific cluster, storage size, and administrator credentials.
 In a disposable copy of the pinned charts, run the dependency preparation and
 render the component charts with `helm template` and the workflow's image overrides.
 Check image names, workload/service selectors, claims,

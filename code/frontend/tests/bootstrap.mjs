@@ -1,7 +1,6 @@
 // Deploy the release E2E stack through the same browser wizard used by operators.
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { chromium, expect } from '@playwright/test';
 
 const { KIND_CLUSTER, TEST_USERNAME, TEST_PASSWORD } = process.env;
@@ -14,7 +13,7 @@ const env = { ...process.env };
 for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']) {
   delete env[key];
 }
-const cli = spawn(fileURLToPath(new URL('../../cli/target/debug/kubarr', import.meta.url)),
+const cli = spawn(process.env.KUBARR_CLI || 'kubarr',
   ['bootstrap'], { env, stdio: ['ignore', 'pipe', 'inherit'] });
 const exited = once(cli, 'exit');
 // Register immediately so a spawn failure cannot become an unhandled rejection.
@@ -59,11 +58,11 @@ try {
   await page.locator('#next').click(); // Waits for required cluster checks.
   await page.locator('input[name="access_mode"][value="port-forward"]').check();
   await page.locator('#next').click();
-  await page.locator('#storage_size').fill('5Gi');
-  await page.locator('#storage_class').fill('standard');
+  await page.locator('#storage_size').fill(process.env.KUBARR_BOOTSTRAP_STORAGE_SIZE || '5Gi');
+  await page.locator('#storage_class').fill(process.env.KUBARR_BOOTSTRAP_STORAGE_CLASS || 'standard');
   await page.locator('#next').click();
   await page.locator('#admin_username').fill(TEST_USERNAME);
-  await page.locator('#admin_email').fill('admin@example.com');
+  await page.locator('#admin_email').fill(process.env.KUBARR_BOOTSTRAP_ADMIN_EMAIL || 'admin@example.com');
   await page.locator('#admin_password').fill(TEST_PASSWORD);
   await page.locator('#admin_confirm').fill(TEST_PASSWORD);
   await page.locator('#next').click();

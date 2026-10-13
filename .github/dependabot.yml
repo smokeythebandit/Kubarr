@@ -16,14 +16,6 @@ updates:
       cargo:
         patterns: ["*"]
 
-  - package-ecosystem: cargo
-    directory: /code/cli
-    schedule:
-      interval: weekly
-    groups:
-      cargo:
-        patterns: ["*"]
-
   - package-ecosystem: gomod
     directory: /code/dns-webhook
     schedule:

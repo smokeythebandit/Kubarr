@@ -34,14 +34,17 @@ than skipping the drain check.
 
 - Linux Docker host with at least 4 CPUs, 6 GiB free RAM, and 10 GiB free disk
 - Host NFS client/server kernel support already loaded (`nfs` and `nfsd`); the script never runs `sudo` or loads modules
-- Docker Engine 28 or newer (API 1.48 or newer), Kind `v0.33.0`, kubectl compatible with Kubernetes `v1.35.8` (CI pins `v1.35.8`), Helm `v4.3.0`, `curl`, `jq`, `git`, and Rust/Cargo
+- Docker Engine 28 or newer (API 1.48 or newer), Kind `v0.33.0`, kubectl compatible with Kubernetes `v1.35.8` (CI pins `v1.35.8`), Helm `v4.3.0`, `curl`, `jq`, `git`, Python with PyYAML, Node.js, and pnpm
+- The standalone [kubarr-cli](https://github.com/smokeythebandit/kubarr-cli), installed on `PATH` or selected with `KUBARR_ACCEPTANCE_CLI` / `KUBARR_CLI`. CI pins its source revision in `.github/actions/setup-cli/action.yml`.
+- Frontend dependencies and Playwright Chromium, used to drive the web bootstrap wizard in every scenario
 - Local images `kubarr-backend:<tag>`, `kubarr-frontend:<tag>`, and `kubarr-worker:<tag>`
 - A charts checkout at `01e45468f233b03b4a7d70a320aec9075f77c213`
 
-Build the CLI and current images, then run from the application repository:
+Install the standalone CLI, prepare browser dependencies and current images, then run from the application repository:
 
 ```bash
-cargo build --locked --manifest-path code/cli/Cargo.toml
+pnpm --dir code/frontend install --frozen-lockfile --ignore-scripts
+pnpm --dir code/frontend exec playwright install chromium
 docker build -f docker/Dockerfile.api -t kubarr-backend:acceptance-local .
 docker build -f docker/Dockerfile.frontend -t kubarr-frontend:acceptance-local .
 docker build -f docker/Dockerfile.worker -t kubarr-worker:acceptance-local .
@@ -52,8 +55,7 @@ KUBARR_ACCEPTANCE_CHARTS_DIR="$PWD/../kubarr-charts" \
 tests/acceptance/app-lifecycle.sh
 ```
 
-For the real frontend scenario, install the pinned frontend dependencies and
-Chromium first, then add `KUBARR_ACCEPTANCE_FRONTEND=1`. The harness supplies the
+For the real frontend scenario, add `KUBARR_ACCEPTANCE_FRONTEND=1`. The harness supplies the
 gateway URL, disposable bootstrap-admin credentials, run ID, chart versions, and a
 private mode-0600 result path to these serial Playwright projects:
 `real-settings-vpn`, `real-settings-profiles`, `real-settings-accounts`, `real-app-install`, `real-app-upgrade`, `real-app-restart`, and
@@ -63,6 +65,8 @@ routes. Each app project writes its operation ID to the shared JSON result as
 performs the existing API and Kubernetes validation.
 
 The charts path defaults to the sibling `../kubarr-charts`, but the commit is always verified. The harness uses `git archive` at that revision, so dirty or unpushed files cannot affect generated artifacts. CI supplies an explicit checkout path.
+
+Bootstrap uses `code/frontend/tests/bootstrap.mjs` to configure the standalone CLI's browser wizard. The harness writes the test catalog environment into the run-owned backend and worker chart copies before installation, so their first pods use the isolated catalog configuration. It does not use legacy CLI install flags.
 
 Keep the harness unchanged during execution, or run an immutable snapshot with
 explicit `KUBARR_ACCEPTANCE_APP_ROOT`, `KUBARR_ACCEPTANCE_CLI`, and

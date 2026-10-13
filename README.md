@@ -112,7 +112,7 @@ pnpm dev
 
 See [Installation Guide](./docs/installation.md) for detailed setup instructions and advanced configuration.
 
-For first-time setup with the CLI, see the [Bootstrap Guide](./docs/bootstrap.md) for the browser wizard, SSH access, and CLI builds and releases.
+The installer is maintained in [kubarr-cli](https://github.com/smokeythebandit/kubarr-cli), with independent versions and releases. See the [Bootstrap Guide](./docs/bootstrap.md) for browser setup and CLI development.
 
 ## Architecture
 

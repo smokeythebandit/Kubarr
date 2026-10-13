@@ -5,7 +5,7 @@ CHARTS_REV=${KUBARR_ACCEPTANCE_CHARTS_REV:-01e45468f233b03b4a7d70a320aec9075f77c
 APP_ROOT=${KUBARR_ACCEPTANCE_APP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 CHARTS_REPO=${KUBARR_ACCEPTANCE_CHARTS_DIR:-"$APP_ROOT/../kubarr-charts"}
 CHARTS_DIR=""
-CLI=${KUBARR_ACCEPTANCE_CLI:-"$APP_ROOT/code/cli/target/debug/kubarr"}
+CLI=${KUBARR_ACCEPTANCE_CLI:-${KUBARR_CLI:-kubarr}}
 IMAGE_TAG=${KUBARR_ACCEPTANCE_IMAGE_TAG:-acceptance-local}
 INSTALL_TIMEOUT=${KUBARR_ACCEPTANCE_INSTALL_TIMEOUT:-5m}
 APP_TIMEOUT=${KUBARR_ACCEPTANCE_APP_TIMEOUT:-10m}
@@ -530,6 +530,23 @@ registry_ready() {
   curl --fail --silent --output /dev/null --max-time 5 "http://127.0.0.1:$REGISTRY_HOST_PORT/v2/"
 }
 
+bootstrap_chart_env() {
+  # Override only the run-owned chart copies, before the browser installs them.
+  python3 - "$1" "$2" <<'PY'
+import pathlib
+import sys
+import yaml
+
+environment = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())["env"]
+charts = pathlib.Path(sys.argv[2])
+for component in ("kubarr-backend", "kubarr-worker"):
+    path = charts / "system" / component / "values.yaml"
+    values = yaml.safe_load(path.read_text())
+    values["env"] = environment
+    path.write_text(yaml.safe_dump(values, sort_keys=False))
+PY
+}
+
 main() {
 trap cleanup EXIT
 trap on_int INT
@@ -537,7 +554,9 @@ trap on_term TERM
 trap 'on_err "$?" "$LINENO"' ERR
 
 [[ ${KUBARR_ACCEPTANCE_DISPOSABLE:-} == 1 ]] || fail "set KUBARR_ACCEPTANCE_DISPOSABLE=1 to authorize disposable Docker/Kind resources"
-for tool in docker kind kubectl helm curl jq git sed tar cmp; do need "$tool"; done
+for tool in docker kind kubectl helm curl jq git sed tar cmp node python3; do need "$tool"; done
+[[ -f "$APP_ROOT/code/frontend/node_modules/@playwright/test/cli.js" ]] ||
+  fail "browser bootstrap dependencies are not installed (run pnpm install in code/frontend)"
 if frontend_acceptance_enabled; then
   need node
   need stat
@@ -553,7 +572,8 @@ if [[ $VPN_LAB_ACCEPTANCE == 1 ]]; then
   [[ -f "$APP_ROOT/code/frontend/playwright.vpn.config.ts" ]] || fail "VPN Playwright config not found"
   [[ -f "$APP_ROOT/code/frontend/node_modules/@playwright/test/cli.js" ]] || fail "frontend dependencies are not installed"
 fi
-[[ -x "$CLI" ]] || fail "CLI not executable: $CLI (build with cargo build --locked --manifest-path code/cli/Cargo.toml)"
+CLI=$(command -v "$CLI") || fail "standalone CLI not found; install kubarr or set KUBARR_ACCEPTANCE_CLI to its executable"
+[[ -x "$CLI" ]] || fail "CLI not executable: $CLI"
 [[ -f "$CHARTS_REPO/media-manager/sonarr/Chart.yaml" ]] || fail "invalid charts path: $CHARTS_REPO"
 [[ $(git -C "$CHARTS_REPO" rev-parse HEAD) == "$CHARTS_REV" ]] || fail "charts checkout must be pinned at $CHARTS_REV"
 if [[ $VPN_LAB_ACCEPTANCE == 1 ]]; then
@@ -659,7 +679,7 @@ for package in "$WORK_DIR/packages"/*.tgz; do
   helm push "$package" "oci://127.0.0.1:$REGISTRY_HOST_PORT/kubarr-charts" --plain-http >/dev/null
 done
 
-say "bootstrapping Kubarr through the real CLI"
+say "bootstrapping Kubarr through the standalone CLI web wizard"
 export KUBARR_CHARTS_DIR="$WORK_DIR/installer-charts"
 export KUBARR_BACKEND_IMAGE=kubarr-backend KUBARR_FRONTEND_IMAGE=kubarr-frontend KUBARR_WORKER_IMAGE=kubarr-worker
 export KUBARR_IMAGE_TAG="$IMAGE_TAG" KUBARR_IMAGE_PULL_POLICY=Never
@@ -692,12 +712,14 @@ env:
   - name: KUBARR_CHARTS_SYNC_INTERVAL
     value: "3600"
 EOF
+bootstrap_chart_env "$WORK_DIR/bootstrap-values.yaml" "$CHARTS_DIR"
 ADMIN_USER=acceptance-admin
 ADMIN_PASSWORD=$(printf 'acceptance-%s-Aa1!' "$RUN_TOKEN")
 require_owned_context
-  "$CLI" bootstrap --cluster-mode existing --storage-mode managed-nfs --storage-size 2Gi \
-  --storage-class standard --admin-username "$ADMIN_USER" --admin-email acceptance@example.invalid \
-  --admin-password "$ADMIN_PASSWORD" --values "$WORK_DIR/bootstrap-values.yaml"
+  KUBARR_CLI="$CLI" KIND_CLUSTER="$CLUSTER" TEST_USERNAME="$ADMIN_USER" TEST_PASSWORD="$ADMIN_PASSWORD" \
+  KUBARR_BOOTSTRAP_STORAGE_SIZE=2Gi KUBARR_BOOTSTRAP_STORAGE_CLASS=standard \
+  KUBARR_BOOTSTRAP_ADMIN_EMAIL=acceptance@example.invalid \
+  node "$APP_ROOT/code/frontend/tests/bootstrap.mjs"
 
   say "verifying worker singleton drain contract"
   worker_deployment_matches_drain_contract ||
