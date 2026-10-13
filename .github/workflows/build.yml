@@ -11,6 +11,63 @@ permissions:
   contents: read
 
 jobs:
+  cli:
+    name: CLI / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: code/cli
+      - name: Build release CLI
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --locked --release --target "$TARGET" --manifest-path code/cli/Cargo.toml
+      - name: Verify web-only installer
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          binary="code/cli/target/${TARGET}/release/kubarr"
+          bootstrap_help="$("$binary" bootstrap --web --help)"
+          if [[ "$bootstrap_help" != *"--web-port"* || "$bootstrap_help" == *"--cluster-mode"* ]]; then
+            echo "The CLI must contain the web-only bootstrap installer." >&2
+            exit 1
+          fi
+          if "$binary" install --help >/dev/null 2>&1; then
+            echo "The CLI still includes the legacy install command." >&2
+            exit 1
+          fi
+      - name: Package binary and checksum
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir release-assets
+          asset="release-assets/kubarr-linux-${ARCH}.tar.gz"
+          tar -C "code/cli/target/${TARGET}/release" -czf "$asset" kubarr
+          sha256sum "$asset" | cut -d ' ' -f 1 > "$asset.sha256"
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: kubarr-cli-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 3
+
   docker:
     runs-on: ubuntu-latest
     strategy:

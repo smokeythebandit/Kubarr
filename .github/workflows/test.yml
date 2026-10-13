@@ -200,13 +200,9 @@ jobs:
           KUBARR_IMAGE_TAG: ${{ inputs.image-tag }}
           KUBARR_IMAGE_PULL_POLICY: Never
         run: |
-          # Bootstrap installs dependencies and seeds storage/admin records after migrations.
+          # The browser wizard installs dependencies and seeds storage/admin records after migrations.
           # auth.setup.ts logs in to an existing account; it does not create one.
-          code/cli/target/debug/kubarr bootstrap \
-            --cluster-mode existing \
-            --storage-mode managed-nfs --storage-size 5Gi --storage-class standard \
-            --admin-username "$TEST_USERNAME" --admin-email admin@example.com \
-            --admin-password "$TEST_PASSWORD"
+          node code/frontend/tests/bootstrap.mjs
           # Both processes must discover the same published catalog versions.
           for component in kubarr-backend kubarr-worker; do
             kubectl set env "deployment/$component" -n "$component" "KUBARR_CHARTS_GIT_REF=$CATALOG_REV"

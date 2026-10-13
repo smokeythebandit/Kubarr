@@ -112,6 +112,8 @@ pnpm dev
 
 See [Installation Guide](./docs/installation.md) for detailed setup instructions and advanced configuration.
 
+For first-time setup with the CLI, see the [Bootstrap Guide](./docs/bootstrap.md) for the browser wizard, SSH access, and CLI builds and releases.
+
 ## Architecture
 
 Kubarr consists of three main components:
@@ -143,6 +145,7 @@ Kubarr consists of three main components:
 
 - [Quick Start Guide](./docs/quick-start.md) - Get running in 15 minutes
 - [Installation Guide](./docs/installation.md) - Detailed setup instructions
+- [Bootstrap Guide](./docs/bootstrap.md) - First-time setup with the CLI
 - [Configuration Reference](./docs/configuration.md) - Environment variables and Helm values
 - [User Guide](./docs/user-guide.md) - How to use Kubarr effectively
 - [Architecture](./docs/architecture.md) - System design and decisions
