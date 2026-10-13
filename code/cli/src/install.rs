@@ -1,41 +1,13 @@
 use std::env;
 
 use crate::install_events::Operation;
-use crate::style::{detail, status_label, RED};
+use crate::style::detail;
 use crate::types::{
     BootstrapOptions, InstallOptions, StorageModeOption, WebAccess, APP_NAMESPACE,
     BACKEND_CHART_REF, BACKEND_IMAGE, BOOTSTRAP_RELEASE_NAMESPACE, FRONTEND_CHART_REF,
     FRONTEND_IMAGE, GATEWAY_CHART_REF, IMAGE_TAG, WORKER_CHART_REF, WORKER_IMAGE,
 };
-use crate::util::{
-    chart_ref, check_tool, has_help, next_value, parse_port, try_run_or_print_progress,
-};
-
-pub fn install(args: Vec<String>) {
-    if has_help(&args) {
-        println!(
-            "Install or upgrade Kubarr component charts with Helm.\n\nUSAGE:\n    kubarr install [OPTIONS]\n\nOPTIONS:\n    --frontend-node-port <port>   Expose OpenResty as NodePort on this port\n    --backend-node-port <port>    Expose backend as NodePort on this port\n    --values <path>               Extra Helm values file; repeatable\n    --wait                        Wait for resources to become ready\n    --dry-run                     Print commands without running them"
-        );
-        return;
-    }
-
-    let options = match InstallOptions::parse(args) {
-        Ok(options) => options,
-        Err(err) => {
-            eprintln!("{} {err}", status_label("error", RED));
-            std::process::exit(2);
-        }
-    };
-
-    if let Err(err) = perform_install(&options) {
-        eprintln!("{} {err}", status_label("error", RED));
-        std::process::exit(1);
-    }
-}
-
-pub fn perform_install(options: &InstallOptions) -> Result<(), String> {
-    perform_install_with_storage(options, &[])
-}
+use crate::util::{chart_ref, check_tool, try_run_or_print_progress};
 
 pub fn perform_bootstrap_install(options: &BootstrapOptions) -> Result<(), String> {
     let storage_values = storage_set_values(options);
@@ -77,11 +49,9 @@ fn perform_install_with_storage(
     for (key, value) in storage_values {
         backend_sets.push((key.clone(), value.clone()));
     }
-    if options.web_access.is_some() {
-        backend_sets.push(("service.type".into(), "ClusterIP".into()));
-        backend_sets.push(("service.nodePort".into(), "null".into()));
-        backend_sets.push(("service.port".into(), "8000".into()));
-    }
+    backend_sets.push(("service.type".into(), "ClusterIP".into()));
+    backend_sets.push(("service.nodePort".into(), "null".into()));
+    backend_sets.push(("service.port".into(), "8000".into()));
     install_release(
         "kubarr-backend",
         "kubarr-backend",
@@ -116,26 +86,18 @@ fn perform_install_with_storage(
         ),
     ];
     match options.web_access {
-        Some(WebAccess::NodePort(port)) => {
+        WebAccess::NodePort(port) => {
             gateway_sets.push(("service.type".into(), "NodePort".into()));
             gateway_sets.push(("service.nodePort".into(), port.to_string()));
         }
-        Some(WebAccess::LoadBalancer) => {
+        WebAccess::LoadBalancer => {
             gateway_sets.push(("service.type".into(), "LoadBalancer".into()));
         }
-        Some(WebAccess::PortForward) => {
+        WebAccess::PortForward => {
             gateway_sets.push(("service.type".into(), "ClusterIP".into()));
         }
-        None => {
-            if let Some(port) = options.frontend_node_port {
-                gateway_sets.push(("service.type".into(), "NodePort".into()));
-                gateway_sets.push(("service.nodePort".into(), port.to_string()));
-            }
-        }
     }
-    if options.web_access.is_some() {
-        gateway_sets.push(("service.port".into(), "8080".into()));
-    }
+    gateway_sets.push(("service.port".into(), "8080".into()));
     // The explicit LoadBalancer check renders this same chart version. Local
     // chart overrides use their path, and are revalidated at /api/start.
     install_release(
@@ -202,21 +164,8 @@ fn install_release(
             }
         }
     }
-    if let Some(port) = options
-        .backend_node_port
-        .filter(|_| options.web_access.is_none())
-    {
-        if release == "kubarr-backend" {
-            helm_args.extend(["--set".to_string(), "service.type=NodePort".to_string()]);
-            helm_args.extend(["--set".to_string(), format!("service.nodePort={port}")]);
-        }
-    }
-
     for (key, value) in set_values {
         helm_args.extend(["--set".to_string(), format!("{}={}", key, value)]);
-    }
-    for values in &options.values_files {
-        helm_args.extend(["--values".to_string(), values.clone()]);
     }
     if options.wait {
         helm_args.push("--wait=legacy".to_string());
@@ -263,40 +212,12 @@ fn storage_set_values(options: &BootstrapOptions) -> Vec<(String, String)> {
 }
 
 impl InstallOptions {
-    pub fn parse(args: Vec<String>) -> Result<Self, String> {
-        let mut options = Self::default_for_bootstrap(false);
-        options.frontend_node_port = None;
-        options.backend_node_port = None;
-        options.wait = false;
-        let mut iter = args.into_iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--namespace" | "-n" => options.namespace = next_value(&mut iter, &arg)?,
-                "--release" => options.release = next_value(&mut iter, &arg)?,
-                "--frontend-node-port" => {
-                    options.frontend_node_port = Some(parse_port(next_value(&mut iter, &arg)?)?)
-                }
-                "--backend-node-port" => {
-                    options.backend_node_port = Some(parse_port(next_value(&mut iter, &arg)?)?)
-                }
-                "--values" | "-f" => options.values_files.push(next_value(&mut iter, &arg)?),
-                "--wait" => options.wait = true,
-                "--dry-run" => options.dry_run = true,
-                other => return Err(format!("unknown install option '{other}'")),
-            }
-        }
-        Ok(options)
-    }
-
     pub fn default_for_bootstrap(dry_run: bool) -> Self {
         Self {
             namespace: APP_NAMESPACE.into(),
             release: "kubarr".into(),
-            frontend_node_port: None,
-            backend_node_port: Some(30081),
-            web_access: None,
+            web_access: WebAccess::NodePort(30080),
             gateway_chart_version: None,
-            values_files: vec![],
             server_name: None,
             admin: None,
             wait: true,
@@ -315,7 +236,7 @@ mod tests {
         let _guard = INSTALL_TEST_LOCK.lock().unwrap();
         let (tx, rx) = mpsc::channel();
         install_events::set_install_log(tx);
-        perform_install(options).unwrap();
+        perform_install_with_storage(options, &[]).unwrap();
         install_events::clear_install_log();
         rx.into_iter()
             .filter_map(|event| match event {
@@ -338,8 +259,7 @@ mod tests {
             (WebAccess::PortForward, "service.type=ClusterIP"),
         ] {
             let mut options = InstallOptions::default_for_bootstrap(true);
-            options.web_access = Some(mode);
-            options.backend_node_port = Some(30081); // A web selection overrides the legacy default.
+            options.web_access = mode;
             let commands = plans(&options);
             assert_eq!(commands.len(), 4);
             assert!(commands[0].contains("kubarr-backend"));
@@ -356,27 +276,9 @@ mod tests {
     }
 
     #[test]
-    fn existing_cli_ports_keep_their_chart_targets() {
-        let mut options = InstallOptions::parse(vec![
-            "--frontend-node-port".into(),
-            "30111".into(),
-            "--backend-node-port".into(),
-            "30112".into(),
-            "--dry-run".into(),
-        ])
-        .unwrap();
-        assert_eq!(options.web_access, None);
-        let commands = plans(&options);
-        assert!(commands[0].contains("service.nodePort=30112"));
-        assert!(commands[2].contains("service.nodePort=30111"));
-        options = InstallOptions::default_for_bootstrap(true);
-        assert_eq!(options.backend_node_port, Some(30081));
-    }
-
-    #[test]
     fn web_loadbalancer_pins_gateway_chart_version_only() {
         let mut options = InstallOptions::default_for_bootstrap(true);
-        options.web_access = Some(WebAccess::LoadBalancer);
+        options.web_access = WebAccess::LoadBalancer;
         options.gateway_chart_version = Some("1.29.2+5.3".into());
         let commands = plans(&options);
         assert!(commands[..2]

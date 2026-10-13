@@ -10,33 +10,6 @@ pub const YELLOW: &str = "\x1b[33m";
 pub const BLUE: &str = "\x1b[34m";
 pub const CYAN: &str = "\x1b[36m";
 const RESET: &str = "\x1b[0m";
-const RULE: &str = "+------------------------------------------------------------+";
-
-pub fn print_banner() {
-    println!("{}", paint(RULE, CYAN));
-    println!(
-        "{}",
-        paint(
-            "|                      Kubarr Bootstrap                      |",
-            BOLD
-        )
-    );
-    println!(
-        "{}",
-        paint(
-            "|        Cluster -> Storage -> Observability -> Apps         |",
-            DIM
-        )
-    );
-    println!("{}", paint(RULE, CYAN));
-    println!(
-        "{}",
-        paint(
-            "A guided setup for a clean, Kubernetes-native media stack.",
-            DIM
-        )
-    );
-}
 
 pub fn step(name: &str, message: &str) {
     if install_events::stage(name) {

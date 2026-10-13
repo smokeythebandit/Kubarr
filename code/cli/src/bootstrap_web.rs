@@ -27,12 +27,11 @@ use crate::storage_probe::{self, Input};
 use crate::targets::{Choice, Registry, MAX_CONFIG};
 use crate::types::{
     AdminUser, BootstrapOptions, BootstrapStorageOptions, ClusterMode, ExternalNfsOptions,
-    InstallOptions, StorageModeOption, WebAccess,
+    InstallOptions, StorageModeOption, StorageOptions, WebAccess,
 };
 use crate::util::{
     command_exists, command_output, current_target, parse_port, scope_target, CommandTarget,
 };
-use crate::wizard::default_managed_storage;
 
 const MAX_EVENTS: usize = 500;
 const MAX_EVENT_BYTES: usize = 1024;
@@ -889,7 +888,7 @@ impl Form {
         };
         let storage = match self.storage_mode.as_str() {
             "managed-nfs" => {
-                let mut managed = default_managed_storage(false);
+                let mut managed = StorageOptions::default_managed(false);
                 managed.size = required(self.storage_size, "storage size")?;
                 let digits = managed
                     .size
@@ -933,7 +932,7 @@ impl Form {
         };
         let mut install = InstallOptions::default_for_bootstrap(false);
         install.server_name = Some(required(self.server_name, "server name")?);
-        install.web_access = Some(match self.access_mode.as_str() {
+        install.web_access = match self.access_mode.as_str() {
             "nodeport" => {
                 let port = parse_port(self.backend_port).map_err(|_| "invalid gateway NodePort")?;
                 if !(30000..=32767).contains(&port) {
@@ -944,8 +943,7 @@ impl Form {
             "loadbalancer" => WebAccess::LoadBalancer,
             "port-forward" => WebAccess::PortForward,
             _ => return Err("invalid access mode".into()),
-        });
-        install.backend_node_port = None;
+        };
         let username = required(self.admin_username, "admin username")?;
         let email = required(self.admin_email, "admin email")?;
         if !email.contains('@') {
@@ -966,7 +964,6 @@ impl Form {
             cluster_mode,
             install,
             storage: BootstrapStorageOptions { mode: storage },
-            skip_cluster_check: false,
             grafana_enabled: self.grafana,
         })
     }
@@ -1458,7 +1455,7 @@ async fn start(State(app): State<App>, headers: HeaderMap, Json(form): Json<Form
         )
             .into_response();
     }
-    if matches!(options.install.web_access, Some(WebAccess::LoadBalancer)) {
+    if matches!(options.install.web_access, WebAccess::LoadBalancer) {
         let Some(target_id) = context_id.as_deref() else {
             return (StatusCode::BAD_REQUEST, "LoadBalancer requires an existing cluster with a verified address allocator. Choose an existing context or use NodePort or port-forward for new local k3s.").into_response();
         };
@@ -3014,8 +3011,7 @@ mod tests {
             options.storage.mode,
             StorageModeOption::ExternalNfs(_)
         ));
-        assert_eq!(options.install.backend_node_port, None);
-        assert_eq!(options.install.web_access, Some(WebAccess::PortForward));
+        assert_eq!(options.install.web_access, WebAccess::PortForward);
         assert!(options.grafana_enabled);
         form["admin_confirm"] = json!("mismatch");
         assert!(serde_json::from_value::<Form>(form.clone())
@@ -3035,11 +3031,7 @@ mod tests {
             .unwrap()
             .options()
             .unwrap();
-        assert_eq!(
-            nodeport.install.web_access,
-            Some(WebAccess::NodePort(30080))
-        );
-        assert_eq!(nodeport.install.backend_node_port, None);
+        assert_eq!(nodeport.install.web_access, WebAccess::NodePort(30080));
         form["access_mode"] = json!("loadbalancer");
         form["backend_port"] = json!("ignored");
         assert_eq!(
@@ -3049,7 +3041,7 @@ mod tests {
                 .unwrap()
                 .install
                 .web_access,
-            Some(WebAccess::LoadBalancer)
+            WebAccess::LoadBalancer
         );
         form["access_mode"] = json!("invalid");
         assert!(serde_json::from_value::<Form>(form)

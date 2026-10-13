@@ -9,49 +9,35 @@ use crate::observability::{
     install_fluent_bit, install_grafana, install_victorialogs, install_victoriametrics,
 };
 use crate::storage::{configure_storage, write_storage_config};
-use crate::style::{print_banner, step};
+use crate::style::step;
 use crate::types::BootstrapOptions;
 use crate::types::{ClusterMode, StorageModeOption};
-use crate::util::{check_tool, has_help, scope_target};
-use crate::wizard::parse_bootstrap_options;
+use crate::util::{check_tool, has_help};
 
 pub fn bootstrap(args: Vec<String>) -> Result<(), String> {
     if has_help(&args) {
         println!(
-            "Set up Kubarr from scratch.\n\nUSAGE:\n    kubarr bootstrap [--web [--web-port <port>]]\n    kubarr bootstrap [INSTALL OPTIONS]\n\nWithout options, hosts the browser wizard. --web explicitly hosts it.\n--web-port accepts 0-65535 (0 selects an available port).\nThe wizard prints the location of a private 0600 local failure log (max 1 MiB).\nIt may contain sensitive subprocess output; remove it when finished.\n\nINSTALL OPTIONS:\n    --cluster-mode <mode>         existing or single-node\n    --namespace <name>            Namespace [default: kubarr-backend]\n    --release <name>              Release [default: kubarr]\n    --server-name <name>          Display name\n    --admin-username <name>       Initial admin username\n    --admin-email <email>         Initial admin email\n    --admin-password <password>   Initial admin password\n    --frontend-node-port <port>   Frontend NodePort\n    --backend-node-port <port>    Backend NodePort [default: 30081]\n    --values <path>               Extra Helm values file; repeatable\n    --storage-mode <mode>         managed-nfs or external-nfs\n    --storage-size <size>         Managed NFS PVC size [default: 1Ti]\n    --storage-class <name>        StorageClass for managed NFS PVC\n    --nfs-server <host>           External NFS server hostname or IP\n    --nfs-path <path>             External NFS export path\n    --grafana                     Install optional Grafana dashboards\n    --skip-cluster-check          Skip cluster prerequisites\n    --dry-run                     Print commands without running them"
+            "Set up Kubarr in the web interface.\n\nUSAGE:\n    kubarr bootstrap [--web] [--web-port <port>]\n\nHosts the browser wizard for all installation configuration.\n\nOPTIONS:\n    --web                Explicitly request the browser wizard\n    --web-port <port>    Listen on port 0-65535 [default: 0, selects an available port]\n\nThe wizard prints the location of a private 0600 local failure log (max 1 MiB).\nIt may contain sensitive subprocess output; remove it when finished."
         );
         return Ok(());
     }
 
-    if args.is_empty()
-        || args
-            .first()
-            .is_some_and(|arg| arg == "--web" || arg == "--web-port")
-    {
-        let mut port = 0;
-        let mut iter = args.into_iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--web" => {}
-                "--web-port" => {
-                    port = iter
-                        .next()
-                        .ok_or("missing value for --web-port")?
-                        .parse::<u16>()
-                        .map_err(|_| "--web-port must be between 0 and 65535")?
-                }
-                _ => return Err(format!("unknown web option '{arg}'")),
+    let mut port = 0;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--web" => {}
+            "--web-port" => {
+                port = iter
+                    .next()
+                    .ok_or("missing value for --web-port")?
+                    .parse::<u16>()
+                    .map_err(|_| "--web-port must be between 0 and 65535")?
             }
+            _ => return Err(format!("unknown bootstrap option '{arg}'. Configure installation in the web interface.")),
         }
-        return run_web(port);
     }
-
-    print_banner();
-    let options = parse_bootstrap_options(args)?;
-    // Flag-driven installs own their k3s snapshot for the entire bootstrap;
-    // the web installer already has its own per-thread target scope.
-    let _target_scope = scope_target(None);
-    run_bootstrap_install(&options)
+    run_web(port)
 }
 
 pub fn run_bootstrap_install(options: &BootstrapOptions) -> Result<(), String> {
@@ -64,7 +50,7 @@ pub fn run_bootstrap_install(options: &BootstrapOptions) -> Result<(), String> {
     setup_cluster_if_needed(options)?;
     if !options.install.dry_run {
         check_tool("kubectl")?;
-        if !options.skip_cluster_check && !check_cluster_prerequisites(options) {
+        if !check_cluster_prerequisites(options) {
             return Err("bootstrap stopped because required cluster checks failed".into());
         }
     } else {

@@ -109,9 +109,7 @@ pub fn print_access_hint(options: &InstallOptions) {
     }
     step("Done", "Kubarr was installed successfully");
 
-    let mode = options.web_access.unwrap_or(WebAccess::NodePort(
-        options.frontend_node_port.unwrap_or(30080),
-    ));
+    let mode = options.web_access;
     let access = resolve_access(mode);
     install_events::access(access.clone());
 

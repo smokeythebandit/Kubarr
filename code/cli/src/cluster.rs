@@ -7,16 +7,6 @@ use crate::util::{check_tool, command_success, external_command, set_target};
 const K3S_CONFIG: &str = "/etc/rancher/k3s/k3s.yaml";
 const INSTALL_COMMAND: &str = "curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 600";
 
-pub fn parse_cluster_mode(value: &str) -> Result<ClusterMode, String> {
-    match value {
-        "existing" => Ok(ClusterMode::Existing),
-        "single-node" => Ok(ClusterMode::SingleNode),
-        other => Err(format!(
-            "unknown cluster mode '{other}'. Use 'existing' or 'single-node'"
-        )),
-    }
-}
-
 pub fn setup_cluster_if_needed(options: &BootstrapOptions) -> Result<(), String> {
     match options.cluster_mode {
         ClusterMode::Existing => {
@@ -58,10 +48,10 @@ fn setup_single_node_cluster(dry_run: bool) -> Result<(), String> {
     )
 }
 
-/// Shared by browser and flag-driven installs. An existing but invalid k3s
-/// kubeconfig is an error, not permission to run an installer or try another
-/// context. A missing config means a genuinely fresh k3s install. Read/snapshot
-/// again *after* installation, never before the new config exists.
+/// An existing but invalid k3s kubeconfig is an error, not permission to run an
+/// installer or try another context. A missing config means a genuinely fresh
+/// k3s install. Read/snapshot again *after* installation, never before the new
+/// config exists.
 fn setup_single_node_cluster_at(
     path: &Path,
     dry_run: bool,

@@ -64,7 +64,7 @@ jobs:
     with:
       image-tag: ci-${{ github.sha }}
     permissions:
-      contents: read
+      contents: write
       packages: write
       pages: write
       id-token: write
