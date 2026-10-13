@@ -26,7 +26,7 @@ jobs:
         with:
           workspaces: code/api
 
-      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d
         with:
           languages: rust
           queries: security-and-quality
@@ -35,6 +35,6 @@ jobs:
         run: cargo build
         working-directory: code/api
 
-      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d
         with:
           category: /language:rust
