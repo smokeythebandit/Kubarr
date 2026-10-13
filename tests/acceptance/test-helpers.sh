@@ -444,14 +444,14 @@ non_owned_context_is_rejected() {
   require_owned_context
 }
 
-test_bootstrap_chart_env() {
+test_chart_environment() {
   local test_dir
   test_dir=$(mktemp -d)
   mkdir -p "$test_dir/charts/system/kubarr-backend" "$test_dir/charts/system/kubarr-worker"
   printf 'env:\n  - name: KUBARR_CHARTS_SOURCE_DIR\n    value: /catalog-source\n' >"$test_dir/override.yaml"
   printf 'replicaCount: 1\nimage:\n  repository: backend\nenv: []\n' >"$test_dir/charts/system/kubarr-backend/values.yaml"
   printf 'replicaCount: 1\nterminationGracePeriodSeconds: 660\nenv:\n  - name: OLD_VALUE\n    value: old\n' >"$test_dir/charts/system/kubarr-worker/values.yaml"
-  bootstrap_chart_env "$test_dir/override.yaml" "$test_dir/charts"
+  configure_test_chart_env "$test_dir/override.yaml" "$test_dir/charts"
   python3 - "$test_dir/charts" <<'PY'
 import pathlib
 import sys
@@ -469,7 +469,7 @@ PY
 }
 
 test_opt_in_guard
-test_bootstrap_chart_env
+test_chart_environment
 test_operation_succeeded_polling
 test_frontend_operation_result_contract
 test_operation_running_statuses

@@ -37,6 +37,7 @@ jobs:
         run: |
           bash tests/acceptance/test-helpers.sh
           bash tests/acceptance/test-sonarr-api.sh
+          python3 -B -m unittest discover -s tests/acceptance -p 'test_*.py' -v
           bash tests/acceptance/vpn/test-lab-helpers.sh
           python3 -B -m unittest discover -s tests/acceptance/vpn -p 'test_*.py' -v
 

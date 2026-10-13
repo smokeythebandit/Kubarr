@@ -1,6 +1,6 @@
 # Kubernetes acceptance test
 
-This test creates a uniquely named Kind cluster and OCI registry, bootstraps Kubarr through the CLI, and exercises the real Sonarr lifecycle. It is intentionally opt-in and never uses the default kubeconfig.
+This test creates a uniquely named Kind cluster and OCI registry, deploys Kubarr directly with Helm, and exercises the real Sonarr lifecycle. It is intentionally opt-in and never uses the default kubeconfig.
 
 The default scenario drives lifecycle mutations through the API and proves worker
 draining during an in-flight update. Setting `KUBARR_ACCEPTANCE_FRONTEND=1` instead
@@ -18,6 +18,8 @@ The real frontend scenario also passed all 14 browser tests with scoped cleanup
 and exit status 0 on 2026-09-22. See
 [the frontend run](validated-frontend-run-2026-09-22.md).
 
+Those records predate the current direct-Helm deployment fixture.
+
 Coverage is a chart-only A-to-B upgrade using the same Sonarr image, followed by
 restart and uninstall persistence checks. This is not application-binary migration,
 platform upgrade, abrupt node-loss recovery, or CNI-enforcement coverage.
@@ -34,17 +36,14 @@ than skipping the drain check.
 
 - Linux Docker host with at least 4 CPUs, 6 GiB free RAM, and 10 GiB free disk
 - Host NFS client/server kernel support already loaded (`nfs` and `nfsd`); the script never runs `sudo` or loads modules
-- Docker Engine 28 or newer (API 1.48 or newer), Kind `v0.33.0`, kubectl compatible with Kubernetes `v1.35.8` (CI pins `v1.35.8`), Helm `v4.3.0`, `curl`, `jq`, `git`, Python with PyYAML, Node.js, and pnpm
-- The standalone [kubarr-cli](https://github.com/smokeythebandit/kubarr-cli), installed on `PATH` or selected with `KUBARR_ACCEPTANCE_CLI` / `KUBARR_CLI`. CI pins its source revision in `.github/actions/setup-cli/action.yml`.
-- Frontend dependencies and Playwright Chromium, used to drive the web bootstrap wizard in every scenario
+- Docker Engine 28 or newer (API 1.48 or newer), Kind `v0.33.0`, kubectl compatible with Kubernetes `v1.35.8` (CI pins `v1.35.8`), Helm `v4.3.0`, `curl`, `jq`, `git`, `timeout`, and Python with PyYAML
+- Node.js 26, pnpm, frontend dependencies, and Playwright Chromium for the frontend and VPN scenarios
 - Local images `kubarr-backend:<tag>`, `kubarr-frontend:<tag>`, and `kubarr-worker:<tag>`
 - A charts checkout at `01e45468f233b03b4a7d70a320aec9075f77c213`
 
-Install the standalone CLI, prepare browser dependencies and current images, then run from the application repository:
+Build current images, then run from the application repository:
 
 ```bash
-pnpm --dir code/frontend install --frozen-lockfile --ignore-scripts
-pnpm --dir code/frontend exec playwright install chromium
 docker build -f docker/Dockerfile.api -t kubarr-backend:acceptance-local .
 docker build -f docker/Dockerfile.frontend -t kubarr-frontend:acceptance-local .
 docker build -f docker/Dockerfile.worker -t kubarr-worker:acceptance-local .
@@ -55,7 +54,10 @@ KUBARR_ACCEPTANCE_CHARTS_DIR="$PWD/../kubarr-charts" \
 tests/acceptance/app-lifecycle.sh
 ```
 
-For the real frontend scenario, add `KUBARR_ACCEPTANCE_FRONTEND=1`. The harness supplies the
+For the real frontend scenario, install dependencies with
+`pnpm --dir code/frontend install --frozen-lockfile --ignore-scripts` and Chromium
+with `pnpm --dir code/frontend exec playwright install chromium`, then add
+`KUBARR_ACCEPTANCE_FRONTEND=1`. The harness supplies the
 gateway URL, disposable bootstrap-admin credentials, run ID, chart versions, and a
 private mode-0600 result path to these serial Playwright projects:
 `real-settings-vpn`, `real-settings-profiles`, `real-settings-accounts`, `real-app-install`, `real-app-upgrade`, `real-app-restart`, and
@@ -66,10 +68,10 @@ performs the existing API and Kubernetes validation.
 
 The charts path defaults to the sibling `../kubarr-charts`, but the commit is always verified. The harness uses `git archive` at that revision, so dirty or unpushed files cannot affect generated artifacts. CI supplies an explicit checkout path.
 
-Bootstrap uses `code/frontend/tests/bootstrap.mjs` to configure the standalone CLI's browser wizard. The harness writes the test catalog environment into the run-owned backend and worker chart copies before installation, so their first pods use the isolated catalog configuration. It does not use legacy CLI install flags.
+`deploy-stack.sh` deploys the fixed test stack directly with Helm. The harness writes the test catalog environment into the run-owned backend and worker chart copies before deployment, so their first pods use the isolated catalog configuration. The fixture seeds the disposable administrator and validated storage record in PostgreSQL after migrations finish.
 
 Keep the harness unchanged during execution, or run an immutable snapshot with
-explicit `KUBARR_ACCEPTANCE_APP_ROOT`, `KUBARR_ACCEPTANCE_CLI`, and
+explicit `KUBARR_ACCEPTANCE_APP_ROOT` and
 `KUBARR_ACCEPTANCE_CHARTS_DIR` paths. Bash can
 fail when its script is edited mid-run. Local snapshots, private work directories,
 and logs can live beneath `.acceptance-runs/`, which is excluded from Git and
@@ -88,6 +90,7 @@ Run offline structural checks with:
 ```bash
 tests/acceptance/test-helpers.sh
 tests/acceptance/test-sonarr-api.sh
+python3 -B -m unittest discover -s tests/acceptance -p 'test_*.py' -v
 ```
 
 The chart-fixture helper tests also require Helm, PyYAML 6.0.3, and the chart

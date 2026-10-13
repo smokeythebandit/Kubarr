@@ -58,7 +58,7 @@ requirements inventory. The inventory intentionally lists gaps; neither a
 mocked browser pass nor a profile write proves real DNS, TLS issuance, OAuth,
 external notification delivery or VPN transport.
 
-CI uploads independent frontend, backend, CLI and PostgreSQL audit ledgers from
+CI uploads independent frontend, backend and PostgreSQL audit ledgers from
 `fast-test.yml`, API-harness and real browser ledgers from `acceptance.yml`,
 and a VPN lab outcome from `vpn-acceptance.yml`. Each job shows only the inputs
 actually run there; merge lanes locally by passing all JSON/log inputs to one

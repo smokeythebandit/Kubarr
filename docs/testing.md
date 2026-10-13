@@ -32,16 +32,11 @@ namespace visibility before deployment, VPN credential placement, CIDR serializa
 and temporary-file cleanup on success and failure. Namespace timeout tests use
 paused time rather than wall-clock sleeps.
 
-CLI unit and browser-wizard tests run in the standalone
-[kubarr-cli repository](https://github.com/smokeythebandit/kubarr-cli). From that checkout:
-
-```sh
-cargo test --locked --bin kubarr
-node --test src/bootstrap_web.test.mjs
-```
-
-Kubarr's live E2E and acceptance workflows build the pinned CLI revision through
-`.github/actions/setup-cli/action.yml` and drive its web wizard with Playwright.
+Kubarr's live E2E and acceptance workflows deploy pinned charts directly with
+`tests/acceptance/deploy-stack.sh`. The fixture uses the test's own Kind context,
+locally loaded application images, managed NFS, and a disposable database account.
+Its offline contracts run with
+`python3 -B -m unittest discover -s tests/acceptance -p 'test_*.py' -v`.
 
 From `code/frontend` with Node 26 and the pinned pnpm version:
 
@@ -95,7 +90,7 @@ checks verify settings persistence. VPN tests use unassigned disposable provider
 and do not claim tunnel connectivity. See `code/frontend/tests/real/README.md` and
 `tests/acceptance/validated-frontend-run-2026-09-22.md` for the passing local run.
 
-The acceptance harness uses an isolated Kind kubeconfig, real CLI bootstrap,
+The acceptance harness uses an isolated Kind kubeconfig, direct Helm deployment,
 managed NFS, a local OCI registry, and actual Sonarr workloads. It installs through
 Kubarr's API/worker, checks Sonarr's API through the authenticated gateway, changes
 a real application setting, writes an NFS sentinel, upgrades between two chart

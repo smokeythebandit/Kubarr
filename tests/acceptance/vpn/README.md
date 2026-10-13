@@ -43,7 +43,7 @@ explicitly resumes PID 1 if this phase fails.
 ## Run
 
 The pinned charts revision is `01e45468f233b03b4a7d70a320aec9075f77c213`, containing
-Sonarr's `vpn.extraEnv` support. Build the normal acceptance images and CLI, install the
+Sonarr's `vpn.extraEnv` support. Build the normal acceptance images, install the
 frontend dependencies and Chromium, then run:
 
 ```sh

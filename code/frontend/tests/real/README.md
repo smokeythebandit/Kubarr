@@ -15,7 +15,7 @@ KUBARR_ACCEPTANCE_CHARTS_DIR="$PWD/../kubarr-charts" \
 tests/acceptance/app-lifecycle.sh
 ```
 
-Build the three runtime images and CLI and install Chromium first, as described
+Build the three runtime images and install Chromium first, as described
 in `tests/acceptance/README.md`. Never target a personal or production deployment.
 The harness supplies credentials, gateway URL, chart versions, a unique run ID,
 and a private operation-result file. It switches chart fixtures between browser

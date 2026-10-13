@@ -13,7 +13,7 @@ API and worker used the previously validated authoritative-catalog builds.
 
 ## Completed phases
 
-1. Real CLI bootstrap, database migrations, admin setup, and gateway login.
+1. Application deployment, database migrations, admin setup, and gateway login.
 2. Ten settings/VPN browser scenarios passed against the real API and database.
    Mutations used UI controls; persistence was checked after reload and through
    read-only API requests. Settings were restored and test providers removed.

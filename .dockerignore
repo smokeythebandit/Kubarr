@@ -7,7 +7,6 @@ code/frontend/dist
 target
 code/api/target
 code/worker/target
-code/cli/target
 
 # Git
 .git

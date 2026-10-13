@@ -4,9 +4,9 @@
 
 **Goal:** Kubarr running in production on a new Proxmox VM, exposed through OPNsense nginx, with test users able to log into the dashboard and stream media.
 
-**Architecture:** Finish and merge the uncommitted TUI installer, provision a dedicated VM on Proxmox (`pve`, 192.168.1.2), bootstrap single-node k3s + Kubarr with the CLI installer (the production install doubles as the installer's end-to-end validation, with Proxmox snapshot rollback as the retry mechanism), mount the existing media library from the host's NFS export, then wire external access and users.
+**Architecture:** Provision a dedicated VM on Proxmox (`pve`, 192.168.1.2), deploy Kubernetes and the published Kubarr Helm charts with Proxmox snapshot rollback, mount the existing media library from the host's NFS export, then wire external access and users.
 
-**Tech Stack:** Rust CLI (ratatui), k3s, Helm charts (kubarr-charts), Proxmox VE API, NFS, OPNsense nginx.
+**Tech Stack:** k3s, Helm charts (kubarr-charts), Proxmox VE API, NFS, OPNsense nginx.
 
 ## Global Constraints
 
@@ -16,61 +16,25 @@
 - Existing VMs 100–103 must not be touched.
 - NFS exports on pve (`/mnt/ssd_storage`, `/mnt/hdd_storage`) currently allow only 192.168.1.3/.4 — the new VM's IP must be added to both.
 - Existing media library on `/mnt/hdd_storage` is mounted read-write by the new stack — never reorganize or delete library content.
-- TUI work is committed on branch `feat/tui-installer`, merged to `main` only after the end-to-end install succeeds.
-- Commit messages end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 ---
 
-### Task 1: Commit the TUI installer work on a branch
-
-**Files:**
-- Modify (already dirty in worktree): `code/cli/src/*.rs`, `code/cli/Cargo.toml`, `code/cli/Cargo.lock`
-- Create (already exist untracked): `code/cli/src/tui.rs`, `code/cli/src/install_events.rs`
-
-**Interfaces:**
-- Produces: branch `feat/tui-installer` containing the full TUI wizard; `kubarr bootstrap` with no args on a TTY runs `tui::run_bootstrap_wizard()`, with args runs the flag path (`code/cli/src/bootstrap.rs:28-36`).
-
-- [ ] **Step 1: Build and lint gate**
-
-Run: `cd code/cli && cargo build && cargo clippy -- -D warnings`
-Expected: both succeed. If clippy fails, fix warnings before committing (small mechanical fixes only; anything behavioral gets its own commit).
-
-- [ ] **Step 2: Non-TUI regression check (dry run)**
-
-Run: `cargo run -- bootstrap --cluster-mode single-node --storage-mode external-nfs --nfs-server 192.168.1.2 --nfs-path /mnt/hdd_storage --admin-username admin --admin-email bmartens@pm.me --admin-password placeholder123 --dry-run --skip-cluster-check`
-Expected: prints planned commands, exits 0. The flag path must not have regressed.
-
-- [ ] **Step 3: Manual TUI smoke (user drives)**
-
-Run in a real terminal: `cargo run -- bootstrap` — walk the wizard to the summary screen, then cancel (do not install on the dev machine). Screens render, navigation works, cancel restores the terminal.
-
-- [ ] **Step 4: Commit on branch**
-
-```bash
-git checkout -b feat/tui-installer
-git add code/cli
-git commit -m "feat(cli): add ratatui install wizard with live install event stream
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
-```
-
-### Task 2: Verify published images and charts are current
+### Task 1: Verify published images and charts are current
 
 **Interfaces:**
 - Consumes: `.github/workflows/publish.yml` (images backend, worker, frontend, dns-webhook to ghcr).
-- Produces: confirmation that the chart refs baked into the CLI (`chart_ref(...)` in `code/cli/src/util.rs`) and the image tags they pull exist in the registry at deployable versions.
+- Produces: confirmation that the selected chart versions and their application image tags exist in the registry.
 
-- [ ] **Step 1: Extract chart/image refs from the CLI**
+- [ ] **Step 1: Select chart/image refs**
 
-Run: `grep -rn "CHART_REF\|oci://" code/cli/src/util.rs code/cli/src/types.rs`
-Record each ref and default version.
+Record the chart references, versions, and image tags from the deployment's chart metadata and values.
 
 - [ ] **Step 2: Check the registry**
 
 For each ref: `helm show chart <oci-ref> --version <v>` (or `docker manifest inspect` for images).
-Expected: all resolve. If any missing → run the publish workflow (`gh workflow run publish.yml`) from latest `main` and wait for completion before Task 5.
+Expected: all resolve. If any are missing, publish them through the appropriate repository's CI/CD pipeline and wait for completion before Task 4.
 
-### Task 3: Provision VM 104 (kubarr-prod)
+### Task 2: Provision VM 104 (kubarr-prod)
 
 **Interfaces:**
 - Consumes: Proxmox API token (in-session).
@@ -105,7 +69,7 @@ Expected: Ubuntu 24.04, 8 CPUs, ~16 GB.
 
 Proxmox API: `POST /nodes/pve/qemu/104/snapshot` with `snapname=pre-install`. Verify listed via `GET /nodes/pve/qemu/104/snapshot`.
 
-### Task 4: NFS export for the new VM
+### Task 3: NFS export for the new VM
 
 **Interfaces:**
 - Produces: `$KUBARR_IP` allowed on both exports of 192.168.1.2; verified mountable from VM 104.
@@ -121,26 +85,18 @@ ssh kubarr@$KUBARR_IP 'sudo apt-get install -y nfs-common && showmount -e 192.16
 ```
 Expected: both exports listed for `$KUBARR_IP`, mount succeeds, existing media directories visible.
 
-### Task 5: Production install via TUI installer
+### Task 4: Deploy and verify the application
 
 **Interfaces:**
-- Consumes: `feat/tui-installer` branch build; VM 104 with snapshot `pre-install`.
+- Consumes: published charts and images; VM 104 with snapshot `pre-install`.
 - Produces: single-node k3s cluster on VM 104 with Kubarr + media stack installed; snapshot `known-good`.
 
-- [ ] **Step 1: Ship the CLI to the VM**
+- [ ] **Step 1: Deploy the published charts**
 
-```bash
-cd code/cli && cargo build --release
-scp target/release/kubarr kubarr@$KUBARR_IP:
-```
+Provision the single-node Kubernetes cluster and deploy the selected chart versions with the external NFS server at 192.168.1.2, config on `/mnt/ssd_storage`, and media on `/mnt/hdd_storage`.
+**On any failure:** capture the error, roll back to the `pre-install` snapshot, correct the deployment configuration, and repeat the validation.
 
-- [ ] **Step 2: Run the TUI install (user drives, this is the validation run)**
-
-`ssh -t kubarr@$KUBARR_IP ./kubarr bootstrap` — wizard choices: single-node cluster, external-nfs storage (server 192.168.1.2, config on `/mnt/ssd_storage`, media on `/mnt/hdd_storage`), admin account, Grafana dashboards on.
-Expected: wizard completes, install phases stream in the TUI, exit clean.
-**On any failure:** capture the error (screenshot/log), roll back — `POST /nodes/pve/qemu/104/snapshot/pre-install/rollback`, wait, `POST /nodes/pve/qemu/104/status/start` — fix the bug in `code/cli`, commit to `feat/tui-installer`, repeat this task. Iterate until one clean run.
-
-- [ ] **Step 3: Verify the cluster**
+- [ ] **Step 2: Verify the cluster**
 
 ```bash
 ssh kubarr@$KUBARR_IP 'sudo k3s kubectl get nodes && sudo k3s kubectl get pods -A | grep -v Running | grep -v Completed || true'
@@ -148,24 +104,15 @@ curl -s -o /dev/null -w '%{http_code}\n' http://$KUBARR_IP:30081/   # backend No
 ```
 Expected: node Ready, no crashlooping pods, HTTP answer from Kubarr.
 
-- [ ] **Step 4: Log into the dashboard from LAN**
+- [ ] **Step 3: Log into the dashboard from LAN**
 
-Open `http://$KUBARR_IP:<frontend-port>` (port from install summary), log in as admin, deploy Jellyfin from the catalog pointed at the NFS media path, confirm the existing library is visible in it.
+Open the configured gateway address, log in as admin, deploy Jellyfin from the catalog pointed at the NFS media path, and confirm the existing library is visible in it.
 
-- [ ] **Step 5: Snapshot**
+- [ ] **Step 4: Snapshot**
 
 `POST /nodes/pve/qemu/104/snapshot` with `snapname=known-good`.
 
-- [ ] **Step 6: Merge the installer**
-
-```bash
-git checkout main && git merge --no-ff feat/tui-installer -m "feat(cli): TUI install wizard, validated by production install
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
-git push origin main
-```
-
-### Task 6: External exposure via OPNsense nginx
+### Task 5: External exposure via OPNsense nginx
 
 **Interfaces:**
 - Consumes: cluster ingress/NodePorts on `$KUBARR_IP`.
@@ -179,7 +126,7 @@ Upstream = `$KUBARR_IP:<ingress-port>` per app; TLS terminated the same way as t
 
 From outside the LAN (e.g. phone hotspot, or `curl --resolve` against the public IP 31.187.133.50): dashboard and media app load over HTTPS with valid certs.
 
-### Task 7: Test users and smoke test
+### Task 6: Test users and smoke test
 
 **Interfaces:**
 - Consumes: exposed dashboard; Kubarr JWT/RBAC user management.
@@ -195,6 +142,6 @@ From outside the LAN (e.g. phone hotspot, or `curl --resolve` against the public
 
 ## Self-review notes
 
-- Spec coverage: Phase 1 → Tasks 1–2, Phase 2 → Tasks 3–4, Phase 3 → Task 5, Phase 4 → Task 6, Phase 5 → Task 7. Success criteria covered by Task 5 step 3–4, Task 6 step 2, Task 7 step 2; rollback by snapshots (Tasks 3/5).
-- Interactive steps (TUI runs, OPNsense UI) are explicitly user-driven; everything else is executable from this session.
-- Chart/image refs intentionally resolved in Task 2 rather than hardcoded here — they live in `code/cli/src/util.rs` and may change with the branch.
+- Spec coverage: Phase 1 → Task 1, Phase 2 → Tasks 2–3, Phase 3 → Task 4, Phase 4 → Task 5, Phase 5 → Task 6. Rollback is provided by the snapshots in Tasks 2 and 4.
+- OPNsense UI changes are explicitly user-driven.
+- Chart/image references are recorded in Task 1 from the selected deployment artifacts.

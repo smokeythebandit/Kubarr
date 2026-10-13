@@ -61,9 +61,6 @@ jobs:
           path: charts
           persist-credentials: false
 
-      - name: Set up standalone CLI
-        uses: ./.github/actions/setup-cli
-
       - name: Install tools (kind, kubectl, helm)
         run: |
           mkdir -p "$HOME/.local/bin"
@@ -173,30 +170,17 @@ jobs:
             kind load docker-image --name "$KIND_CLUSTER" "$image"
           done
 
-      - name: Prepare installer charts
-        run: |
-          # Build local kubarr-common dependencies in place, preserving file:// paths.
-          # The CLI expects a flat chart directory, unlike the categorized source tree.
-          mkdir -p "$RUNNER_TEMP/installer-charts"
-          for chart in system/managed-nfs system/postgresql \
-            monitoring/fluent-bit monitoring/victorialogs monitoring/victoriametrics \
-            system/kubarr-backend system/kubarr-frontend system/openresty system/kubarr-worker; do
-            helm dependency build --skip-refresh "charts/$chart"
-            ln -s "$GITHUB_WORKSPACE/charts/$chart" "$RUNNER_TEMP/installer-charts/${chart##*/}"
-          done
-
       - name: Deploy Kubarr
         env:
-          KUBARR_CHARTS_DIR: ${{ runner.temp }}/installer-charts
-          KUBARR_BACKEND_IMAGE: kubarr-backend
-          KUBARR_FRONTEND_IMAGE: kubarr-frontend
-          KUBARR_WORKER_IMAGE: kubarr-worker
-          KUBARR_IMAGE_TAG: ${{ inputs.image-tag }}
-          KUBARR_IMAGE_PULL_POLICY: Never
+          TEST_CONTEXT: kind-${{ env.KIND_CLUSTER }}
+          TEST_CHARTS_DIR: ${{ github.workspace }}/charts
+          TEST_IMAGE_TAG: ${{ inputs.image-tag }}
+          TEST_STORAGE_SIZE: 5Gi
+          TEST_ADMIN_EMAIL: admin@example.com
         run: |
-          # The browser wizard installs dependencies and seeds storage/admin records after migrations.
+          # Deploy the fixed application fixture directly with Helm.
           # auth.setup.ts logs in to an existing account; it does not create one.
-          node code/frontend/tests/bootstrap.mjs
+          bash tests/acceptance/deploy-stack.sh
           # Both processes must discover the same published catalog versions.
           for component in kubarr-backend kubarr-worker; do
             kubectl set env "deployment/$component" -n "$component" "KUBARR_CHARTS_GIT_REF=$CATALOG_REV"

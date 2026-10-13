@@ -23,7 +23,7 @@ Candidate image IDs:
 
 ## Assertions completed
 
-1. Real CLI bootstrap into an empty cluster, including database migration and admin setup.
+1. Application deployment into an empty cluster, including database migration and admin setup.
 2. Authentication through the gateway and real OCI catalog synchronization.
 3. Queued Sonarr install completed; Helm version and healthy application state matched A.
 4. Sonarr status and host-configuration APIs worked through the authenticated gateway.

@@ -8,16 +8,14 @@ targets. Release publishing requires successful live E2E and the separate
 `vpn-acceptance.yml` WireGuard lab. Non-tag publishing
 requires the checks, fast tests, and build, but does not run live E2E.
 
-The E2E job builds the pinned standalone [kubarr-cli](https://github.com/smokeythebandit/kubarr-cli)
-through `.github/actions/setup-cli/action.yml` and uses `kubarr bootstrap` with
-the Playwright driver in `code/frontend/tests/bootstrap.mjs` to complete the web
-wizard. The driver selects the job's Kind context, waits for prerequisite checks,
-configures port-forward access, and waits for the finished screen. It installs
-managed NFS (5Gi on Kind's `standard` storage
-class), PostgreSQL, Fluent Bit, VictoriaLogs, VictoriaMetrics, backend, frontend,
+The E2E job uses the fixed Helm fixture in `tests/acceptance/deploy-stack.sh`
+to deploy the application into its run-owned Kind context. It installs managed
+NFS (5Gi on Kind's `standard` storage class), PostgreSQL, Fluent Bit, VictoriaLogs,
+VictoriaMetrics, backend, frontend,
 OpenResty, and worker. Managed NFS requires the hosted runner's `nfs` and `nfsd`
 kernel modules. Helm releases live in `default`; workloads have their own
-namespaces, as defined by the installer.
+namespaces, as defined by the charts. Dashboard access uses a ClusterIP gateway
+and the test's tracked port-forward process.
 
 Tool versions are Helm 4.3.0, Kind 0.33.0, and Kubernetes/kubectl 1.35.8. The
 Kind node image is digest-pinned. Helm 4.3 supports Kubernetes 1.34-1.37; keep
@@ -25,19 +23,20 @@ the node and kubectl versions aligned when upgrading Helm.
 
 Kubarr explicitly uses `--server-side=false` and `--wait=legacy` to retain the
 existing client-side apply and readiness behavior during the Helm major upgrade.
-Rollback uses Helm 4's `--rollback-on-failure` flag. The installer requires Helm 4
-before making cluster changes. Existing Helm 3 release records remain usable.
+Rollback uses Helm 4's `--rollback-on-failure` flag. The workflow installs Helm 4
+before deploying the test stack. Existing Helm 3 release records remain usable.
 
 `CHARTS_REV` pins the validated bootstrap chart source. `CATALOG_REV` separately
 pins runtime discovery to the upstream-aligned versions published in GHCR, rather
 than requesting the obsolete pre-alignment versions. Local `kubarr-common` dependencies are built
-in the categorized checkout before exposing flat symlinks to the CLI. When
+in the categorized checkout before deployment. When
 updating the revision, also check the preloaded third-party image tags against
 the rendered charts. Application artifacts and image names must match
 `build.yml`: `kubarr-backend`, `kubarr-frontend`, and `kubarr-worker`.
 
-Bootstrap seeds the disposable `admin` / `adminadmin` test account and validated
-storage records after API migrations. `auth.setup.ts` only logs in; it does not
+The fixture seeds the disposable `admin` / `adminadmin` test account and validated
+storage records after API migrations. PostgreSQL's `pgcrypto` generates the bcrypt
+hash; the password and seed SQL are passed on stdin. `auth.setup.ts` only logs in; it does not
 create an account. The API and worker then roll out with chart discovery pinned
 to `CATALOG_REV`. Before Playwright starts, CI checks API health, the login page,
 and the catalog entries used by the app tests through
@@ -47,13 +46,12 @@ The job uses its own kubeconfig, unique Kind cluster, and tracked port-forward
 process. Cleanup must stay scoped to those resources, not other clusters or
 Docker containers on the machine.
 
-For checks without a cluster, use `actionlint .github/workflows/test.yml`. In the
-standalone CLI checkout, run `cargo build --locked`, `cargo test --locked`, and
-`node --test src/bootstrap_web.test.mjs`.
-Check the browser deployment driver with `node --check code/frontend/tests/bootstrap.mjs`.
-The driver uses `KUBARR_CLI` when set, otherwise `kubarr` on `PATH`. The setup action
-sets this variable to its pinned build. Live acceptance uses the same driver and
-supplies its run-specific cluster, storage size, and administrator credentials.
+For checks without a cluster, use `actionlint .github/workflows/test.yml`,
+`bash -n tests/acceptance/deploy-stack.sh`, and
+`python3 -B -m unittest discover -s tests/acceptance -p 'test_*.py' -v`.
+Live acceptance uses the same fixture and supplies its run-specific context,
+chart directory, storage size, image tag, and administrator credentials through
+the `TEST_*` environment variables.
 In a disposable copy of the pinned charts, run the dependency preparation and
 render the component charts with `helm template` and the workflow's image overrides.
 Check image names, workload/service selectors, claims,

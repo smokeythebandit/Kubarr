@@ -5,7 +5,6 @@ CHARTS_REV=${KUBARR_ACCEPTANCE_CHARTS_REV:-01e45468f233b03b4a7d70a320aec9075f77c
 APP_ROOT=${KUBARR_ACCEPTANCE_APP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 CHARTS_REPO=${KUBARR_ACCEPTANCE_CHARTS_DIR:-"$APP_ROOT/../kubarr-charts"}
 CHARTS_DIR=""
-CLI=${KUBARR_ACCEPTANCE_CLI:-${KUBARR_CLI:-kubarr}}
 IMAGE_TAG=${KUBARR_ACCEPTANCE_IMAGE_TAG:-acceptance-local}
 INSTALL_TIMEOUT=${KUBARR_ACCEPTANCE_INSTALL_TIMEOUT:-5m}
 APP_TIMEOUT=${KUBARR_ACCEPTANCE_APP_TIMEOUT:-10m}
@@ -530,8 +529,8 @@ registry_ready() {
   curl --fail --silent --output /dev/null --max-time 5 "http://127.0.0.1:$REGISTRY_HOST_PORT/v2/"
 }
 
-bootstrap_chart_env() {
-  # Override only the run-owned chart copies, before the browser installs them.
+configure_test_chart_env() {
+  # Override only the run-owned chart copies, before Helm deploys them.
   python3 - "$1" "$2" <<'PY'
 import pathlib
 import sys
@@ -554,9 +553,7 @@ trap on_term TERM
 trap 'on_err "$?" "$LINENO"' ERR
 
 [[ ${KUBARR_ACCEPTANCE_DISPOSABLE:-} == 1 ]] || fail "set KUBARR_ACCEPTANCE_DISPOSABLE=1 to authorize disposable Docker/Kind resources"
-for tool in docker kind kubectl helm curl jq git sed tar cmp node python3; do need "$tool"; done
-[[ -f "$APP_ROOT/code/frontend/node_modules/@playwright/test/cli.js" ]] ||
-  fail "browser bootstrap dependencies are not installed (run pnpm install in code/frontend)"
+for tool in docker kind kubectl helm curl jq git sed tar cmp python3 timeout; do need "$tool"; done
 if frontend_acceptance_enabled; then
   need node
   need stat
@@ -572,8 +569,6 @@ if [[ $VPN_LAB_ACCEPTANCE == 1 ]]; then
   [[ -f "$APP_ROOT/code/frontend/playwright.vpn.config.ts" ]] || fail "VPN Playwright config not found"
   [[ -f "$APP_ROOT/code/frontend/node_modules/@playwright/test/cli.js" ]] || fail "frontend dependencies are not installed"
 fi
-CLI=$(command -v "$CLI") || fail "standalone CLI not found; install kubarr or set KUBARR_ACCEPTANCE_CLI to its executable"
-[[ -x "$CLI" ]] || fail "CLI not executable: $CLI"
 [[ -f "$CHARTS_REPO/media-manager/sonarr/Chart.yaml" ]] || fail "invalid charts path: $CHARTS_REPO"
 [[ $(git -C "$CHARTS_REPO" rev-parse HEAD) == "$CHARTS_REV" ]] || fail "charts checkout must be pinned at $CHARTS_REV"
 if [[ $VPN_LAB_ACCEPTANCE == 1 ]]; then
@@ -593,7 +588,7 @@ if [[ ! -r /proc/filesystems ]] || ! grep -qw nfs /proc/filesystems || ! grep -q
   fail "host NFS support is unavailable; load nfs and nfsd modules explicitly before running"
 fi
 
-mkdir -m 700 "$WORK_DIR" "$WORK_DIR/packages" "$WORK_DIR/installer-charts" "$WORK_DIR/chart-source"
+mkdir -m 700 "$WORK_DIR" "$WORK_DIR/packages" "$WORK_DIR/chart-source"
 CREATED_WORK_DIR=1
 git -C "$CHARTS_REPO" archive "$CHARTS_REV" | tar -x -C "$WORK_DIR/chart-source"
 CHARTS_DIR="$WORK_DIR/chart-source"
@@ -659,12 +654,7 @@ if [[ $VPN_LAB_ACCEPTANCE == 1 ]]; then
   vpn_lab_verify_gluetun_image
 fi
 
-say "preparing pinned installer and Sonarr charts"
-for chart in system/managed-nfs system/postgresql monitoring/fluent-bit monitoring/victorialogs \
-  monitoring/victoriametrics system/kubarr-backend system/kubarr-frontend system/openresty system/kubarr-worker; do
-  helm dependency build --skip-refresh "$CHARTS_DIR/$chart" >/dev/null
-  ln -s "$CHARTS_DIR/$chart" "$WORK_DIR/installer-charts/${chart##*/}"
-done
+say "preparing pinned Sonarr charts"
 helm dependency build --skip-refresh "$CHARTS_DIR/media-manager/sonarr" >/dev/null
 VERSION_A=4.1.7-acceptance.1
 VERSION_B=4.1.7-acceptance.2
@@ -679,11 +669,8 @@ for package in "$WORK_DIR/packages"/*.tgz; do
   helm push "$package" "oci://127.0.0.1:$REGISTRY_HOST_PORT/kubarr-charts" --plain-http >/dev/null
 done
 
-say "bootstrapping Kubarr through the standalone CLI web wizard"
-export KUBARR_CHARTS_DIR="$WORK_DIR/installer-charts"
-export KUBARR_BACKEND_IMAGE=kubarr-backend KUBARR_FRONTEND_IMAGE=kubarr-frontend KUBARR_WORKER_IMAGE=kubarr-worker
-export KUBARR_IMAGE_TAG="$IMAGE_TAG" KUBARR_IMAGE_PULL_POLICY=Never
-cat >"$WORK_DIR/bootstrap-values.yaml" <<EOF
+say "deploying the application test stack with Helm"
+cat >"$WORK_DIR/test-env.yaml" <<EOF
 env:
   - name: KUBARR_IN_CLUSTER
     value: "true"
@@ -712,14 +699,13 @@ env:
   - name: KUBARR_CHARTS_SYNC_INTERVAL
     value: "3600"
 EOF
-bootstrap_chart_env "$WORK_DIR/bootstrap-values.yaml" "$CHARTS_DIR"
+configure_test_chart_env "$WORK_DIR/test-env.yaml" "$CHARTS_DIR"
 ADMIN_USER=acceptance-admin
 ADMIN_PASSWORD=$(printf 'acceptance-%s-Aa1!' "$RUN_TOKEN")
 require_owned_context
-  KUBARR_CLI="$CLI" KIND_CLUSTER="$CLUSTER" TEST_USERNAME="$ADMIN_USER" TEST_PASSWORD="$ADMIN_PASSWORD" \
-  KUBARR_BOOTSTRAP_STORAGE_SIZE=2Gi KUBARR_BOOTSTRAP_STORAGE_CLASS=standard \
-  KUBARR_BOOTSTRAP_ADMIN_EMAIL=acceptance@example.invalid \
-  node "$APP_ROOT/code/frontend/tests/bootstrap.mjs"
+  TEST_CONTEXT="kind-$CLUSTER" TEST_CHARTS_DIR="$CHARTS_DIR" TEST_IMAGE_TAG="$IMAGE_TAG" \
+  TEST_USERNAME="$ADMIN_USER" TEST_PASSWORD="$ADMIN_PASSWORD" TEST_STORAGE_SIZE=2Gi \
+  TEST_ADMIN_EMAIL=acceptance@example.invalid bash "$APP_ROOT/tests/acceptance/deploy-stack.sh"
 
   say "verifying worker singleton drain contract"
   worker_deployment_matches_drain_contract ||
