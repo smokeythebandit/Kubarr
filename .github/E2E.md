@@ -8,8 +8,11 @@ targets. Release publishing requires successful live E2E and the separate
 `vpn-acceptance.yml` WireGuard lab. Non-tag publishing
 requires the checks, fast tests, and build, but does not run live E2E.
 
-The E2E job builds the repository's CLI and uses `kubarr bootstrap` rather than
-an umbrella chart. It installs managed NFS (5Gi on Kind's `standard` storage
+The E2E job builds the repository's CLI and uses `kubarr bootstrap` with the
+Playwright driver in `code/frontend/tests/bootstrap.mjs` to complete the web
+wizard. The driver selects the job's Kind context, waits for prerequisite checks,
+configures port-forward access, and waits for the finished screen. It installs
+managed NFS (5Gi on Kind's `standard` storage
 class), PostgreSQL, Fluent Bit, VictoriaLogs, VictoriaMetrics, backend, frontend,
 OpenResty, and worker. Managed NFS requires the hosted runner's `nfs` and `nfsd`
 kernel modules. Helm releases live in `default`; workloads have their own
@@ -44,10 +47,11 @@ process. Cleanup must stay scoped to those resources, not other clusters or
 Docker containers on the machine.
 
 For checks without a cluster, use `actionlint .github/workflows/test.yml`, build
-`code/cli` with `cargo build --locked`, and inspect `kubarr bootstrap --dry-run`
-with the workflow's arguments/environment. In a disposable copy of the pinned
-charts, run the dependency preparation and render the dry-run's Helm commands
-with `helm template` (omit install-only `--server-side=false` and `--wait=legacy`).
+`code/cli` with `cargo build --locked`, run `cargo test --locked` there, and run
+`node --test code/cli/src/bootstrap_web.test.mjs` from the repository root.
+Check the browser deployment driver with `node --check code/frontend/tests/bootstrap.mjs`.
+In a disposable copy of the pinned charts, run the dependency preparation and
+render the component charts with `helm template` and the workflow's image overrides.
 Check image names, workload/service selectors, claims,
 secrets, and gateway ports. `pnpm exec playwright test --list` in `code/frontend`
 checks discovery without launching browsers. These checks do not prove that

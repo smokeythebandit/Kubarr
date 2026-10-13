@@ -56,7 +56,7 @@ totp-rs = { version = "6", features = ["qr", "gen_secret"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 
 # OpenAPI / Swagger
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
