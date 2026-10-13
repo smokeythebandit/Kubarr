@@ -37,30 +37,44 @@ jobs:
             printf '%s  %s\n' "$expected_hash" "$asset" | sha256sum --check --status
           done
 
+          latest=true
+          release_flags=()
           if [[ "$GITHUB_REF" == refs/heads/main ]]; then
-            tag=kubarr-cli-latest
-            notes="Rolling Linux CLI binaries used by https://kubarr.com/install.sh. Built from Kubarr commit ${GITHUB_SHA} by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
-            if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
-                --target "$GITHUB_SHA" --title "Kubarr CLI installer binaries" \
-                --notes "$notes" --prerelease --latest=false
-            fi
+            # Immutable releases cannot reuse a rolling tag or replace published assets.
+            tag="cli-${GITHUB_SHA}"
+            notes="Linux CLI snapshot used by https://kubarr.com/install.sh. Built from Kubarr main commit ${GITHUB_SHA} by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+            release_flags+=(--target "$GITHUB_SHA" --title "Kubarr CLI (${GITHUB_SHA:0:7})" --notes "$notes")
           else
             tag="$GITHUB_REF_NAME"
-            if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              release_flags=()
-              if [[ "$tag" == *-* ]]; then
-                release_flags+=(--prerelease --latest=false)
-              fi
-              gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
-                --verify-tag --title "Kubarr ${tag}" --generate-notes "${release_flags[@]}"
+            release_flags+=(--verify-tag --title "Kubarr ${tag}" --generate-notes)
+            if [[ "$tag" == *-* ]]; then
+              latest=false
+              release_flags+=(--prerelease)
             fi
           fi
 
-          gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
-          if [[ "$tag" == kubarr-cli-latest ]]; then
-            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes "$notes" --latest=false
+          if draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "$draft" == false ]]; then
+              # A completed rerun is a no-op; a published release missing assets
+              # cannot be repaired by overwriting it when immutability is enabled.
+              published_assets="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+              for asset in release-assets/*; do
+                if ! grep -Fxq "${asset##*/}" <<< "$published_assets"; then
+                  echo "Published release $tag is missing ${asset##*/}; publish a new ref instead." >&2
+                  exit 1
+                fi
+              done
+              echo "CLI assets are already published for $tag."
+              exit 0
+            fi
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --draft --latest=false "${release_flags[@]}"
           fi
+
+          # Keep the release mutable until both archives and checksums are attached.
+          gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$latest"
 
   docker:
     runs-on: ubuntu-latest
