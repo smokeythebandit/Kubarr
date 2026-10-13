@@ -54,6 +54,7 @@ test-results/
 # Disposable-cluster logs, tool downloads, snapshots, and private kubeconfigs
 .acceptance-runs/
 .local-cluster/
+.installer-cli/
 
 # Python acceptance helper bytecode
 __pycache__/

@@ -3,7 +3,7 @@
 ## Required Fast Lane
 
 `.github/workflows/fast-test.yml` runs on every PR and push, independently of
-static checks and before image builds. A failing backend, CLI, or frontend job
+static checks and before image builds. A failing backend or frontend job
 blocks the build and publication. Repository branch-protection settings are
 managed separately; require these checks there to block merging as well.
 
@@ -32,11 +32,16 @@ namespace visibility before deployment, VPN credential placement, CIDR serializa
 and temporary-file cleanup on success and failure. Namespace timeout tests use
 paused time rather than wall-clock sleeps.
 
-From `code/cli`:
+CLI unit and browser-wizard tests run in the standalone
+[kubarr-cli repository](https://github.com/smokeythebandit/kubarr-cli). From that checkout:
 
 ```sh
 cargo test --locked --bin kubarr
+node --test src/bootstrap_web.test.mjs
 ```
+
+Kubarr's live E2E and acceptance workflows build the pinned CLI revision through
+`.github/actions/setup-cli/action.yml` and drive its web wizard with Playwright.
 
 From `code/frontend` with Node 26 and the pinned pnpm version:
 
