@@ -39,7 +39,7 @@ than skipping the drain check.
 - Docker Engine 28 or newer (API 1.48 or newer), Kind `v0.33.0`, kubectl compatible with Kubernetes `v1.35.8` (CI pins `v1.35.8`), Helm `v4.3.0`, `curl`, `jq`, `git`, `timeout`, and Python with PyYAML
 - Node.js 26, pnpm, frontend dependencies, and Playwright Chromium for the frontend and VPN scenarios
 - Local images `kubarr-backend:<tag>`, `kubarr-frontend:<tag>`, and `kubarr-worker:<tag>`
-- A charts checkout at `d4939b38035fe7f5ba9b0e9952cd556d54bd252d`
+- A charts checkout at `4a30cc0d5db3907f3d816ed5fc9a448522118069`
 
 Build current images, then run from the application repository:
 

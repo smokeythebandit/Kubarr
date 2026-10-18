@@ -132,7 +132,7 @@ pub fn load(catalog: &AppCatalog, name: &str) -> Result<InstallOptions> {
     };
     let mounts = storage
         .and_then(|s| s.get("mounts"))
-        .map(&parse_mounts)
+        .map(parse_mounts)
         .transpose()?;
     let mut workloads = BTreeMap::new();
     if let Some(map) = storage

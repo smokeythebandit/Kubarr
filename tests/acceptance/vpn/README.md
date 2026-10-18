@@ -42,7 +42,7 @@ explicitly resumes PID 1 if this phase fails.
 
 ## Run
 
-The pinned charts revision is `d4939b38035fe7f5ba9b0e9952cd556d54bd252d`, containing
+The pinned charts revision is `4a30cc0d5db3907f3d816ed5fc9a448522118069`, containing
 Sonarr's `vpn.extraEnv` support. Build the normal acceptance images, install the
 frontend dependencies and Chromium, then run:
 
@@ -50,7 +50,7 @@ frontend dependencies and Chromium, then run:
 KUBARR_ACCEPTANCE_DISPOSABLE=1 \
 KUBARR_VPN_ACCEPTANCE_DISPOSABLE=1 \
 KUBARR_ACCEPTANCE_VPN_LAB=1 \
-KUBARR_ACCEPTANCE_CHARTS_REV=d4939b38035fe7f5ba9b0e9952cd556d54bd252d \
+KUBARR_ACCEPTANCE_CHARTS_REV=4a30cc0d5db3907f3d816ed5fc9a448522118069 \
 tests/acceptance/app-lifecycle.sh
 ```
 

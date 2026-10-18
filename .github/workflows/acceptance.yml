@@ -34,7 +34,7 @@ jobs:
         scenario: [api, frontend]
     env:
       IMAGE_TAG: ${{ inputs.image-tag != '' && inputs.image-tag || format('acceptance-{0}-{1}', github.run_id, github.run_attempt) }}
-      CHARTS_REV: d4939b38035fe7f5ba9b0e9952cd556d54bd252d
+      CHARTS_REV: 4a30cc0d5db3907f3d816ed5fc9a448522118069
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

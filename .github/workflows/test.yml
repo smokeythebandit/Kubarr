@@ -13,7 +13,6 @@ permissions:
 jobs:
   coverage:
     name: backend / coverage
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -37,15 +36,14 @@ jobs:
           retention-days: 30
 
   e2e:
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       KIND_CLUSTER: kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       KUBECONFIG: /tmp/kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}.kubeconfig
-      CHARTS_REV: d4939b38035fe7f5ba9b0e9952cd556d54bd252d
+      CHARTS_REV: 4a30cc0d5db3907f3d816ed5fc9a448522118069
       # Catalog versions must match the upstream-aligned OCI packages being published.
-      CATALOG_REV: d4939b38035fe7f5ba9b0e9952cd556d54bd252d
+      CATALOG_REV: 4a30cc0d5db3907f3d816ed5fc9a448522118069
       TAG: ${{ inputs.image-tag }}
       TEST_USERNAME: admin
       TEST_PASSWORD: adminadmin
