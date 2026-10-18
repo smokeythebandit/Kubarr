@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: smokeythebandit/kubarr-charts
-          ref: 01e45468f233b03b4a7d70a320aec9075f77c213
+          ref: d4939b38035fe7f5ba9b0e9952cd556d54bd252d
           path: acceptance-charts
           persist-credentials: false
 
@@ -61,6 +61,10 @@ jobs:
 
       - name: Operation API and permission contracts
         run: bash ../../tests/report/run-rust.sh "$RUNNER_TEMP/kubarr-app-operations.log" cargo test --locked --test app_operations_tests
+        working-directory: code/api
+
+      - name: App installation and declarative storage contracts
+        run: cargo test --locked --test install_wizard_tests --test app_storage_tests --test storage_config_tests
         working-directory: code/api
 
       - name: Audit security and contract tests

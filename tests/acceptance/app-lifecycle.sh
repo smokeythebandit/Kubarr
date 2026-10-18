@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-CHARTS_REV=${KUBARR_ACCEPTANCE_CHARTS_REV:-01e45468f233b03b4a7d70a320aec9075f77c213}
+CHARTS_REV=${KUBARR_ACCEPTANCE_CHARTS_REV:-d4939b38035fe7f5ba9b0e9952cd556d54bd252d}
 APP_ROOT=${KUBARR_ACCEPTANCE_APP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 CHARTS_REPO=${KUBARR_ACCEPTANCE_CHARTS_DIR:-"$APP_ROOT/../kubarr-charts"}
 CHARTS_DIR=""
@@ -497,15 +497,14 @@ prepare_chart_variant() {
     fail "Sonarr deployment checksum annotation anchor is missing"
   sed -i '/checksum\/config:/a\        kubarr.io/acceptance-chart-version: "{{ .Chart.Version }}"' \
     "$WORK_DIR/chart-$variant/templates/deployment.yaml"
-  sed -i 's/image: busybox:latest/image: busybox:1.37.0/' "$WORK_DIR/chart-$variant/templates/deployment.yaml"
-  grep -q 'image: busybox:1.37.0' "$WORK_DIR/chart-$variant/templates/deployment.yaml" ||
+  grep -q 'image: busybox:1.38.0' "$WORK_DIR/chart-$variant/templates/deployment.yaml" ||
     fail "Sonarr init image pin was not applied"
   if [[ $variant == b ]]; then
     # Acceptance-only controlled delay keeps the real chart update running long enough
     # to deliver SIGTERM to its worker without changing Sonarr's runtime behavior.
     sed -i '/^      initContainers:$/a\
         - name: acceptance-drain-delay\
-          image: busybox:1.37.0\
+          image: busybox:1.38.0\
           command: ["sh", "-c", "sleep 15"]\
           securityContext:\
             allowPrivilegeEscalation: false\
@@ -636,7 +635,7 @@ DEPENDENCY_IMAGES=(
   victoriametrics/victoria-logs:v1.52.0
   openresty/openresty:1.27.1.2-alpine
   linuxserver/sonarr:4.0.19
-  busybox:1.37.0
+  busybox:1.38.0
 )
 if [[ $VPN_LAB_ACCEPTANCE == 1 ]]; then
   DEPENDENCY_IMAGES+=("$VPN_GLUETUN_IMAGE")

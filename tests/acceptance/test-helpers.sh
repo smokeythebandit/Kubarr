@@ -223,7 +223,7 @@ a_init = {item["name"]: item for item in a["spec"]["template"]["spec"]["initCont
 b_init = {item["name"]: item for item in b["spec"]["template"]["spec"]["initContainers"]}
 assert "acceptance-drain-delay" not in a_init
 delay = b_init["acceptance-drain-delay"]
-assert delay["image"] == "busybox:1.37.0"
+assert delay["image"] == "busybox:1.38.0"
 assert delay["command"][:2] == ["sh", "-c"]
 seconds = int(delay["command"][2].split()[1])
 assert 0 < seconds <= 20
