@@ -41,13 +41,16 @@ test.describe('Apps Page', () => {
     }
   });
 
-  test('install button shows installing state when clicked', async ({ page }) => {
-    // Find an app that's not installed
-    const installButton = page.locator('button:has-text("Install")').first();
+  test('confirmed install shows installing state', async ({ page }) => {
+    const installButton = getAppCard(page, 'Sonarr').getByRole('button', { name: 'Install', exact: true });
 
     if (await installButton.isVisible().catch(() => false)) {
-      // Click install
       await installButton.click();
+      const wizard = page.getByRole('dialog', { name: 'Install sonarr', exact: true });
+      await expect(wizard.getByText('Private config PVC', { exact: true })).toBeVisible();
+      await wizard.getByRole('button', { name: 'Next', exact: true }).click();
+      await wizard.getByRole('button', { name: 'Next', exact: true }).click();
+      await wizard.getByRole('button', { name: 'Confirm install', exact: true }).click();
 
       // Button should show installing state (badge appears)
       await expect(page.locator('text=Installing').first()).toBeVisible({ timeout: 10000 });
