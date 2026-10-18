@@ -112,6 +112,8 @@ pnpm dev
 
 See [Installation Guide](./docs/installation.md) for detailed setup instructions and advanced configuration.
 
+The installer is maintained in [kubarr-cli](https://github.com/smokeythebandit/kubarr-cli), with independent versions and releases. See its [Bootstrap Guide](https://github.com/smokeythebandit/kubarr-cli/blob/main/docs/bootstrap.md) for browser setup and CLI development.
+
 ## Architecture
 
 Kubarr consists of three main components:
@@ -143,6 +145,7 @@ Kubarr consists of three main components:
 
 - [Quick Start Guide](./docs/quick-start.md) - Get running in 15 minutes
 - [Installation Guide](./docs/installation.md) - Detailed setup instructions
+- [Bootstrap Guide](https://github.com/smokeythebandit/kubarr-cli/blob/main/docs/bootstrap.md) - First-time setup with the CLI
 - [Configuration Reference](./docs/configuration.md) - Environment variables and Helm values
 - [User Guide](./docs/user-guide.md) - How to use Kubarr effectively
 - [Architecture](./docs/architecture.md) - System design and decisions
