@@ -491,6 +491,8 @@ patch_catalog_source() {
 
 prepare_chart_variant() {
   local variant=$1 version=$2 source="$CHARTS_DIR/media-manager/sonarr"
+  # Resolve file:// dependencies before copying the chart out of its source tree.
+  helm dependency build --skip-refresh "$source" >/dev/null
   cp -a "$source" "$WORK_DIR/chart-$variant"
   sed -i "s/^version:.*/version: $version/" "$WORK_DIR/chart-$variant/Chart.yaml"
   grep -q 'checksum/config:' "$WORK_DIR/chart-$variant/templates/deployment.yaml" ||

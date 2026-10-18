@@ -281,6 +281,7 @@ impl AppManager {
     }
 
     /// The VPN assignment and install operation share the caller's transaction.
+    #[allow(clippy::too_many_arguments)]
     pub async fn enqueue_install_in_transaction(
         &self,
         tx: &DatabaseTransaction,

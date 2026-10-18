@@ -357,7 +357,7 @@ pub fn validate(options: &InstallOptions, choices: &InstallStorage) -> Result<()
             "This chart has no private config claim".into(),
         ));
     }
-    if let Some(ref mounts) = choices.mounts.as_ref().or(options.mounts.as_ref()) {
+    if let Some(mounts) = choices.mounts.as_ref().or(options.mounts.as_ref()) {
         validate_mounts(
             mounts,
             options

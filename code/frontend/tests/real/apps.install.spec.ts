@@ -5,10 +5,18 @@ test('installs Sonarr through the catalog and reaches healthy chart A workloads'
   const install = details.getByRole('button', { name: 'Install', exact: true });
   await expect(install).toBeVisible();
 
+  await install.click();
+  const wizard = page.getByRole('dialog', { name: 'Install sonarr', exact: true });
+  await expect(wizard.getByText('Private config PVC', { exact: true })).toBeVisible();
+  await wizard.getByRole('button', { name: 'Next', exact: true }).click();
+  await expect(wizard.getByLabel('VPN provider')).toHaveValue('');
+  await wizard.getByRole('button', { name: 'Next', exact: true }).click();
+  await expect(wizard.getByRole('heading', { name: 'Review before queueing' })).toBeVisible();
+
   const responsePromise = page.waitForResponse(response =>
     response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/apps/install',
   );
-  await install.click();
+  await wizard.getByRole('button', { name: 'Confirm install', exact: true }).click();
   const id = await expectActionResponse(await responsePromise);
   await expectOperation(page, id, 'install', process.env.ACCEPTANCE_CHART_VERSION_A!);
   recordResult('install_id', id);
