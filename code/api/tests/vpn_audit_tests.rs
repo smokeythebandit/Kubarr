@@ -18,6 +18,19 @@ use common::{build_test_app_state_with_db, create_test_db_with_seed, create_test
 
 const SECRET: &str = "vpn-secret-sentinel-9f31";
 
+static JWT_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn init_test_jwt_keys() {
+    // Signing keys are process-global; independent databases must not replace
+    // them while another parallel test is using an authenticated session.
+    JWT_INIT
+        .get_or_init(|| async {
+            let db = create_test_db_with_seed().await;
+            kubarr::services::init_jwt_keys(&db).await.unwrap();
+        })
+        .await;
+}
+
 async fn call(
     state: &AppState,
     method: &str,
@@ -50,8 +63,8 @@ async fn call(
 
 #[tokio::test]
 async fn provider_audits_only_successes_and_never_credentials() {
+    init_test_jwt_keys().await;
     let db = create_test_db_with_seed().await;
-    kubarr::services::init_jwt_keys(&db).await.unwrap();
     create_test_user_with_role(
         &db,
         "vpn_auditor",
@@ -286,9 +299,9 @@ async fn provider_audits_only_successes_and_never_credentials() {
 
 #[tokio::test]
 async fn provider_mutations_roll_back_if_audit_insert_fails() {
+    init_test_jwt_keys().await;
     for method in ["POST", "PUT", "DELETE"] {
         let db = create_test_db_with_seed().await;
-        kubarr::services::init_jwt_keys(&db).await.unwrap();
         create_test_user_with_role(
             &db,
             "vpn_rollback",
