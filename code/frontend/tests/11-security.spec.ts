@@ -16,16 +16,17 @@ test.describe('Security Page', () => {
       await expect(page.locator('text=Events Today')).toBeVisible({ timeout: 10000 });
     });
 
-    test('shows Failed Attempts stat card', async ({ page }) => {
-      await expect(page.locator('text=Failed Attempts')).toBeVisible({ timeout: 10000 });
+    test('shows Failed Events stat card', async ({ page }) => {
+      await expect(page.getByText('Failed Events', { exact: true })).toBeVisible({ timeout: 10000 });
     });
 
     test('shows Total Events stat card', async ({ page }) => {
       await expect(page.locator('text=Total Events')).toBeVisible({ timeout: 10000 });
     });
 
-    test('shows 2FA Enabled stat card', async ({ page }) => {
-      await expect(page.locator('text=2FA Enabled')).toBeVisible({ timeout: 10000 });
+    test('offers audit navigation and security refresh', async ({ page }) => {
+      await expect(page.getByRole('link', { name: 'View audit logs', exact: true })).toHaveAttribute('href', '/settings?section=audit');
+      await expect(page.getByRole('button', { name: 'Refresh security data', exact: true })).toBeVisible();
     });
 
     test('shows security events table', async ({ page }) => {

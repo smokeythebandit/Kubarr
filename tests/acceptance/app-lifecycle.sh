@@ -637,13 +637,10 @@ DEPENDENCY_IMAGES=(
   openresty/openresty:1.27.1.2-alpine
   linuxserver/sonarr:4.0.19
   busybox:1.38.0
+  ghcr.io/onedr0p/exportarr:v2.3.0
 )
 if [[ $VPN_LAB_ACCEPTANCE == 1 ]]; then
   DEPENDENCY_IMAGES+=("$VPN_GLUETUN_IMAGE")
-fi
-if frontend_acceptance_enabled; then
-  # The UI installs chart defaults, while the API scenario explicitly disables the exporter.
-  DEPENDENCY_IMAGES+=(ghcr.io/onedr0p/exportarr:v2.3.0)
 fi
 say "pre-pulling and loading pinned dependency images"
 for image in "${DEPENDENCY_IMAGES[@]}"; do

@@ -74,6 +74,51 @@ async fn make_unauthenticated_request(state: AppState, uri: &str) -> (StatusCode
 // ============================================================================
 
 #[tokio::test]
+async fn oauth_provider_discovery_is_public_through_the_main_router() {
+    let (status, body) =
+        make_unauthenticated_request(create_test_state().await, "/api/oauth/available").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let providers: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    for provider in providers {
+        assert!(provider
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| key == "id" || key == "name"));
+    }
+}
+
+#[tokio::test]
+async fn oauth_error_callback_reaches_the_public_handler_without_a_session() {
+    let app = create_router(create_test_state().await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/oauth/google/callback?error=access_denied")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], "/login?error=access_denied");
+}
+
+#[tokio::test]
+async fn oauth_administration_and_linking_stay_protected_in_the_main_router() {
+    let state = create_test_state().await;
+    for path in [
+        "/api/oauth/providers",
+        "/api/oauth/providers/google",
+        "/api/oauth/accounts",
+        "/api/oauth/link/google",
+    ] {
+        let (status, _) = make_unauthenticated_request(state.clone(), path).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn test_protected_endpoints_require_auth() {
     let state = create_test_state().await;
 

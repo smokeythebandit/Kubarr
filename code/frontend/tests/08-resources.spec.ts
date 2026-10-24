@@ -9,7 +9,7 @@ test.describe('Resources Page', () => {
   test.describe('Page Display', () => {
     test('shows page heading and subtitle', async ({ page }) => {
       await expect(page.locator('h1:has-text("Resources")')).toBeVisible();
-      await expect(page.locator('text=CPU, memory, and resource usage metrics')).toBeVisible();
+      await expect(page.getByText('CPU, memory, GPU, and resource usage metrics', { exact: true })).toBeVisible();
     });
 
     test('shows Cluster Overview section', async ({ page }) => {

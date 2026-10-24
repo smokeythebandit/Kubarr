@@ -229,7 +229,9 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state.clone());
 
     // Public routes (no auth required) - these already have state applied internally
-    let public_routes = Router::new().nest("/auth", auth::auth_routes(state.clone()));
+    let public_routes = Router::new()
+        .nest("/auth", auth::auth_routes(state.clone()))
+        .nest("/api/oauth", oauth::public_oauth_routes(state.clone()));
 
     // Protected API routes (auth required)
     let protected_api_routes = Router::new().nest("/api", api_routes(state.clone())).layer(
@@ -259,7 +261,7 @@ fn api_routes(state: AppState) -> Router {
             "/notifications",
             notifications::notifications_routes(state.clone()),
         )
-        .nest("/oauth", oauth::oauth_routes(state.clone()))
+        .nest("/oauth", oauth::protected_oauth_routes(state.clone()))
         .nest("/vpn", vpn::vpn_routes(state.clone()))
         .nest("/proxy-auth", proxy::proxy_auth_routes(state.clone()))
         .route("/system/version", axum::routing::get(get_version))

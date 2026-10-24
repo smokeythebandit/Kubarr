@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 75
     env:
       IMAGE_TAG: ${{ inputs.image-tag != '' && inputs.image-tag || format('vpn-acceptance-{0}-{1}', github.run_id, github.run_attempt) }}
-      CHARTS_REV: 282fcb711f2f11c11ac62072bd111f5bc7266845
+      CHARTS_REV: e4f107eecd73f2ac38c76694994ed64cb2485db9
 
     steps:
       - name: Checkout source

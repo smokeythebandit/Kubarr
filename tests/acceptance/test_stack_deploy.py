@@ -142,10 +142,10 @@ class StackDeployTests(unittest.TestCase):
                    "mounts": [{"name": "library", "source": "media", "target": "/media", "mode": "read-write"}],
                    "config": {"create": True, "existing_claim": "", "storage_class_name": "", "size": "5Gi"},
                    "workloads": {}}
-        request = fixture.install_request(options, {"exporter.enabled": "false"})
+        request = fixture.install_request(options)
         self.assertEqual(request["chart_version"], options["chart_version"])
         self.assertEqual(request["storage"], {"mounts": options["mounts"], "config": options["config"]})
-        self.assertEqual(request["custom_config"], {"exporter.enabled": "false"})
+        self.assertNotIn("custom_config", request)
         self.assertNotIn("migrationConfirmed", json.dumps(request))
         options.update(mounts=None, config=None, workloads={"worker": []})
         self.assertEqual(fixture.install_request(options)["storage"], {"workloads": {"worker": {"mounts": []}}})

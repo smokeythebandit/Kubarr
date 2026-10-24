@@ -19,18 +19,27 @@ use crate::state::AppState;
 
 /// Create OAuth routes
 pub fn oauth_routes(state: AppState) -> Router {
+    public_oauth_routes(state.clone()).merge(protected_oauth_routes(state))
+}
+
+/// Provider discovery and the external login/callback flow must work before
+/// a Kubarr session exists. They never expose provider credentials.
+pub fn public_oauth_routes(state: AppState) -> Router {
     Router::new()
-        // Public: Available providers (for login page)
         .route("/available", get(list_available_providers))
+        .route("/{provider}/login", get(oauth_login))
+        .route("/{provider}/callback", get(oauth_callback))
+        .with_state(state)
+}
+
+pub fn protected_oauth_routes(state: AppState) -> Router {
+    Router::new()
         // Admin: Provider configuration
         .route("/providers", get(list_providers))
         .route(
             "/providers/{provider}",
             get(get_provider).put(update_provider),
         )
-        // OAuth flow
-        .route("/{provider}/login", get(oauth_login))
-        .route("/{provider}/callback", get(oauth_callback))
         // Account linking (authenticated users)
         .route("/accounts", get(list_linked_accounts))
         .route("/accounts/{provider}", delete(unlink_account))

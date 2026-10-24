@@ -33,14 +33,14 @@ def storage_secret(size):
     }
 
 
-def install_request(options, custom_config=None):
+def install_request(options):
     if not options.get("app_name") or not options.get("chart_version"):
         raise ValueError("Install options must identify the app and chart version")
     storage = {key: options[key] for key in ("mounts", "config") if options.get(key) is not None}
     if options.get("workloads"):
         storage["workloads"] = {name: {"mounts": mounts} for name, mounts in options["workloads"].items()}
     return {"app_name": options["app_name"], "chart_version": options["chart_version"],
-            "storage": storage, "custom_config": custom_config or {}}
+            "storage": storage}
 
 
 def seed_sql(username, password, email, size):
@@ -82,6 +82,6 @@ if __name__ == "__main__":
         print(seed_sql(os.environ["TEST_USERNAME"], os.environ["TEST_PASSWORD"],
                        os.environ.get("TEST_ADMIN_EMAIL", "admin@example.invalid"), size))
     elif sys.argv[1:] == ["install-request"]:
-        print(json.dumps(install_request(json.load(sys.stdin), {"exporter.enabled": "false"})))
+        print(json.dumps(install_request(json.load(sys.stdin))))
     else:
         sys.exit("Expected storage-secret, seed-sql, or install-request")

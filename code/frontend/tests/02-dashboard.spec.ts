@@ -11,9 +11,10 @@ test.describe('Dashboard', () => {
     test('shows overview statistics', async ({ page }) => {
       // Should show app statistics cards
       await expect(page.locator('text=Installed Apps').first()).toBeVisible();
-      await expect(page.locator('div:has-text("Healthy")').first()).toBeVisible();
-      await expect(page.locator('div:has-text("Unhealthy")').first()).toBeVisible();
-      await expect(page.locator('div:has-text("Available")').first()).toBeVisible();
+      const overview = page.locator('a[href="/apps"]').filter({ hasText: /\d+\s*installed/ }).first();
+      await expect(overview).toContainText(/\d+\s*healthy/);
+      await expect(overview).toContainText(/\d+\s*available/);
+      // The unhealthy count is intentionally omitted when every app is healthy.
     });
   });
 

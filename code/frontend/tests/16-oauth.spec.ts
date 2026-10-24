@@ -20,12 +20,8 @@ test.describe('OAuth Configuration and Login Flow', () => {
 
     test('shows provider list with Google and Microsoft entries', async ({ page }) => {
       await expect(page.locator('text=OAuth Providers')).toBeVisible({ timeout: 10000 });
-      // Wait for providers to load from API
-      await page.waitForTimeout(2000);
-      const hasGoogle = await page.locator('text=Google').isVisible().catch(() => false);
-      const hasMicrosoft = await page.locator('text=Microsoft').isVisible().catch(() => false);
-      // At least one OAuth provider should be listed
-      expect(hasGoogle || hasMicrosoft).toBe(true);
+      await expect(page.getByRole('switch', { name: 'Google OAuth', exact: true })).toBeVisible();
+      await expect(page.getByRole('switch', { name: 'Microsoft OAuth', exact: true })).toBeVisible();
     });
 
     test('each provider card has a Configure button', async ({ page }) => {
@@ -175,6 +171,7 @@ test.describe('OAuth Configuration and Login Flow', () => {
     test('login page does not show blank white page', async ({ page }) => {
       await page.goto('/login');
       await page.waitForLoadState('domcontentloaded');
+      await expect(page.getByLabel('Password', { exact: true })).toBeVisible();
 
       const bodyText = await page.locator('body').textContent();
       expect(bodyText?.trim().length).toBeGreaterThan(10);
@@ -230,6 +227,7 @@ test.describe('OAuth Configuration and Login Flow', () => {
     test('login page with pending_approval error shows login form', async ({ page }) => {
       await page.goto('/login?error=pending_approval');
       await page.waitForLoadState('domcontentloaded');
+      await expect(page.getByLabel('Password', { exact: true })).toBeVisible();
 
       // Login form should be visible
       const bodyText = await page.locator('body').textContent();

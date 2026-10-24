@@ -144,9 +144,9 @@ async fn authenticated_delete(app: axum::Router, uri: &str, cookie: &str) -> (St
 // ============================================================================
 
 #[tokio::test]
-async fn test_list_available_providers_requires_auth() {
-    // The /api/oauth/available endpoint is behind the auth middleware — it
-    // must return 401 when no session cookie is supplied.
+async fn test_list_available_providers_is_public() {
+    // The login page needs provider discovery before a session exists. Only
+    // provider names/IDs are public; configuration and linking remain protected.
     let db = create_test_db_with_seed().await;
     let state = build_test_app_state_with_db(db).await;
     let app = create_router(state);
@@ -164,15 +164,15 @@ async fn test_list_available_providers_requires_auth() {
 
     assert_eq!(
         response.status(),
-        StatusCode::UNAUTHORIZED,
-        "GET /api/oauth/available must return 401 without authentication"
+        StatusCode::OK,
+        "GET /api/oauth/available must be accessible to the anonymous login page"
     );
 }
 
 #[tokio::test]
 async fn test_list_available_providers_empty_on_fresh_db() {
     // On a fresh DB there are no OAuth providers configured, so the
-    // available list must be empty. Requires authentication.
+    // available list must be empty, including for an authenticated caller.
     ensure_jwt_keys().await;
 
     let db = create_test_db_with_seed().await;
