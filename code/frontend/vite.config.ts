@@ -4,7 +4,6 @@ import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import { execSync } from 'child_process'
 import { readFileSync } from 'fs'
-import { join } from 'path'
 
 // Get version from environment or package.json
 const getVersion = () => {
@@ -14,7 +13,7 @@ const getVersion = () => {
   }
   // Fall back to package.json for local development
   try {
-    const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf-8'))
+    const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8'))
     return pkg.version
   } catch {
     return '0.0.0'
@@ -49,6 +48,8 @@ const getChannel = () => {
 }
 
 // https://vitejs.dev/config/
+const apiTarget = process.env.KUBARR_DEV_API_URL || 'http://127.0.0.1:8000'
+
 export default defineConfig({
   plugins: [
     tailwindcss(),
@@ -105,12 +106,12 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: apiTarget,
         changeOrigin: true,
         ws: true,
       },
       '/auth': {
-        target: 'http://localhost:8080',
+        target: apiTarget,
         changeOrigin: true,
       },
     },

@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitepress'
+import { readFileSync } from 'node:fs'
 
-const version = process.env.KUBARR_VERSION || '0.0.0'
+const packageMetadata = JSON.parse(readFileSync(new URL('../../code/frontend/package.json', import.meta.url), 'utf8'))
+const version = process.env.KUBARR_VERSION || packageMetadata.version
 const channel = process.env.KUBARR_CHANNEL || 'dev'
 const commit = process.env.KUBARR_COMMIT || 'unknown'
 

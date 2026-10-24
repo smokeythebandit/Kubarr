@@ -4,9 +4,9 @@ This guide covers the development workflow for contributing to Kubarr.
 
 ## Prerequisites
 
-- **Backend**: Rust 1.83+, Cargo
-- **Frontend**: Node.js 26+, pnpm
-- **Tools**: Docker, kubectl, Kind (for local testing)
+- **API and worker**: Rust 1.94+, Cargo
+- **Frontend**: Node.js 26+, pnpm 10.34.3+ (the package pins 10.34.3)
+- **Tools**: Docker, kubectl, Helm 4.3.0, Kind (for local testing)
 - **Git**: For version control
 
 ## Initial Setup
@@ -22,15 +22,31 @@ cd Kubarr
 
 ```bash
 # Backend setup
-cd code/backend
-cargo build
-cargo test
+cd code/api
+cargo build --locked
+cargo test --locked --lib
 
 # Frontend setup
 cd ../frontend
-pnpm install
+pnpm install --frozen-lockfile
 pnpm dev
 ```
+
+The API defaults to `0.0.0.0:8000` and a local PostgreSQL database at
+`postgres://kubarr:kubarr@localhost:5432/kubarr`. Set `KUBARR_DATABASE_URL` for
+your development database; migrations run on startup. From `code/api`, start
+the API with `cargo run --locked --bin kubarr-api`.
+
+Vite serves the frontend on port 5173 and proxies `/api` and `/auth` to
+`http://127.0.0.1:8000`. To use a different API endpoint, start Vite with
+`KUBARR_DEV_API_URL=http://127.0.0.1:8080 pnpm dev`.
+
+App lifecycle operations require the separate worker. From `code/worker`, run
+`cargo run --locked` with the same `KUBARR_DATABASE_URL` as the API, a kubeconfig
+for your development cluster, and Helm on PATH. Full app proxying requires the
+gateway deployment; Vite's proxy covers API and authentication requests.
+
+For a complete installed environment, use the [CLI bootstrap wizard](https://github.com/smokeythebandit/kubarr-cli/blob/main/docs/bootstrap.md).
 
 ## Development Workflow
 
@@ -113,9 +129,9 @@ export function UserForm({ user, onSubmit, onCancel }: UserFormProps) {
 ### Backend Tests
 
 ```bash
-cd code/backend
-cargo test
-cargo test --test integration_tests
+cd code/api
+KUBECONFIG=/dev/null cargo test --locked --lib
+cargo test --locked --test app_operations_tests
 ```
 
 ### Frontend Tests
@@ -131,9 +147,11 @@ pnpm test:coverage       # With coverage
 
 ```bash
 cd code/frontend
-npx playwright test
-npx playwright test --ui  # Interactive mode
+pnpm test:browser         # Browser tests
+pnpm test:real            # Requires a configured live acceptance environment
 ```
+
+See [Testing](testing.md) for environment requirements and live-cluster suites.
 
 ## Linting
 
@@ -141,7 +159,7 @@ npx playwright test --ui  # Interactive mode
 
 **Backend:**
 ```bash
-cd code/backend
+cd code/api
 cargo fmt --check   # Check formatting
 cargo fmt           # Fix formatting
 cargo clippy        # Run linter
@@ -151,7 +169,7 @@ cargo clippy        # Run linter
 ```bash
 cd code/frontend
 pnpm lint           # Run ESLint
-npx tsc --noEmit    # Check TypeScript
+pnpm exec tsc --noEmit # Check TypeScript
 ```
 
 ### CI/CD
@@ -166,11 +184,9 @@ All checks run automatically in GitHub Actions:
 
 See [versioning.md](versioning.md) for details on version management and releases.
 
-Quick version bump:
-```bash
-git tag -a v0.1.1 -m "Release 0.1.1"
-git push && git push origin v0.1.1
-```
+Update the API, worker, and frontend package versions and their lockfiles before
+tagging a release. Run live release checks using the CI/CD workflow's
+`release-checks` input; a tag alone does not update package metadata.
 
 ## Troubleshooting
 
@@ -178,7 +194,7 @@ git push && git push origin v0.1.1
 
 Fix all warnings before committing:
 ```bash
-cd code/backend
+cd code/api
 cargo clippy --fix --allow-dirty
 ```
 
@@ -186,25 +202,21 @@ cargo clippy --fix --allow-dirty
 
 ```bash
 cd code/frontend
-pnpm lint -- --fix  # Auto-fix what's possible
+pnpm exec eslint . --fix  # Auto-fix what's possible
 ```
 
 ### TypeScript Errors
 
 ```bash
 cd code/frontend
-npx tsc --noEmit  # Show all errors
+pnpm exec tsc --noEmit  # Show all errors
 ```
 
 ## Branch Protection
 
-The `main` branch is protected:
-- ✅ Requires pull requests
-- ✅ Requires CI checks to pass
-- ✅ No force pushes allowed
-- ✅ Version tags (`v*`) are protected
-
-See [versioning.md#branch-protection-rules](versioning.md#branch-protection-rules) for details.
+Branch and tag protection are configured in GitHub repository settings. Check
+the active rules there before merging or releasing; workflow files alone do not
+enforce branch protection.
 
 ## Getting Help
 

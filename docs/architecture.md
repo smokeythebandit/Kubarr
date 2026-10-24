@@ -64,7 +64,7 @@ Kubarr is split into a small set of focused processes: a browser UI, an OpenRest
     <div class="arch-node arch-storage">
       <span class="arch-kicker">Storage</span>
       <strong>NFS media-data</strong>
-      <small>Shared RWX media, downloads, config, cache, transcode paths</small>
+      <small>Explicit shared mounts; private app configuration claims</small>
     </div>
     <div class="arch-node arch-k8s">
       <span class="arch-kicker">Cluster</span>
@@ -81,7 +81,7 @@ Kubarr is split into a small set of focused processes: a browser UI, an OpenRest
 - **API**: Rust/Axum service for authentication, user management, settings, catalog reads, file browsing, monitoring endpoints, and gateway proxy authorization.
 - **Worker**: Separate Rust process that owns queued app operations and reconciliation. It talks to Kubernetes and Helm without blocking user-facing API requests.
 - **Database**: PostgreSQL StatefulSet storing Kubarr internal state: users, roles, sessions, operations, app states, audit logs, settings, and VPN configuration.
-- **Storage**: Shared NFS-backed `media-data` claim. App charts mount chart-defined subpaths for config, downloads, media, cache, transcode, and system data.
+- **Storage**: Namespace-local `media-data` claims point to a shared NFS export. Charts declare each shared mount explicitly and use private configuration claims where supported. See [Storage](storage.md) for the current contract and migration requirements.
 - **Apps**: Each installed app runs from its Helm chart, usually in its own namespace, with Services reachable by the gateway and lifecycle managed by the worker.
 
 ## Request Flow

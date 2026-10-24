@@ -5,8 +5,8 @@
 </p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.20%2B-blue.svg)](https://kubernetes.io/)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/smokeythebandit/Kubarr/releases)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.34–1.37-blue.svg)](https://kubernetes.io/)
+[![Release](https://img.shields.io/github/v/release/smokeythebandit/Kubarr)](https://github.com/smokeythebandit/Kubarr/releases)
 
 > A Kubernetes-native dashboard for managing media server applications with security isolation, easy deployment, and comprehensive monitoring.
 
@@ -67,29 +67,17 @@ Kubarr is built specifically for managing media server infrastructure on Kuberne
 
 ## Quick Start
 
-### Existing Kubernetes Cluster
+### Install with the Browser Wizard
 
-If you already have a Kubernetes cluster:
+On Linux x86_64 or ARM64:
 
 ```bash
-# Create namespace
-kubectl create namespace kubarr
-
-# Install from OCI registry with NodePort access
-helm install kubarr oci://ghcr.io/smokeythebandit/kubarr-charts/kubarr -n kubarr \
-  --set frontend.service.type=NodePort \
-  --set frontend.service.nodePort=30080 \
-  --set backend.service.type=NodePort \
-  --set backend.service.nodePort=30081
-
-# Wait for pods to be ready
-kubectl wait --for=condition=ready pod -l app=kubarr -n kubarr --timeout=300s
-
-# Get node IP
-kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'
+curl -fsSL https://kubarr.com/install.sh | bash
 ```
 
-Open `http://<node-ip>:30080` in your browser.
+Open the printed invitation URL. Select an existing Kubernetes context, upload a kubeconfig, or create a local k3s cluster, then configure storage, dashboard access, and the initial administrator. Keep the terminal open until installation finishes and use the dashboard access instructions shown by the wizard.
+
+The CLI installs separate platform charts; there is no umbrella `kubarr` chart. See the [Quick Start](./docs/quick-start.md).
 
 ### Local Development
 
@@ -98,9 +86,9 @@ Open `http://<node-ip>:30080` in your browser.
 git clone https://github.com/smokeythebandit/Kubarr.git
 cd Kubarr
 
-# Build and run the backend
-cd code/backend
-cargo run
+# Build and run the API (requires a configured database)
+cd code/api
+cargo run --locked --bin kubarr-api
 
 # In another shell, build and run the frontend
 cd code/frontend
@@ -110,29 +98,26 @@ pnpm dev
 # Access the frontend at the Vite dev server URL
 ```
 
-See [Installation Guide](./docs/installation.md) for detailed setup instructions and advanced configuration.
+Use Rust 1.94+, Node.js 26, and pnpm 10.34.3+. See the [Development Guide](./docs/development.md) for database, worker, and frontend proxy setup.
 
 The installer is maintained in [kubarr-cli](https://github.com/smokeythebandit/kubarr-cli), with independent versions and releases. See its [Bootstrap Guide](https://github.com/smokeythebandit/kubarr-cli/blob/main/docs/bootstrap.md) for browser setup and CLI development.
 
 ## Architecture
 
-Kubarr consists of three main components:
+Kubarr consists of these main components:
 
-- **Backend** (Rust/Axum) - API server with Kubernetes client integration
+- **Gateway** (OpenResty) - Dashboard routing and authenticated application proxying
+- **API** (Rust/Axum) - Authentication, configuration, monitoring, and operation enqueueing
+- **Worker** (Rust) - Queued Helm operations and Kubernetes reconciliation
 - **Frontend** (React/TypeScript) - SPA with real-time updates via WebSockets
 - **Database** (PostgreSQL) - Application state and configuration storage
 
 ```
-┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-│   Frontend  │─────▶│   Backend   │─────▶│  Kubernetes │
-│   (React)   │      │   (Rust)    │      │   Cluster   │
-└─────────────┘      └─────────────┘      └─────────────┘
-                            │
-                            ▼
-                     ┌─────────────┐
-                     │  Database   │
-                     │ (PostgreSQL)│
-                     └─────────────┘
+Browser → OpenResty gateway → React frontend / Rust API
+                                              ↓
+                                         PostgreSQL
+                                              ↑
+                                         Rust worker → Helm / Kubernetes
 ```
 
 **Technology Stack:**
@@ -141,10 +126,11 @@ Kubarr consists of three main components:
 - Database: PostgreSQL (production), SQLite (development)
 - Deployment: Docker, Kubernetes, Helm
 
+The API and worker share the library in `code/api`; the worker entrypoint is in `code/worker`. Gateway configuration lives in [kubarr-charts](https://github.com/smokeythebandit/kubarr-charts/tree/main/system/openresty). `code/dns-webhook` contains the Go cert-manager TransIP solver. See [Architecture](./docs/architecture.md) for request flows.
+
 ## Documentation
 
 - [Quick Start Guide](./docs/quick-start.md) - Get running in 15 minutes
-- [Installation Guide](./docs/installation.md) - Detailed setup instructions
 - [Bootstrap Guide](https://github.com/smokeythebandit/kubarr-cli/blob/main/docs/bootstrap.md) - First-time setup with the CLI
 - [Configuration Reference](./docs/configuration.md) - Environment variables and Helm values
 - [User Guide](./docs/user-guide.md) - How to use Kubarr effectively
@@ -159,7 +145,6 @@ Contributions are welcome! Please see [Development Guide](./docs/development.md)
 
 - Issues: [GitHub Issues](https://github.com/smokeythebandit/Kubarr/issues)
 - Discussions: [GitHub Discussions](https://github.com/smokeythebandit/Kubarr/discussions)
-- Security: [SECURITY.md](./code/backend/SECURITY.md)
 
 ## License
 

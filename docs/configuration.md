@@ -1,570 +1,172 @@
 # Configuration Reference
 
-This document provides a comprehensive reference for configuring Kubarr, including environment variables, Helm chart values, and common configuration scenarios.
-
-## Table of Contents
-
-- [Environment Variables](#environment-variables)
-- [Helm Chart Values](#helm-chart-values)
-- [Authentication Configuration](#authentication-configuration)
-- [Storage Configuration](#storage-configuration)
-- [Network Policy Configuration](#network-policy-configuration)
-- [Resource Configuration](#resource-configuration)
-- [Security Configuration](#security-configuration)
+Kubarr is installed as separate Helm releases. Configure initial dashboard
+access, storage, and the administrator through the [CLI wizard](https://github.com/smokeythebandit/kubarr-cli/blob/main/docs/bootstrap.md).
+Each chart's `values.yaml` is the reference for that component; there is no
+umbrella chart with shared `backend:` and `frontend:` sections.
 
 ## Environment Variables
 
-The Kubarr backend supports the following environment variables:
+These defaults come from `code/api/src/application/config/` and apply to a
+standalone process. Helm charts can override them.
 
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `KUBARR_IN_CLUSTER` | Enable in-cluster Kubernetes API access | `true` | No |
-| `KUBARR_DEFAULT_NAMESPACE` | Default namespace for media applications | `media` | No |
-| `KUBARR_LOG_LEVEL` | Logging level (TRACE, DEBUG, INFO, WARN, ERROR) | `INFO` | No |
-| `KUBARR_OAUTH2_ISSUER_URL` | OAuth2 issuer URL for token validation | `http://kubarr.kubarr.svc.cluster.local:8000` | No |
-| `KUBARR_DATABASE_URL` | PostgreSQL connection string | - | Yes (if using database) |
-| `KUBARR_JWT_SECRET` | Secret key for JWT token signing | - | Yes |
-| `KUBARR_GLUETUN_IMAGE` | Docker image for the Gluetun VPN sidecar container | `qmcgaw/gluetun:v3.40` | No |
+| Variable | Purpose | Process default |
+|----------|---------|-----------------|
+| `KUBARR_API_HOST` | API bind address | `0.0.0.0` |
+| `KUBARR_API_PORT` | API HTTP port | `8000` |
+| `KUBARR_DATABASE_URL` | SeaORM database URL | Falls back to `DATABASE_URL`, then `postgres://kubarr:kubarr@localhost:5432/kubarr` |
+| `KUBARR_IN_CLUSTER` | Use in-cluster Kubernetes access | `false`; platform charts set `true` |
+| `KUBARR_KUBECONFIG_PATH` | Explicit kubeconfig path | Unset |
+| `KUBARR_DEFAULT_NAMESPACE` | Default Kubernetes namespace | `media` |
+| `KUBARR_LOG_LEVEL` | Log filter level | `info` |
+| `KUBARR_OAUTH2_ENABLED` | OAuth2 configuration flag | `false` |
+| `KUBARR_OAUTH2_ISSUER_URL` | OAuth2 issuer URL | `http://kubarr:8000/auth` |
+| `KUBARR_CHARTS_DIR` | Local chart cache | `/tmp/charts` |
+| `KUBARR_CHARTS_SOURCE_DIR` | Optional local chart source directory | Unset |
+| `KUBARR_CHARTS_REPO` | GitHub chart repository | `smokeythebandit/kubarr-charts` |
+| `KUBARR_CHARTS_GIT_REF` | Chart source revision | `main` |
+| `KUBARR_CHARTS_REGISTRY` | OCI chart registry | `oci://ghcr.io/smokeythebandit/kubarr-charts` |
+| `KUBARR_CHARTS_SYNC_INTERVAL` | Chart refresh interval, seconds | `3600` |
+| `KUBARR_CHARTS_PLAIN_HTTP` | Explicit insecure registry transport opt-in | `false` |
 
-### Setting Environment Variables
+In-cluster startup first attempts to load database credentials from the
+`kubarr-database` namespace; the configured database URL is the fallback.
+The API and worker must connect to the same database.
 
-#### Via Helm Chart
+### Worker Intervals
 
-```yaml
-backend:
-  env:
-    - name: KUBARR_LOG_LEVEL
-      value: "DEBUG"
-    - name: KUBARR_DEFAULT_NAMESPACE
-      value: "media-apps"
-    - name: KUBARR_JWT_SECRET
-      valueFrom:
-        secretKeyRef:
-          name: kubarr-secrets
-          key: jwt-secret
+| Variable | Default, seconds |
+|----------|------------------|
+| `KUBARR_WORKER_POLL_INTERVAL_SECONDS` | `5` |
+| `KUBARR_WORKER_RECONCILE_INTERVAL_SECONDS` | `30` |
+| `KUBARR_DOMAIN_RECONCILE_INTERVAL_SECONDS` | `60` |
+
+### Local Frontend Proxy
+
+`KUBARR_DEV_API_URL` configures Vite's development proxy for `/api` and `/auth`.
+It defaults to `http://127.0.0.1:8000`, matching the API's default port:
+
+```sh
+KUBARR_DEV_API_URL=http://127.0.0.1:8080 pnpm dev
 ```
 
-#### Via Kubernetes ConfigMap/Secret
-
-```bash
-# Create a secret for sensitive values
-kubectl create secret generic kubarr-secrets \
-  --from-literal=jwt-secret='your-secure-random-string' \
-  -n kubarr
-
-# Reference in deployment
-kubectl set env deployment/kubarr-backend \
-  KUBARR_JWT_SECRET=secretKeyRef:kubarr-secrets:jwt-secret \
-  -n kubarr
-```
+This is a development-server setting, not a production API URL. Production
+routing is handled by the gateway.
 
 ## Helm Chart Values
 
-### Namespace Configuration
+The platform charts live in [kubarr-charts/system](https://github.com/smokeythebandit/kubarr-charts/tree/main/system):
+
+| Chart | Default workload namespace | Role |
+|-------|----------------------------|------|
+| `kubarr-backend` | `kubarr-backend` | API |
+| `kubarr-worker` | `kubarr-worker` | Lifecycle worker |
+| `kubarr-frontend` | `kubarr-frontend` | Dashboard assets |
+| `openresty` | `openresty` | Public gateway |
+| `postgresql` | `kubarr-database` | Application database |
+| `managed-nfs` | `kubarr-storage` | Optional managed shared storage |
+
+Helm release namespaces can differ from workload namespaces. Inspect
+`helm list -A` before changing an installed release. Use the installed chart's
+version and values as the starting point for upgrades; the CLI pins compatible
+bootstrap chart revisions in `src/charts.rs`.
+
+### API Image and Resources
+
+For the `kubarr-backend` chart, values are top-level:
 
 ```yaml
-namespace:
-  create: true          # Create namespace if it doesn't exist
-  name: kubarr         # Namespace name
+image:
+  repository: ghcr.io/smokeythebandit/kubarr-backend
+  tag: "0.3.1"
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 8000
+  targetPort: 8000
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
 ```
 
-### Backend Configuration
+Use matching API, worker, and frontend image versions. For local images,
+override the repository, tag, and pull policy and load the images into your
+development cluster.
 
-```yaml
-backend:
-  replicaCount: 1      # Number of backend replicas
-
-  image:
-    repository: kubarr-backend    # Image repository
-    pullPolicy: Never             # Image pull policy (IfNotPresent, Always, Never)
-    tag: "latest"                # Image tag
-
-  service:
-    type: NodePort     # Service type (ClusterIP, NodePort, LoadBalancer)
-    port: 8000        # Service port
-    targetPort: 8000  # Container port
-    nodePort: 30080   # NodePort (if type is NodePort)
-
-  resources:
-    limits:
-      cpu: 500m       # Maximum CPU allocation
-      memory: 512Mi   # Maximum memory allocation
-    requests:
-      cpu: 100m       # Minimum CPU allocation
-      memory: 256Mi   # Minimum memory allocation
-
-  livenessProbe:
-    httpGet:
-      path: /api/system/health
-      port: 8000
-    initialDelaySeconds: 1
-    periodSeconds: 10
-
-  readinessProbe:
-    httpGet:
-      path: /api/system/health
-      port: 8000
-    initialDelaySeconds: 0
-    periodSeconds: 1
-
-  env:
-    - name: KUBARR_IN_CLUSTER
-      value: "true"
-    - name: KUBARR_DEFAULT_NAMESPACE
-      value: "media"
-    - name: KUBARR_LOG_LEVEL
-      value: "INFO"
-```
-
-### Frontend Configuration
-
-```yaml
-frontend:
-  replicaCount: 1      # Number of frontend replicas
-
-  image:
-    repository: kubarr-frontend
-    pullPolicy: Never
-    tag: "latest"
-
-  service:
-    type: ClusterIP    # Service type
-    port: 80          # Service port
-
-  resources:
-    limits:
-      cpu: 50m        # Maximum CPU allocation
-      memory: 32Mi    # Maximum memory allocation
-    requests:
-      cpu: 10m        # Minimum CPU allocation
-      memory: 16Mi    # Minimum memory allocation
-```
-
-### Service Account and RBAC
-
-```yaml
-serviceAccount:
-  create: true               # Create service account
-  name: kubarr              # Service account name
-  annotations: {}           # Service account annotations
-
-rbac:
-  create: true              # Create RBAC resources (ClusterRole, ClusterRoleBinding)
-  rules:                    # RBAC rules for cluster access
-    - apiGroups: [""]
-      resources: ["namespaces"]
-      verbs: ["get", "list", "watch", "create", "delete"]
-    - apiGroups: ["apps"]
-      resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
-      verbs: ["get", "list", "watch", "create", "update", "delete", "patch"]
-    # Additional rules...
-```
+The API and worker charts expose an `env` list. Helm replaces lists rather than
+merging entries by name, so preserve the component's existing environment entries
+when supplying an override. Environment variables backed by Secrets use normal
+Kubernetes `valueFrom.secretKeyRef` entries in that list.
 
 ## Authentication Configuration
 
-Kubarr uses JWT-based authentication with support for OAuth2 and 2FA (TOTP).
+The installer creates the initial administrator. The API authenticates session
+cookies containing signed JWT session identifiers and loads session/user
+permissions from the database. Signing keys are initialized through the API's
+security service; `KUBARR_JWT_SECRET` is not a supported configuration variable.
 
-### Basic Authentication Setup
-
-```yaml
-auth:
-  # Admin user (created on first run)
-  adminUser:
-    username: "admin"
-    email: "admin@kubarr.local"
-    password: ""  # Auto-generated if empty
-
-  # JWT configuration
-  jwt:
-    existingSecret: ""              # Use existing Kubernetes secret
-    privateKey: ""                  # RSA private key (auto-generated if empty)
-    publicKey: ""                   # RSA public key (auto-generated if empty)
-    accessTokenExpire: 3600         # Access token expiry (seconds)
-    refreshTokenExpire: 604800      # Refresh token expiry (seconds)
-
-  # User registration
-  registration:
-    enabled: true                   # Allow new user registration
-    requireApproval: true           # Require admin approval for new users
-```
-
-### Using Existing JWT Secret
-
-```yaml
-auth:
-  jwt:
-    existingSecret: "kubarr-jwt-keys"
-```
-
-Create the secret manually:
-
-```bash
-# Generate RSA key pair
-openssl genrsa -out private.pem 2048
-openssl rsa -in private.pem -outform PEM -pubout -out public.pem
-
-# Create Kubernetes secret
-kubectl create secret generic kubarr-jwt-keys \
-  --from-file=private-key=private.pem \
-  --from-file=public-key=public.pem \
-  -n kubarr
-
-# Clean up local keys
-rm private.pem public.pem
-```
-
-### OAuth2 Configuration
-
-```yaml
-oauth2:
-  enabled: true                     # Enable OAuth2 provider
-  provider:
-    issuerUrl: "http://localhost:8080"  # OAuth2 issuer URL
-```
-
-For production with custom domain:
-
-```yaml
-oauth2:
-  enabled: true
-  provider:
-    issuerUrl: "https://kubarr.example.com"
-```
-
-### Disabling User Registration
-
-```yaml
-auth:
-  registration:
-    enabled: false     # Disable new user registration
-```
-
-### Custom Token Expiry
-
-```yaml
-auth:
-  jwt:
-    accessTokenExpire: 7200      # 2 hours
-    refreshTokenExpire: 2592000  # 30 days
-```
+Manage users, roles, registration, and authentication settings through the
+dashboard's supported settings and account controls. See the [User Guide](user-guide.md)
+and [API](api.md) documentation.
 
 ## Storage Configuration
 
-Kubarr supports NFS-backed shared storage for the file browser feature. The Kubarr backend mounts the `media-data` PVC at `/data`.
-
-### Shared NFS Storage
-
-```yaml
-storage:
-  media:
-    existingClaim: media-data
-  mountPath: /data
-```
-
-### Storage Examples
-
-#### Managed NFS
+Shared storage uses explicit `storage.mounts` entries; multi-workload charts can
+use `storage.workloads.<component>.mounts`. For example:
 
 ```yaml
 storage:
+  mounts:
+    - name: library
+      source: media
+      target: /media
+      mode: read-write
   media:
     existingClaim: media-data
-  mountPath: /data
 ```
 
-#### External NFS
-
-```yaml
-storage:
-  media:
-    existingClaim: media-data
-  mountPath: /data
-```
+Charts supporting private configuration claims expose `storage.config`, including
+`size`, `storageClassName`, and `existingClaim`. These settings are chart-specific.
+See [Storage](storage.md) and the [migration guide](https://github.com/smokeythebandit/kubarr-charts/blob/main/STORAGE-MIGRATION.md)
+before upgrading older releases. Legacy `storage.mountPath`, role, and layout
+settings are not the current shared-mount contract.
 
 ## Network Policy Configuration
 
-Network policies control which namespaces and pods can communicate with Kubarr and vice versa.
+App charts define their own NetworkPolicies and allowed communication. Their
+`ingressFrom` and `egressTo` namespace selectors must match the deployment
+topology. A namespace boundary alone does not enforce network isolation;
+NetworkPolicies require a supporting CNI. See [Networking](networking.md).
 
-### Basic Network Policy
-
-```yaml
-networkPolicy:
-  enabled: true                    # Enable network policies
-  allowedNamespaces:              # Namespaces Kubarr can access
-    - sonarr
-    - radarr
-    - qbittorrent
-    - transmission
-    - deluge
-    - rutorrent
-    - jackett
-    - jellyfin
-    - jellyseerr
-    - sabnzbd
-    - victoriametrics
-    - victorialogs
-    - grafana
-```
-
-### Custom Namespace Access
-
-```yaml
-networkPolicy:
-  enabled: true
-  allowedNamespaces:
-    - media
-    - monitoring
-    - downloads
-    - custom-app
-```
-
-### Disable Network Policies
-
-```yaml
-networkPolicy:
-  enabled: false  # Allow all traffic (not recommended for production)
-```
-
-## Resource Configuration
-
-### Production Resource Limits
-
-```yaml
-backend:
-  resources:
-    limits:
-      cpu: 2000m
-      memory: 2Gi
-    requests:
-      cpu: 500m
-      memory: 1Gi
-
-frontend:
-  resources:
-    limits:
-      cpu: 200m
-      memory: 128Mi
-    requests:
-      cpu: 50m
-      memory: 64Mi
-```
-
-### Development Resource Limits
-
-```yaml
-backend:
-  resources:
-    limits:
-      cpu: 500m
-      memory: 512Mi
-    requests:
-      cpu: 100m
-      memory: 256Mi
-
-frontend:
-  resources:
-    limits:
-      cpu: 50m
-      memory: 32Mi
-    requests:
-      cpu: 10m
-      memory: 16Mi
-```
+Dashboard access is configured on the OpenResty gateway: NodePort, LoadBalancer,
+or ClusterIP with port-forwarding. See [Quick Start](quick-start.md) for access
+commands.
 
 ## Security Configuration
 
-### Pod Security Context
+The API chart defaults to a non-root UID 1000, dropped capabilities,
+`RuntimeDefault` seccomp, disabled privilege escalation, and a read-only root
+filesystem. Writable storage and temporary directories are mounted separately.
+Application charts have their own requirements; do not assume these defaults
+apply to every managed workload.
 
-```yaml
-podSecurityContext:
-  runAsNonRoot: true   # Run as non-root user
-  runAsUser: 1000      # User ID
-  fsGroup: 1000        # Group ID for volume ownership
-```
+Kubernetes permissions are defined by each chart's RBAC values and templates.
+The API currently has broad cluster-management permissions, including RBAC
+mutation. Review the actual rendered roles when changing deployment privileges.
 
-### Container Security Context
+## Scheduling
 
-```yaml
-securityContext:
-  allowPrivilegeEscalation: false  # Prevent privilege escalation
-  capabilities:
-    drop:
-      - ALL                        # Drop all capabilities
-  readOnlyRootFilesystem: false    # Allow writes to filesystem
-```
-
-### Hardened Security (Production)
-
-```yaml
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
-  seccompProfile:
-    type: RuntimeDefault
-
-securityContext:
-  allowPrivilegeEscalation: false
-  capabilities:
-    drop:
-      - ALL
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  runAsUser: 1000
-```
-
-## Advanced Configuration
-
-### Node Selector
+Platform charts expose `nodeSelector`, `tolerations`, `affinity`,
+`podAnnotations`, and `imagePullSecrets`. Check the selected chart's values for
+supported fields and defaults. For example:
 
 ```yaml
 nodeSelector:
-  kubernetes.io/hostname: specific-node
-  disktype: ssd
-```
-
-### Tolerations
-
-```yaml
-tolerations:
-  - key: "dedicated"
-    operator: "Equal"
-    value: "kubarr"
-    effect: "NoSchedule"
-```
-
-### Affinity Rules
-
-```yaml
-affinity:
-  podAntiAffinity:
-    preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        podAffinityTerm:
-          labelSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values:
-                  - kubarr-backend
-          topologyKey: kubernetes.io/hostname
-```
-
-### Pod Annotations
-
-```yaml
-podAnnotations:
-  prometheus.io/scrape: "true"
-  prometheus.io/port: "8000"
-  prometheus.io/path: "/metrics"
-```
-
-### Image Pull Secrets
-
-```yaml
+  kubernetes.io/hostname: worker-1
 imagePullSecrets:
   - name: registry-credentials
 ```
-
-## Complete Production Example
-
-```yaml
-namespace:
-  create: true
-  name: kubarr
-
-backend:
-  replicaCount: 3
-  image:
-    repository: ghcr.io/yourusername/kubarr-backend
-    pullPolicy: IfNotPresent
-    tag: "v1.0.0"
-  service:
-    type: ClusterIP
-    port: 8000
-  resources:
-    limits:
-      cpu: 2000m
-      memory: 2Gi
-    requests:
-      cpu: 500m
-      memory: 1Gi
-  env:
-    - name: KUBARR_LOG_LEVEL
-      value: "INFO"
-    - name: KUBARR_DEFAULT_NAMESPACE
-      value: "media"
-
-frontend:
-  replicaCount: 2
-  image:
-    repository: ghcr.io/yourusername/kubarr-frontend
-    pullPolicy: IfNotPresent
-    tag: "v1.0.0"
-  resources:
-    limits:
-      cpu: 200m
-      memory: 128Mi
-    requests:
-      cpu: 50m
-      memory: 64Mi
-
-auth:
-  jwt:
-    existingSecret: "kubarr-jwt-keys"
-    accessTokenExpire: 3600
-    refreshTokenExpire: 604800
-  registration:
-    enabled: true
-    requireApproval: true
-
-oauth2:
-  enabled: true
-  provider:
-    issuerUrl: "https://kubarr.example.com"
-
-storage:
-  media:
-    existingClaim: media-data
-  mountPath: /data
-
-networkPolicy:
-  enabled: true
-  allowedNamespaces:
-    - sonarr
-    - radarr
-    - jellyfin
-    - monitoring
-
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
-
-securityContext:
-  allowPrivilegeEscalation: false
-  capabilities:
-    drop:
-      - ALL
-  readOnlyRootFilesystem: false
-
-nodeSelector:
-  disktype: ssd
-
-affinity:
-  podAntiAffinity:
-    preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        podAffinityTerm:
-          labelSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values:
-                  - kubarr-backend
-          topologyKey: kubernetes.io/hostname
-```
-
-## See Also
-
-- [Quick Start](./quick-start.md) - Get Kubarr running in minutes

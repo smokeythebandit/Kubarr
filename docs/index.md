@@ -26,10 +26,10 @@ No YAML wrangling. No Helm headaches. Just pick the apps you want, click deploy,
 ## Get Started
 
 ```bash
-helm install kubarr oci://ghcr.io/smokeythebandit/kubarr-charts/kubarr -n kubarr --create-namespace
+curl -fsSL https://kubarr.com/install.sh | bash
 ```
 
-That's it. Once the pods are ready, open the dashboard and log in with the credentials from the install output.
+Open the printed invitation URL and complete the browser wizard. It configures the cluster destination, storage, dashboard access, and initial administrator, then installs the platform's separate Helm charts.
 
 For more details, see the [Quick Start Guide](quick-start.md).
 

@@ -1,72 +1,91 @@
 # Quick Start
 
-Get Kubarr running on your cluster in a few minutes.
+Install Kubarr with the standalone CLI's browser wizard.
 
 ## Prerequisites
 
-- A Kubernetes cluster (k3s, K3d, Kind, EKS, GKE, AKS), version 1.34-1.37 for the bundled Helm 4.3
-- `kubectl` configured to talk to your cluster
-- `helm` 4 (CI and runtime images use 4.3.0)
+- Linux x86_64 or ARM64 for the installer binary.
+- An existing Kubernetes cluster and usable kubeconfig, or a host on which to create local single-node k3s.
+- Helm 4.3 supports Kubernetes 1.34–1.37; release E2E uses 1.35.8.
+
+The wizard checks the selected destination and required tools. Creating local k3s requires host-administration privileges; installing the CLI and hosting the wizard run as your normal user.
 
 ## Install Kubarr
 
-```bash
-helm install kubarr oci://ghcr.io/smokeythebandit/kubarr-charts/kubarr \
-  -n kubarr --create-namespace
+```sh
+curl -fsSL https://kubarr.com/install.sh | bash
 ```
 
-Wait for everything to come up:
+The script installs `~/.local/bin/kubarr` and starts the wizard. Open the printed invitation URL and keep the terminal running until setup finishes.
 
-```bash
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kubarr \
-  -n kubarr --timeout=300s
+1. Select an existing context, upload a kubeconfig, or choose local k3s.
+2. Configure dashboard access and storage.
+3. Create the initial administrator and select optional Grafana.
+4. Review the choices and start installation.
+
+The CLI installs separate storage, database, monitoring, API, worker, frontend, and gateway charts. There is no umbrella `kubarr` chart.
+
+To reopen the wizard later:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+kubarr bootstrap
 ```
+
+For remote-host access, storage checks, and diagnostics, see the CLI's [Bootstrap Guide](https://github.com/smokeythebandit/kubarr-cli/blob/main/docs/bootstrap.md).
 
 ## Open the Dashboard
 
-```bash
-kubectl port-forward -n kubarr svc/kubarr-frontend 8080:80
-```
+Use the access instructions shown when installation completes:
 
-Visit [http://localhost:8080](http://localhost:8080). The setup wizard will walk you through creating your admin account.
+- **NodePort:** `http://<node-ip>:30080`, or the port selected in the wizard.
+- **LoadBalancer:** the gateway's assigned address on port 8080.
+- **Port-forward:** with kubectl targeting the installed cluster, run:
 
-::: tip
-If you have an ingress controller, you can skip port-forwarding and set up a proper hostname instead. See the [Configuration Reference](configuration.md) for ingress options.
-:::
+  ```sh
+  kubectl port-forward -n openresty svc/kubarr-gateway 8080:8080
+  ```
 
-## Deploy Your First App
+  Open [http://localhost:8080](http://localhost:8080) on the forwarding machine.
 
-1. Go to **Applications** → **Catalog**
-2. Pick an app (e.g., Sonarr)
-3. Click **Deploy** and accept the defaults
-4. That's it — the app will be running in seconds
+Sign in with the administrator account created during installation. Dashboard traffic goes through the OpenResty gateway.
 
-## What's Next
+## Install Your First App
 
-- **[GitHub](https://github.com/smokeythebandit/Kubarr)** — Source code and issue tracker
+1. Open **Apps** and select an available catalog app, such as Sonarr.
+2. Start its installation wizard and review its storage mounts and configuration claim.
+3. Confirm the installation and follow its status in **Operations**.
 
-## Uninstall
-
-```bash
-helm uninstall kubarr -n kubarr
-kubectl delete namespace kubarr
-```
+See the [App Installation Wizard](install-wizard.md) and [Storage](storage.md) guides for details.
 
 ## Troubleshooting
 
-### Pods not starting
-
-```bash
-kubectl get pods -n kubarr
-kubectl describe pod -n kubarr <pod-name>
-kubectl get events -n kubarr --sort-by='.lastTimestamp'
+```sh
+kubarr doctor
+kubectl get pods -n kubarr-backend
+kubectl get pods -n kubarr-worker
+kubectl get pods -n openresty
+kubectl get svc -n openresty kubarr-gateway
 ```
 
-### Can't access the dashboard
+Inspect a failing pod in its workload namespace:
 
-Make sure the port-forward is still running — it drops when pods restart. Just run the `port-forward` command again.
+```sh
+kubectl describe pod -n <namespace> <pod-name>
+kubectl get events -n <namespace> --sort-by='.lastTimestamp'
+```
 
-### Need help?
+For port-forward access, keep the forwarding command running and restart it if its pod connection drops.
 
+## Upgrades and Removal
+
+Read the [storage migration guide](https://github.com/smokeythebandit/kubarr-charts/blob/main/STORAGE-MIGRATION.md) before upgrading an existing installation to declarative storage.
+
+Platform components are separate releases. Use `helm list -A` to identify their release names and release namespaces before removing individual components with `helm uninstall <release> -n <release-namespace>`. Workload namespaces can differ from release namespaces. Review retained PVCs, PVs, and stored data separately; uninstalling a release is not a data-erasure procedure.
+
+## Next Steps
+
+- [Configuration](configuration.md)
+- [Architecture](architecture.md)
+- [Development](development.md)
 - [GitHub Issues](https://github.com/smokeythebandit/Kubarr/issues)
-- [GitHub Discussions](https://github.com/smokeythebandit/Kubarr/discussions)
