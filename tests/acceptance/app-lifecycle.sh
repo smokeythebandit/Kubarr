@@ -575,8 +575,7 @@ fi
 if [[ $VPN_LAB_ACCEPTANCE == 1 ]]; then
   grep -q 'extraEnv:' "$CHARTS_REPO/media-manager/sonarr/values.yaml" ||
     fail "pinned Sonarr chart lacks vpn.extraEnv"
-  grep -q 'Values.vpn.extraEnv' "$CHARTS_REPO/media-manager/sonarr/templates/deployment.yaml" ||
-    fail "pinned Sonarr deployment does not render vpn.extraEnv"
+  vpn_lab_assert_extra_env "$CHARTS_REPO/media-manager/sonarr"
 fi
 NATIVE_PLATFORM=$(native_docker_platform)
 [[ ! -e "$WORK_DIR" ]] || fail "work directory already exists: $WORK_DIR"

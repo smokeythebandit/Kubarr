@@ -41,7 +41,8 @@ release() {
   local name=$1 chart=$2
   shift 2
   helm upgrade --install --server-side=false "$name" "$TEST_CHARTS_DIR/$chart" \
-    --kube-context "$TEST_CONTEXT" -n default --wait=legacy --timeout=5m "$@" >/dev/null
+    --kube-context "$TEST_CONTEXT" -n default --wait=legacy --timeout=5m \
+    --set namespace.create=true "$@" >/dev/null
 }
 storage=(--set storage.media.existingClaim=media-data --set-string "storage.media.nfs.size=$TEST_STORAGE_SIZE")
 

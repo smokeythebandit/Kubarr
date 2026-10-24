@@ -87,6 +87,7 @@ class StackDeployTests(unittest.TestCase):
             self.assertEqual(args[args.index("-n") + 1], "default")
             self.assertIn("--server-side=false", args)
             self.assertIn("--wait=legacy", args)
+            self.assertIn("namespace.create=true", args)
             if args[3] in ("kubarr-backend", "kubarr-frontend", "kubarr-worker"):
                 self.assertIn(f"image.repository={args[3]}", args)
                 self.assertIn("image.tag=ci-fixture", args)

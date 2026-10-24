@@ -157,12 +157,50 @@ vpn_lab_setup() {
   vpn_lab_control_probe setup
 }
 
+vpn_lab_assert_extra_env() {
+  local chart=$1 output
+  output=$(mktemp -d "${TMPDIR:-/tmp}/kubarr-vpn-render.XXXXXX") || return
+  # Render a disposable copy so dependency preparation never changes the
+  # operator's pinned checkout. Support both inline and shared-library templates.
+  if ! (
+    set -e
+    mkdir -p "$output/media-manager" "$output/system" || exit 1
+    cp -a "$chart" "$output/media-manager/sonarr" || exit 1
+    cp -a "$chart/../../system/kubarr-common" "$output/system/kubarr-common" || exit 1
+    helm dependency build --skip-refresh "$output/media-manager/sonarr" >/dev/null || exit 1
+    helm template vpn-preflight "$output/media-manager/sonarr" \
+      --set vpn.enabled=true --set vpn.secretName=acceptance-preflight \
+      --set 'vpn.extraEnv[0].name=KUBARR_ACCEPTANCE_EXTRA_ENV' \
+      --set-string 'vpn.extraEnv[0].value=rendered-sidecar-only' >"$output/rendered.yaml" || exit 1
+    python3 - "$output/rendered.yaml" <<'PY'
+import pathlib
+import sys
+import yaml
+
+expected = {"name": "KUBARR_ACCEPTANCE_EXTRA_ENV", "value": "rendered-sidecar-only"}
+matches = []
+for resource in yaml.safe_load_all(pathlib.Path(sys.argv[1]).read_text()):
+    if not resource or resource.get("kind") != "Deployment":
+        continue
+    for container in resource["spec"]["template"]["spec"]["containers"]:
+        if expected in container.get("env", []):
+            matches.append(container["name"])
+if matches != ["gluetun"]:
+    raise SystemExit("Sonarr must render vpn.extraEnv exactly once in its Gluetun sidecar")
+PY
+  ); then
+    rm -rf -- "$output"
+    fail "pinned Sonarr chart does not render vpn.extraEnv in Gluetun"
+    return 1
+  fi
+  rm -rf -- "$output"
+}
+
 vpn_lab_patch_chart() {
   local chart=$1
   grep -q 'extraEnv:' "$chart/values.yaml" ||
     fail "Sonarr chart must provide vpn.extraEnv; update the pinned charts revision"
-  grep -q 'Values.vpn.extraEnv' "$chart/templates/deployment.yaml" ||
-    fail "Sonarr deployment must render vpn.extraEnv"
+  vpn_lab_assert_extra_env "$chart"
   python3 - "$chart/values.yaml" <<'PY'
 import sys
 import yaml
