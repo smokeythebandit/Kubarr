@@ -177,7 +177,7 @@ test.describe('real settings and VPN (configuration only)', () => {
     await page.getByPlaceholder('My VPN').fill(renamed);
     await page.getByRole('switch', { name: 'Enabled', exact: true }).click();
     await page.getByRole('switch', { name: 'Kill Switch', exact: true }).click();
-    await page.getByPlaceholder('10.0.0.0/8,172.16.0.0/12,192.168.0.0/16').fill('10.42.0.0/16');
+    await page.getByLabel('Allowed Subnets', { exact: true }).fill('10.42.0.0/16');
     // The current form asks for the key again while editing; use fresh disposable test data.
     await page.getByPlaceholder('(unchanged)').fill(wireGuardKey());
     const saved = page.waitForResponse(response => response.request().method() === 'PUT' && /\/api\/vpn\/providers\/\d+$/.test(response.url()));

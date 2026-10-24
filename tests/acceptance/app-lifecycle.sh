@@ -741,8 +741,13 @@ else
     unset ADMIN_PASSWORD
   fi
   api POST /api/apps/sync >/dev/null
+  # Use the same version-pinned, explicit storage choices as the installation
+  # wizard. The legacy untyped request cannot prove private-config freshness
+  # for the later guarded update, and must not bypass migration confirmation.
+  install_request=$(api GET /api/apps/catalog/sonarr/install-options |
+    python3 "$APP_ROOT/tests/acceptance/stack-fixture.py" install-request)
   install_response=$(api POST /api/apps/install -H 'Content-Type: application/json' \
-    --data '{"app_name":"sonarr","custom_config":{"exporter.enabled":"false"}}')
+    --data-binary "$install_request")
   install_id=$(jq -er '.id' <<<"$install_response")
 fi
 wait_for 660 "Sonarr install operation" operation_succeeded "$install_id"

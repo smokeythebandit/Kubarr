@@ -137,6 +137,21 @@ class StackDeployTests(unittest.TestCase):
         self.assertTrue(sql.startswith("BEGIN;"))
         self.assertTrue(sql.rstrip().endswith("COMMIT;"))
 
+    def test_install_request_pins_reviewed_storage_without_forcing_migration(self):
+        options = {"app_name": "sonarr", "chart_version": "4.1.7-acceptance.1",
+                   "mounts": [{"name": "library", "source": "media", "target": "/media", "mode": "read-write"}],
+                   "config": {"create": True, "existing_claim": "", "storage_class_name": "", "size": "5Gi"},
+                   "workloads": {}}
+        request = fixture.install_request(options, {"exporter.enabled": "false"})
+        self.assertEqual(request["chart_version"], options["chart_version"])
+        self.assertEqual(request["storage"], {"mounts": options["mounts"], "config": options["config"]})
+        self.assertEqual(request["custom_config"], {"exporter.enabled": "false"})
+        self.assertNotIn("migrationConfirmed", json.dumps(request))
+        options.update(mounts=None, config=None, workloads={"worker": []})
+        self.assertEqual(fixture.install_request(options)["storage"], {"workloads": {"worker": {"mounts": []}}})
+        with self.assertRaises(ValueError):
+            fixture.install_request({"app_name": "sonarr"})
+
 
 if __name__ == "__main__":
     unittest.main()
