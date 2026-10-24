@@ -41,9 +41,9 @@ jobs:
     env:
       KIND_CLUSTER: kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       KUBECONFIG: /tmp/kubarr-e2e-${{ github.run_id }}-${{ github.run_attempt }}.kubeconfig
-      CHARTS_REV: f18bb597e72d518b61a427b8e8ffd52cac1ab6b5
+      CHARTS_REV: e21369c295a3ab60a6a837e6ca7f52d5c82c7a34
       # Catalog versions must match the upstream-aligned OCI packages being published.
-      CATALOG_REV: f18bb597e72d518b61a427b8e8ffd52cac1ab6b5
+      CATALOG_REV: e21369c295a3ab60a6a837e6ca7f52d5c82c7a34
       TAG: ${{ inputs.image-tag }}
       TEST_USERNAME: admin
       TEST_PASSWORD: adminadmin
