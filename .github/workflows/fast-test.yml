@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: smokeythebandit/kubarr-charts
-          ref: 4a30cc0d5db3907f3d816ed5fc9a448522118069
+          ref: f18bb597e72d518b61a427b8e8ffd52cac1ab6b5
           path: acceptance-charts
           persist-credentials: false
 

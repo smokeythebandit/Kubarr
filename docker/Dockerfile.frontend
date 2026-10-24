@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Build stage
-FROM public.ecr.aws/docker/library/node:26-alpine AS builder
+FROM node:26-alpine AS builder
 
 WORKDIR /app
 
@@ -32,7 +32,7 @@ FROM builder AS built
 RUN pnpm run build
 
 # Production stage - minimal BusyBox httpd (~1MB total)
-FROM public.ecr.aws/docker/library/busybox:1.38
+FROM busybox:1.38
 
 WORKDIR /var/www
 
