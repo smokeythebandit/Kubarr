@@ -166,8 +166,12 @@ vpn_lab_assert_extra_env() {
     set -e
     mkdir -p "$output/media-manager" "$output/system" || exit 1
     cp -a "$chart" "$output/media-manager/sonarr" || exit 1
-    cp -a "$chart/../../system/kubarr-common" "$output/system/kubarr-common" || exit 1
-    helm dependency build --skip-refresh "$output/media-manager/sonarr" >/dev/null || exit 1
+    if [[ -d "$chart/../../system/kubarr-common" ]]; then
+      cp -a "$chart/../../system/kubarr-common" "$output/system/kubarr-common" || exit 1
+      helm dependency build --skip-refresh "$output/media-manager/sonarr" >/dev/null || exit 1
+    fi
+    # Detached acceptance variants already vendor their dependency archive;
+    # Helm validates it below without requiring the original source hierarchy.
     helm template vpn-preflight "$output/media-manager/sonarr" \
       --set vpn.enabled=true --set vpn.secretName=acceptance-preflight \
       --set 'vpn.extraEnv[0].name=KUBARR_ACCEPTANCE_EXTRA_ENV' \

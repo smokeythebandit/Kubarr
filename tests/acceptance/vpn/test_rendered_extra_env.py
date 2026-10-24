@@ -40,3 +40,15 @@ class RenderedExtraEnvTests(unittest.TestCase):
             result = self.check(chart)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("must render vpn.extraEnv exactly once", result.stderr)
+
+    def test_detached_variant_renders_its_vendored_dependency(self):
+        with tempfile.TemporaryDirectory(prefix="kubarr-vpn-variant-") as directory:
+            root = Path(directory)
+            chart = root / "source/media-manager/sonarr"
+            shutil.copytree(CHARTS / "media-manager/sonarr", chart)
+            shutil.copytree(CHARTS / "system/kubarr-common", root / "source/system/kubarr-common")
+            subprocess.run(["helm", "dependency", "build", "--skip-refresh", str(chart)], check=True, capture_output=True)
+            detached = root / "variants/chart-a"
+            shutil.copytree(chart, detached)
+            result = self.check(detached)
+            self.assertEqual(result.returncode, 0, result.stderr)
