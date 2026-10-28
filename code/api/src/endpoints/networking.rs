@@ -216,27 +216,32 @@ async fn get_network_topology(
     // to-endpoint and traffic leaving the pod at to-stack, which is the last
     // point where the source pod is still identifiable.
     let observed = {
-        use crate::endpoints::monitoring::query_vm_range;
+        use crate::endpoints::monitoring::query_vm_range_with_timeout;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_secs() as f64)
             .unwrap_or_default();
-        let mut rows = query_vm_range(
-            "sum by (source, destination) (rate(hubble_flows_processed_total{traffic_direction=\"egress\",subtype=\"to-endpoint\",verdict=\"FORWARDED\"}[1m]))",
-            now,
-            now,
-            "1m",
-        )
-        .await;
-        rows.extend(
-            query_vm_range(
+        // Concurrent, and on a short leash. Observed weights enrich the graph;
+        // when VictoriaMetrics is absent the graph must still render promptly
+        // from Service definitions rather than waiting out a default timeout.
+        let (endpoint_rows, stack_rows) = tokio::join!(
+            query_vm_range_with_timeout(
+                "sum by (source, destination) (rate(hubble_flows_processed_total{traffic_direction=\"egress\",subtype=\"to-endpoint\",verdict=\"FORWARDED\"}[1m]))",
+                now,
+                now,
+                "1m",
+                OPTIONAL_QUERY_TIMEOUT_SECONDS,
+            ),
+            query_vm_range_with_timeout(
                 "sum by (source, destination) (rate(hubble_flows_processed_total{traffic_direction=\"egress\",subtype=\"to-stack\",verdict=\"FORWARDED\"}[1m]))",
                 now,
                 now,
                 "1m",
+                OPTIONAL_QUERY_TIMEOUT_SECONDS,
             )
-            .await,
         );
+        let mut rows = endpoint_rows;
+        rows.extend(stack_rows);
         rows
     };
     let edges = merge_observed_edges(edges, &observed);
@@ -1176,8 +1181,7 @@ async fn get_flow_classes(
     Query(query): Query<FlowClassQuery>,
     _auth: Authorized<NetworkingView>,
 ) -> Result<impl IntoResponse> {
-    use crate::endpoints::monitoring::query_vm_range;
-
+    use crate::endpoints::monitoring::query_vm_range_with_timeout;
     let window = query.window.unwrap_or_else(|| "15m".to_string());
     let (span, step) = window_span_and_step(&window);
     let end = std::time::SystemTime::now()
@@ -1206,12 +1210,28 @@ async fn get_flow_classes(
         )
     };
 
-    let external_forwarded = query_vm_range(&external("FORWARDED"), end, end, &step).await;
-    let external_dropped = query_vm_range(&external("DROPPED"), end, end, &step).await;
-    let internal_forwarded = query_vm_range(&internal("FORWARDED"), end, end, &step).await;
-    let internal_dropped = query_vm_range(&internal("DROPPED"), end, end, &step).await;
-    let app_forwarded = query_vm_range(&per_app("FORWARDED"), end, end, &step).await;
-    let app_dropped = query_vm_range(&per_app("DROPPED"), end, end, &step).await;
+    let (q_ext_fwd, q_ext_drop) = (external("FORWARDED"), external("DROPPED"));
+    let (q_int_fwd, q_int_drop) = (internal("FORWARDED"), internal("DROPPED"));
+    let (q_app_fwd, q_app_drop) = (per_app("FORWARDED"), per_app("DROPPED"));
+
+    // Issued together rather than one after another: eight sequential round
+    // trips would make an unreachable VictoriaMetrics look like a hung request
+    // instead of an empty panel.
+    let (
+        external_forwarded,
+        external_dropped,
+        internal_forwarded,
+        internal_dropped,
+        app_forwarded,
+        app_dropped,
+    ) = tokio::join!(
+        query_vm_range_with_timeout(&q_ext_fwd, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_range_with_timeout(&q_ext_drop, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_range_with_timeout(&q_int_fwd, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_range_with_timeout(&q_int_drop, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_range_with_timeout(&q_app_fwd, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_range_with_timeout(&q_app_drop, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS)
+    );
 
     let mut totals = ClassTotals::default();
     absorb_totals(&mut totals, &external_forwarded, false);
@@ -1220,14 +1240,24 @@ async fn get_flow_classes(
     absorb_totals(&mut totals, &internal_dropped, true);
 
     let mut series = FlowSeries::default();
-    absorb_series(
-        &mut series,
-        &query_vm_range(&external("FORWARDED"), start, end, &step).await,
+    let (external_series, internal_series) = tokio::join!(
+        query_vm_range_with_timeout(
+            &q_ext_fwd,
+            start,
+            end,
+            &step,
+            OPTIONAL_QUERY_TIMEOUT_SECONDS
+        ),
+        query_vm_range_with_timeout(
+            &q_int_fwd,
+            start,
+            end,
+            &step,
+            OPTIONAL_QUERY_TIMEOUT_SECONDS
+        )
     );
-    absorb_series(
-        &mut series,
-        &query_vm_range(&internal("FORWARDED"), start, end, &step).await,
-    );
+    absorb_series(&mut series, &external_series);
+    absorb_series(&mut series, &internal_series);
 
     let stale = is_stale(&external_forwarded) && is_stale(&internal_forwarded);
 
@@ -1373,6 +1403,13 @@ mod flow_class_tests {
 /// Reuses the existing `external` node rather than introducing a second
 /// internet node, so the current page keeps rendering while sub-project B
 /// reworks it.
+/// How long an optional enrichment query may take.
+///
+/// These queries only add measured weights to responses that are useful
+/// without them, so a missing or slow VictoriaMetrics costs a panel rather
+/// than the whole request.
+const OPTIONAL_QUERY_TIMEOUT_SECONDS: u64 = 3;
+
 const INTERNET_NODE: &str = "external";
 const LAN_NODE: &str = "lan";
 const NODE_NODE: &str = "node";
@@ -1549,6 +1586,29 @@ mod topology_merge_tests {
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].flows_per_sec, Some(2.0));
+    }
+
+    #[tokio::test]
+    async fn an_absent_metrics_store_does_not_stall_the_response() {
+        // Regression guard. These queries only add measured weights to
+        // responses that are useful without them, so an unreachable
+        // VictoriaMetrics must cost a panel, not the request. Eight sequential
+        // queries at the default timeout once turned this into two minutes.
+        use crate::endpoints::monitoring::query_vm_range_with_timeout;
+
+        let started = std::time::Instant::now();
+        // 203.0.113.0/24 is TEST-NET-3: guaranteed not to answer.
+        let rows = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            query_vm_range_with_timeout("up", 0.0, 0.0, "1m", OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        )
+        .await;
+
+        assert!(rows.is_ok(), "query must give up on its own");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(9),
+            "an optional query must not hold the request open"
+        );
     }
 
     #[test]

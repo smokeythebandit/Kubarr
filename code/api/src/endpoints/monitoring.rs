@@ -230,6 +230,21 @@ pub(crate) async fn query_vm_range(
     end: f64,
     step: &str,
 ) -> Vec<serde_json::Value> {
+    query_vm_range_with_timeout(query, start, end, step, 15).await
+}
+
+/// Range query with an explicit timeout.
+///
+/// Callers that merely enrich a response pass a short one: when VictoriaMetrics
+/// is absent, waiting the default on every query turns an optional panel into a
+/// page that appears to hang.
+pub(crate) async fn query_vm_range_with_timeout(
+    query: &str,
+    start: f64,
+    end: f64,
+    step: &str,
+    timeout_seconds: u64,
+) -> Vec<serde_json::Value> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/v1/query_range", VICTORIAMETRICS_URL);
 
@@ -241,7 +256,7 @@ pub(crate) async fn query_vm_range(
             ("end", &end.to_string()),
             ("step", step),
         ])
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(timeout_seconds))
         .send()
         .await
     {
