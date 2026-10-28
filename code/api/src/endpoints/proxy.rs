@@ -42,8 +42,9 @@ async fn resolve_gateway_route(
         ));
     };
 
-    let user = auth.user();
-    if !check_app_permission(&state, user.id, &resolved.app_name).await {
+    // Authentication already resolved this user's permissions; the gateway
+    // asks for a route on every proxied request, so do not fetch them again.
+    if !auth.allows_app(&resolved.app_name) {
         return Err(AppError::Forbidden(format!(
             "No access to app: {}",
             resolved.app_name
@@ -75,8 +76,7 @@ async fn authorize_gateway_app_proxy(
     Path(app_name): Path<String>,
     auth: Authenticated,
 ) -> Result<impl IntoResponse> {
-    let user = auth.user();
-    if !check_app_permission(&state, user.id, &app_name).await {
+    if !auth.allows_app(&app_name) {
         return Err(AppError::Forbidden(format!(
             "No access to app: {}",
             app_name
@@ -226,20 +226,6 @@ fn strip_path_prefix(path: &str, prefix: &str) -> String {
     }
 }
 
-/// Check if user has permission to access the app
-async fn check_app_permission(state: &AppState, user_id: i64, app_name: &str) -> bool {
-    use crate::endpoints::extractors::get_user_permissions;
-
-    let db = match state.get_db().await {
-        Ok(db) => db,
-        Err(_) => return false,
-    };
-    let permissions = get_user_permissions(&db, user_id).await;
-
-    // Check for app.* wildcard or specific app.{name} permission
-    permissions.contains(&"app.*".to_string()) || permissions.contains(&format!("app.{}", app_name))
-}
-
 /// Get the upstream base URL for an app. The gateway appends the request path.
 async fn get_app_upstream_url(
     state: &AppState,
@@ -300,13 +286,12 @@ async fn get_app_upstream_url(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{role, role_permission, user, user_role};
     use crate::services::{
         audit::AuditService, catalog::AppCatalog, chart_sync::ChartSyncService,
         notification::NotificationService,
     };
     use crate::state::{SharedCatalog, SharedK8sClient};
-    use sea_orm::{ActiveModelTrait, Database, Set};
+    use sea_orm::Database;
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -333,147 +318,10 @@ mod tests {
         )
     }
 
-    // ── check_app_permission ─────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn check_app_permission_no_db_returns_false() {
-        // State with no DB → get_db() fails → returns false
-        let k8s: SharedK8sClient = Arc::new(RwLock::new(None));
-        let catalog: SharedCatalog = Arc::new(RwLock::new(AppCatalog::default()));
-        let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
-        let state = AppState::new(
-            None,
-            k8s,
-            catalog,
-            chart_sync,
-            AuditService::new(),
-            NotificationService::new(),
-        );
-        let result = check_app_permission(&state, 1, "myapp").await;
-        assert!(!result);
-    }
 
-    #[tokio::test]
-    async fn check_app_permission_no_permissions_returns_false() {
-        let db = make_test_db().await;
-        // Insert a user with no app permissions
-        let now = chrono::Utc::now();
-        let user_model = user::ActiveModel {
-            username: Set("noperm".to_string()),
-            email: Set("noperm@test.com".to_string()),
-            hashed_password: Set("hash".to_string()),
-            is_active: Set(true),
-            is_approved: Set(true),
-            totp_secret: Set(None),
-            totp_enabled: Set(false),
-            totp_verified_at: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        };
-        let inserted = user_model.insert(&db).await.unwrap();
-        let state = make_test_state(db).await;
-        let result = check_app_permission(&state, inserted.id, "myapp").await;
-        assert!(!result);
-    }
 
-    #[tokio::test]
-    async fn check_app_permission_wildcard_returns_true() {
-        let db = make_test_db().await;
-        let now = chrono::Utc::now();
 
-        // Create user
-        let user_model = user::ActiveModel {
-            username: Set("wildcard_user".to_string()),
-            email: Set("wc@test.com".to_string()),
-            hashed_password: Set("hash".to_string()),
-            is_active: Set(true),
-            is_approved: Set(true),
-            totp_secret: Set(None),
-            totp_enabled: Set(false),
-            totp_verified_at: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        };
-        let u = user_model.insert(&db).await.unwrap();
-
-        // Create role with app.* permission
-        let role_model = role::ActiveModel {
-            name: Set("app_admin".to_string()),
-            description: Set(None),
-            is_system: Set(false),
-            requires_2fa: Set(false),
-            created_at: Set(now),
-            ..Default::default()
-        };
-        let r = role_model.insert(&db).await.unwrap();
-
-        let perm = role_permission::ActiveModel {
-            role_id: Set(r.id),
-            permission: Set("app.*".to_string()),
-            ..Default::default()
-        };
-        perm.insert(&db).await.unwrap();
-
-        let ur = user_role::ActiveModel {
-            user_id: Set(u.id),
-            role_id: Set(r.id),
-        };
-        ur.insert(&db).await.unwrap();
-
-        let state = make_test_state(db).await;
-        assert!(check_app_permission(&state, u.id, "jellyfin").await);
-        assert!(check_app_permission(&state, u.id, "qbittorrent").await);
-    }
-
-    #[tokio::test]
-    async fn check_app_permission_specific_app_returns_true_for_that_app() {
-        let db = make_test_db().await;
-        let now = chrono::Utc::now();
-
-        let user_model = user::ActiveModel {
-            username: Set("specific_user".to_string()),
-            email: Set("sp@test.com".to_string()),
-            hashed_password: Set("hash".to_string()),
-            is_active: Set(true),
-            is_approved: Set(true),
-            totp_secret: Set(None),
-            totp_enabled: Set(false),
-            totp_verified_at: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        };
-        let u = user_model.insert(&db).await.unwrap();
-
-        let role_model = role::ActiveModel {
-            name: Set("jellyfin_role".to_string()),
-            description: Set(None),
-            is_system: Set(false),
-            requires_2fa: Set(false),
-            created_at: Set(now),
-            ..Default::default()
-        };
-        let r = role_model.insert(&db).await.unwrap();
-
-        let perm = role_permission::ActiveModel {
-            role_id: Set(r.id),
-            permission: Set("app.jellyfin".to_string()),
-            ..Default::default()
-        };
-        perm.insert(&db).await.unwrap();
-
-        let ur = user_role::ActiveModel {
-            user_id: Set(u.id),
-            role_id: Set(r.id),
-        };
-        ur.insert(&db).await.unwrap();
-
-        let state = make_test_state(db).await;
-        assert!(check_app_permission(&state, u.id, "jellyfin").await);
-        assert!(!check_app_permission(&state, u.id, "qbittorrent").await);
-    }
 
     // ── get_app_upstream_url ─────────────────────────────────────────────
 

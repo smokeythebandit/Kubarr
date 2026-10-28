@@ -178,7 +178,7 @@ where
 /// Use this when you just need to verify the user is authenticated
 /// but don't need a specific permission.
 #[derive(Debug, Clone)]
-pub struct Authenticated(pub user::Model);
+pub struct Authenticated(pub user::Model, pub Vec<String>);
 
 impl Authenticated {
     /// Get the authenticated user
@@ -189,6 +189,19 @@ impl Authenticated {
     /// Get the user ID
     pub fn user_id(&self) -> i64 {
         self.0.id
+    }
+
+    /// Permissions resolved while authenticating this request.
+    pub fn permissions(&self) -> &[String] {
+        &self.1
+    }
+
+    /// Whether these permissions grant access to an app's proxied endpoints.
+    pub fn allows_app(&self, app_name: &str) -> bool {
+        let specific = format!("app.{}", app_name);
+        self.1
+            .iter()
+            .any(|permission| permission == "app.*" || *permission == specific)
     }
 }
 
@@ -204,7 +217,10 @@ where
             .get::<AuthenticatedUser>()
             .ok_or_else(|| AppError::Unauthorized("Authentication required".to_string()))?;
 
-        Ok(Authenticated(auth_user.user.clone()))
+        Ok(Authenticated(
+            auth_user.user.clone(),
+            auth_user.permissions.clone(),
+        ))
     }
 }
 
@@ -268,9 +284,30 @@ mod tests {
     #[test]
     fn test_authenticated_user_accessors() {
         let user = fake_user(7, "viewer");
-        let auth = Authenticated(user.clone());
+        let auth = Authenticated(user.clone(), Vec::new());
         assert_eq!(auth.user_id(), 7);
         assert_eq!(auth.user().username, "viewer");
+    }
+
+    #[test]
+    fn authenticated_carries_its_permissions_so_handlers_need_no_second_lookup() {
+        // Authentication already resolved these. The gateway asks about app
+        // access on every proxied request, so re-querying them is pure waste.
+        let user = fake_user(7, "viewer");
+        let wildcard = Authenticated(user.clone(), vec!["app.*".to_string()]);
+        assert!(wildcard.allows_app("sonarr"));
+        assert!(wildcard.allows_app("anything"));
+
+        let specific = Authenticated(
+            user.clone(),
+            vec!["app.jellyfin".to_string(), "users.view".to_string()],
+        );
+        assert_eq!(specific.permissions(), ["app.jellyfin", "users.view"]);
+        assert!(specific.allows_app("jellyfin"));
+        assert!(!specific.allows_app("qbittorrent"));
+
+        let none = Authenticated(user, vec!["users.view".to_string()]);
+        assert!(!none.allows_app("jellyfin"));
     }
 
     #[test]

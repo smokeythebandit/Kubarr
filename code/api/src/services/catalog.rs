@@ -585,14 +585,16 @@ impl AppCatalog {
             .map(|h| h.to_lowercase() == "true")
             .unwrap_or(false);
 
-        // Apps are browseable by default unless explicitly set to false
+        // Applications are browseable unless explicitly set to false. A system
+        // component serves infrastructure, not a browser, so it has to declare a
+        // web UI rather than inherit one by omission.
         let is_browseable = annotations
             .get(serde_yaml::Value::String(
                 "kubarr.io/browseable".to_string(),
             ))
             .and_then(|b| b.as_str())
             .map(|b| b.to_lowercase() != "false")
-            .unwrap_or(true);
+            .unwrap_or(!is_system);
 
         let description = chart
             .get("description")
@@ -1037,6 +1039,66 @@ annotations:
         assert!(app.is_system);
         assert!(app.is_hidden);
         assert!(!app.is_browseable);
+    }
+
+    #[test]
+    fn system_chart_without_a_browseable_annotation_is_not_openable() {
+        // A system component has no web UI unless it says so. Defaulting to
+        // browseable put an "open" tile on the dashboard for Fluent Bit and
+        // PostgreSQL, which serve nothing a browser can use.
+        for (name, annotations, browseable) in [
+            ("silent", "", false),
+            ("declared", "\n  kubarr.io/browseable: \"true\"", true),
+            ("refused", "\n  kubarr.io/browseable: \"false\"", false),
+        ] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let chart_dir = tmp.path().join(name);
+            std::fs::create_dir_all(&chart_dir).expect("mkdir");
+            write_file(
+                &chart_dir.join("Chart.yaml"),
+                &format!(
+                    r#"apiVersion: v2
+name: {name}
+description: System component
+annotations:
+  kubarr.io/category: "system"
+  kubarr.io/system: "true"{annotations}
+"#
+                ),
+            );
+
+            let catalog = AppCatalog::with_apps(HashMap::new());
+            let app = catalog
+                .parse_chart(name, &chart_dir)
+                .expect("parse")
+                .expect("parsed ok");
+            assert!(app.is_system, "{name}");
+            assert_eq!(app.is_browseable, browseable, "{name}");
+        }
+    }
+
+    #[test]
+    fn application_charts_stay_browseable_without_an_annotation() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let chart_dir = tmp.path().join("app");
+        std::fs::create_dir_all(&chart_dir).expect("mkdir");
+        write_file(
+            &chart_dir.join("Chart.yaml"),
+            r#"apiVersion: v2
+name: app
+description: Ordinary application
+annotations:
+  kubarr.io/category: "media"
+"#,
+        );
+
+        let catalog = AppCatalog::with_apps(HashMap::new());
+        let app = catalog
+            .parse_chart("app", &chart_dir)
+            .expect("parse")
+            .expect("parsed ok");
+        assert!(!app.is_system);
+        assert!(app.is_browseable);
     }
 
     // -------------------------------------------------------------------------
