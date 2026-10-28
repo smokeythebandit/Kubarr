@@ -71,13 +71,17 @@ async fn postgres_pod_cache_is_unlogged_and_upserts() {
         .await
         .expect("upsert");
     pod_cache::touch_heartbeat(&db).await.expect("heartbeat");
-    pod_cache::touch_heartbeat(&db).await.expect("heartbeat upsert");
+    pod_cache::touch_heartbeat(&db)
+        .await
+        .expect("heartbeat upsert");
 
     let fresh =
         pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30)).await;
     assert_eq!(fresh["sonarr"].len(), 2);
 
-    pod_cache::invalidate(&db, "sonarr").await.expect("invalidate");
+    pod_cache::invalidate(&db, "sonarr")
+        .await
+        .expect("invalidate");
     let after =
         pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30)).await;
     assert!(!after.contains_key("sonarr"));

@@ -115,7 +115,8 @@ for (const mode of ['path', 'subdomain', 'exact_host'] as const) {
       is_system: false, is_hidden: false, is_browseable: true,
     };
     api.get('/api/apps/catalog', [app]);
-    api.on('GET', '/api/apps/catalog/radarr/icon', () => ({ status: 404, json: { detail: 'No fixture icon' } }));
+    api.get('/api/apps/catalog/icons', {});
+  api.on('GET', '/api/apps/catalog/radarr/icon', () => ({ status: 404, json: { detail: 'No fixture icon' } }));
     api.get('/api/domains', [domain]);
     let assignments: AppDomainAssignment[] = [];
     api.on('GET', '/api/domains/assignments', () => ({ json: assignments }));

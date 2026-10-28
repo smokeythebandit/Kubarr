@@ -1,8 +1,8 @@
 //! The pod status cache is a disposable mirror of what the worker's Kubernetes
 //! watch has seen. Every test here pins one half of that contract: what a
 //! reader gets when the mirror is trustworthy, and what it gets when it isn't.
-use kubarr::services::pod_cache::{self, CachedPod};
 use kubarr::services::k8s::PodStatus;
+use kubarr::services::pod_cache::{self, CachedPod};
 use std::time::Duration;
 
 async fn db() -> sea_orm::DatabaseConnection {
@@ -39,8 +39,8 @@ async fn returns_stored_pods_for_a_fresh_stream() {
         .expect("store");
     pod_cache::touch_heartbeat(&db).await.expect("heartbeat");
 
-    let fresh = pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30))
-        .await;
+    let fresh =
+        pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30)).await;
 
     assert_eq!(fresh.get("sonarr").map(|p| p.len()), Some(1));
     assert_eq!(fresh["sonarr"][0].name, "sonarr-0");
@@ -61,8 +61,8 @@ async fn recomputes_age_so_it_does_not_freeze_between_events() {
     .expect("store");
     pod_cache::touch_heartbeat(&db).await.expect("heartbeat");
 
-    let fresh = pod_cache::fresh_namespaces(&db, &["radarr".to_string()], Duration::from_secs(30))
-        .await;
+    let fresh =
+        pod_cache::fresh_namespaces(&db, &["radarr".to_string()], Duration::from_secs(30)).await;
 
     assert_eq!(fresh["radarr"][0].age, "2h");
 }
@@ -79,8 +79,8 @@ async fn reports_nothing_when_the_watch_has_gone_quiet() {
         .await
         .expect("heartbeat");
 
-    let fresh = pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30))
-        .await;
+    let fresh =
+        pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30)).await;
 
     assert!(fresh.is_empty(), "stale stream must force a live read");
 }
@@ -89,8 +89,8 @@ async fn reports_nothing_when_the_watch_has_gone_quiet() {
 async fn reports_nothing_before_the_watch_has_ever_synced() {
     let db = db().await;
 
-    let fresh = pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30))
-        .await;
+    let fresh =
+        pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30)).await;
 
     assert!(fresh.is_empty());
 }
@@ -123,11 +123,13 @@ async fn an_emptied_namespace_reads_as_empty_not_missing() {
         .await
         .expect("store");
     // The app was uninstalled: the watch saw the last pod go and recorded that.
-    pod_cache::store_namespace(&db, "sonarr", &[]).await.expect("store");
+    pod_cache::store_namespace(&db, "sonarr", &[])
+        .await
+        .expect("store");
     pod_cache::touch_heartbeat(&db).await.expect("heartbeat");
 
-    let fresh = pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30))
-        .await;
+    let fresh =
+        pod_cache::fresh_namespaces(&db, &["sonarr".to_string()], Duration::from_secs(30)).await;
 
     assert_eq!(fresh.get("sonarr").map(|p| p.len()), Some(0));
 }

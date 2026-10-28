@@ -197,9 +197,7 @@ async fn get_app_from_catalog(
 /// Blocking file reads belong on the blocking pool: a dashboard asks for
 /// twenty-nine icons at once, and on a CPU-limited runtime those reads
 /// otherwise occupy threads that should be serving other requests.
-async fn read_icon_bundle(
-    dir: &std::path::Path,
-) -> std::collections::BTreeMap<String, String> {
+async fn read_icon_bundle(dir: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut bundle = std::collections::BTreeMap::new();
@@ -941,7 +939,9 @@ mod tests {
         let empty = tempfile::tempdir().expect("tmpdir");
         assert!(read_icon_bundle(empty.path()).await.is_empty());
         // A missing directory must not panic a request thread.
-        assert!(read_icon_bundle(&empty.path().join("absent")).await.is_empty());
+        assert!(read_icon_bundle(&empty.path().join("absent"))
+            .await
+            .is_empty());
     }
 
     #[test]

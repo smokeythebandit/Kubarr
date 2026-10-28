@@ -326,13 +326,14 @@ async fn swagger_ui() -> Html<&'static str> {
 /// A short private cache window for read-only responses. The dashboard
 /// re-renders the same panels far faster than this data changes, and without
 /// a window every repaint is a fresh round trip.
-pub fn short_cache(
-    seconds: u32,
-) -> (axum::http::header::HeaderName, axum::http::HeaderValue) {
+pub fn short_cache(seconds: u32) -> (axum::http::header::HeaderName, axum::http::HeaderValue) {
     let value = format!("private, max-age={seconds}, stale-while-revalidate=30");
     (
         axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_str(&value).expect("ascii cache-control"),
+        // The value is ASCII by construction, so the fallback is unreachable;
+        // declining to cache is the safe way to say so without panicking.
+        axum::http::HeaderValue::from_str(&value)
+            .unwrap_or(axum::http::HeaderValue::from_static("no-cache")),
     )
 }
 

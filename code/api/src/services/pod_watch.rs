@@ -84,7 +84,10 @@ impl PodWatchState {
                 let name = pod.metadata.name.clone().unwrap_or_default();
                 // The namespace entry stays behind as an empty set so readers
                 // can tell "no pods" from "never observed".
-                self.observed.entry(namespace.clone()).or_default().remove(&name);
+                self.observed
+                    .entry(namespace.clone())
+                    .or_default()
+                    .remove(&name);
                 vec![namespace]
             }
         }
@@ -230,7 +233,9 @@ mod tests {
         state.apply(Event::Apply(pod("sonarr-0", "sonarr")));
 
         assert!(state.apply(Event::Init).is_empty());
-        assert!(state.apply(Event::InitApply(pod("sonarr-0", "sonarr"))).is_empty());
+        assert!(state
+            .apply(Event::InitApply(pod("sonarr-0", "sonarr")))
+            .is_empty());
 
         // Mid-relist the old view still stands; nothing has been written yet.
         assert_eq!(state.namespace("sonarr").len(), 1);
@@ -258,12 +263,16 @@ mod tests {
     fn captures_the_creation_time_needed_to_age_a_pod() {
         let mut state = PodWatchState::new();
         let mut started = pod("sonarr-0", "sonarr");
-        started.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-            jiff::Timestamp::from_second(1_700_000_000).expect("timestamp"),
-        ));
+        started.metadata.creation_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                jiff::Timestamp::from_second(1_700_000_000).expect("timestamp"),
+            ));
 
         state.apply(Event::Apply(started));
 
-        assert_eq!(state.namespace("sonarr")[0].created_unix, Some(1_700_000_000));
+        assert_eq!(
+            state.namespace("sonarr")[0].created_unix,
+            Some(1_700_000_000)
+        );
     }
 }

@@ -135,6 +135,9 @@ test('assigns an installed app with a kill switch override and removes the assig
   let configs: AppVpnConfig[] = [];
   api.get('/api/vpn/providers', { providers: [provider] });
   api.get('/api/apps/installed', ['radarr']);
+  api.get('/api/apps/catalog/icons', {});
+  // Pod status for every installed app now arrives in one batched request.
+  api.get('/api/monitoring/pods?namespaces=radarr', []);
   api.on('GET', '/api/apps/catalog/radarr/icon', () => ({ status: 404, json: { detail: 'No fixture icon' } }));
   api.on('GET', '/api/vpn/apps', () => ({ json: { configs } }));
   api.on('PUT', '/api/vpn/apps/radarr', request => {

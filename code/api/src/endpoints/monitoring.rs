@@ -1,6 +1,6 @@
 use axum::{
-    response::IntoResponse,
     extract::{Path, Query, State},
+    response::IntoResponse,
     routing::get,
     Json, Router,
 };
@@ -1242,7 +1242,9 @@ async fn pods_for(
     use crate::services::{pod_cache, pod_watch};
 
     let mut cached = match db {
-        Some(db) => pod_cache::fresh_namespaces(db, namespaces, pod_watch::MAX_STREAM_SILENCE).await,
+        Some(db) => {
+            pod_cache::fresh_namespaces(db, namespaces, pod_watch::MAX_STREAM_SILENCE).await
+        }
         None => std::collections::HashMap::new(),
     };
 
@@ -1257,7 +1259,12 @@ async fn pods_for(
             // One unreadable namespace must not blank the whole response.
             None => {
                 if let Some(client) = client {
-                    pods.extend(client.get_pod_status(namespace, app).await.unwrap_or_default());
+                    pods.extend(
+                        client
+                            .get_pod_status(namespace, app)
+                            .await
+                            .unwrap_or_default(),
+                    );
                 }
             }
         }
@@ -1455,7 +1462,10 @@ mod tests {
 
     #[test]
     fn pod_query_accepts_one_namespace_or_many() {
-        assert_eq!(query(Some("sonarr"), None).requested_namespaces(), ["sonarr"]);
+        assert_eq!(
+            query(Some("sonarr"), None).requested_namespaces(),
+            ["sonarr"]
+        );
         // One dashboard load watches a dozen namespaces; it should ask once.
         assert_eq!(
             query(None, Some("sonarr,radarr,jackett")).requested_namespaces(),
@@ -1467,7 +1477,10 @@ mod tests {
             ["sonarr", "radarr"]
         );
         assert_eq!(query(None, None).requested_namespaces(), ["media"]);
-        assert_eq!(query(Some("sonarr"), Some("")).requested_namespaces(), ["sonarr"]);
+        assert_eq!(
+            query(Some("sonarr"), Some("")).requested_namespaces(),
+            ["sonarr"]
+        );
     }
 
     fn sample(metric_value: &str, ts: f64, node: &str, instance: &str) -> serde_json::Value {
