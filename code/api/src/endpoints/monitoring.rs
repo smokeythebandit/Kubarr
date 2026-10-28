@@ -15,7 +15,8 @@ use crate::services::k8s::{PodMetrics, PodStatus, ServiceEndpoint};
 use crate::state::AppState;
 
 /// VictoriaMetrics URL (inside cluster)
-const VICTORIAMETRICS_URL: &str = "http://victoriametrics.victoriametrics.svc.cluster.local:8428";
+pub(crate) const VICTORIAMETRICS_URL: &str =
+    "http://victoriametrics.victoriametrics.svc.cluster.local:8428";
 
 /// Create monitoring routes
 pub fn monitoring_routes(state: AppState) -> Router {
@@ -223,7 +224,12 @@ async fn query_vm(query: &str) -> Vec<serde_json::Value> {
     }
 }
 
-async fn query_vm_range(query: &str, start: f64, end: f64, step: &str) -> Vec<serde_json::Value> {
+pub(crate) async fn query_vm_range(
+    query: &str,
+    start: f64,
+    end: f64,
+    step: &str,
+) -> Vec<serde_json::Value> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/v1/query_range", VICTORIAMETRICS_URL);
 

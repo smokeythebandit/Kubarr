@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod chart_sync;
 pub mod deployment;
 pub mod domain_reconciler;
+pub mod flow_classes;
 pub mod gpu;
 pub mod install_options;
 pub mod k8s;

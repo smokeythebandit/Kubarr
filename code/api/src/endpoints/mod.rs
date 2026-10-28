@@ -114,6 +114,7 @@ use crate::state::AppState;
         // Networking
         networking::get_network_topology,
         networking::get_network_stats,
+        networking::get_flow_classes,
         // Logs
         logs::get_pod_logs,
         logs::get_app_logs,

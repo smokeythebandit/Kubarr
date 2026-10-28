@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
     response::IntoResponse,
     routing::get,
@@ -22,6 +22,7 @@ pub fn networking_routes(state: AppState) -> Router {
     Router::new()
         .route("/topology", get(get_network_topology))
         .route("/stats", get(get_network_stats))
+        .route("/flow-classes", get(get_flow_classes))
         .route("/ws", get(ws_handler))
         .with_state(state)
 }
@@ -841,5 +842,421 @@ mod tests {
         let json = serde_json::to_string(&s).expect("ser");
         assert!(json.contains("\"namespace\":\"media\""));
         assert!(json.contains("\"app_name\":\"sonarr\""));
+    }
+}
+
+// ============================================================================
+// Flow classes
+//
+// Hubble's flow metrics label each event with its destination, which is a bare
+// namespace for cluster traffic and identity labels otherwise. That is what
+// makes internet, LAN and in-cluster traffic separable; see
+// docs/superpowers/specs/2026-10-28-network-flow-classification-design.md.
+// ============================================================================
+
+use crate::services::flow_classes::{classify_destination, FlowClass};
+
+/// Flow-event rates for one destination class.
+#[derive(Debug, Default, Clone, Serialize, utoipa::ToSchema)]
+pub struct ClassRates {
+    pub flows_per_sec: f64,
+    pub drops_per_sec: f64,
+}
+
+#[derive(Debug, Default, Clone, Serialize, utoipa::ToSchema)]
+pub struct ClassTotals {
+    pub internet: ClassRates,
+    pub lan: ClassRates,
+    pub cluster: ClassRates,
+}
+
+#[derive(Debug, Default, Clone, Serialize, utoipa::ToSchema)]
+pub struct AppClassRates {
+    pub app: String,
+    pub internet: ClassRates,
+    pub lan: ClassRates,
+    pub cluster: ClassRates,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct FlowSeriesPoint {
+    pub t: i64,
+    pub flows_per_sec: f64,
+}
+
+#[derive(Debug, Default, Clone, Serialize, utoipa::ToSchema)]
+pub struct FlowSeries {
+    pub internet: Vec<FlowSeriesPoint>,
+    pub lan: Vec<FlowSeriesPoint>,
+    pub cluster: Vec<FlowSeriesPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct FlowClassResponse {
+    pub observed_at: i64,
+    /// True when Hubble reports no series at all. The UI must say the data is
+    /// unavailable rather than drawing a convincing zero.
+    pub stale: bool,
+    pub totals: ClassTotals,
+    pub by_app: Vec<AppClassRates>,
+    pub series: FlowSeries,
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct FlowClassQuery {
+    pub window: Option<String>,
+}
+
+/// Span in seconds and a step giving roughly sixty points.
+fn window_span_and_step(window: &str) -> (i64, String) {
+    match window {
+        "1h" => (60 * 60, "1m".to_string()),
+        "6h" => (6 * 60 * 60, "6m".to_string()),
+        "24h" => (24 * 60 * 60, "24m".to_string()),
+        _ => (15 * 60, "15s".to_string()),
+    }
+}
+
+fn metric_label(entry: &serde_json::Value, name: &str) -> String {
+    entry
+        .get("metric")
+        .and_then(|metric| metric.get(name))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn sample_value(entry: &serde_json::Value) -> Option<f64> {
+    entry
+        .get("value")
+        .and_then(|value| value.as_array())
+        .and_then(|pair| pair.get(1))
+        .and_then(|raw| raw.as_str())
+        .and_then(|text| text.parse::<f64>().ok())
+}
+
+fn rates_for(totals: &mut ClassTotals, class: FlowClass) -> &mut ClassRates {
+    match class {
+        FlowClass::Internet => &mut totals.internet,
+        FlowClass::Lan => &mut totals.lan,
+        FlowClass::Cluster => &mut totals.cluster,
+    }
+}
+
+/// Add VictoriaMetrics rows into class totals.
+///
+/// Values accumulate rather than overwrite: every namespace is its own
+/// destination label, so one class is the sum of many rows.
+fn absorb_totals(totals: &mut ClassTotals, rows: &[serde_json::Value], drops: bool) {
+    for row in rows {
+        let Some(class) = classify_destination(&metric_label(row, "destination")) else {
+            continue;
+        };
+        // A malformed sample is skipped, never read as zero.
+        let Some(value) = sample_value(row) else {
+            continue;
+        };
+        let rates = rates_for(totals, class);
+        if drops {
+            rates.drops_per_sec += value;
+        } else {
+            rates.flows_per_sec += value;
+        }
+    }
+}
+
+/// Group per-source rows by app and class.
+///
+/// An empty source is the host: LAN traffic is kubelet NFS activity rather than
+/// anything an app did.
+fn apps_from_vm(
+    forwarded: &[serde_json::Value],
+    dropped: &[serde_json::Value],
+) -> Vec<AppClassRates> {
+    use std::collections::BTreeMap;
+
+    let mut by_app: BTreeMap<String, ClassTotals> = BTreeMap::new();
+    for (rows, drops) in [(forwarded, false), (dropped, true)] {
+        for row in rows {
+            let Some(class) = classify_destination(&metric_label(row, "destination")) else {
+                continue;
+            };
+            let Some(value) = sample_value(row) else {
+                continue;
+            };
+            let source = metric_label(row, "source");
+            let app = if source.is_empty() {
+                "host".to_string()
+            } else {
+                source
+            };
+            let totals = by_app.entry(app).or_default();
+            let rates = rates_for(totals, class);
+            if drops {
+                rates.drops_per_sec += value;
+            } else {
+                rates.flows_per_sec += value;
+            }
+        }
+    }
+
+    by_app
+        .into_iter()
+        .map(|(app, totals)| AppClassRates {
+            app,
+            internet: totals.internet,
+            lan: totals.lan,
+            cluster: totals.cluster,
+        })
+        .collect()
+}
+
+/// Hubble reporting no series at all means the pipeline is not working.
+fn is_stale(rows: &[serde_json::Value]) -> bool {
+    rows.is_empty()
+}
+
+/// Sum range-query rows per class and timestamp.
+fn absorb_series(series: &mut FlowSeries, rows: &[serde_json::Value]) {
+    use std::collections::BTreeMap;
+
+    let mut per_class: BTreeMap<&'static str, BTreeMap<i64, f64>> = BTreeMap::new();
+    for row in rows {
+        let Some(class) = classify_destination(&metric_label(row, "destination")) else {
+            continue;
+        };
+        let key = match class {
+            FlowClass::Internet => "internet",
+            FlowClass::Lan => "lan",
+            FlowClass::Cluster => "cluster",
+        };
+        let Some(values) = row.get("values").and_then(|values| values.as_array()) else {
+            continue;
+        };
+        let bucket = per_class.entry(key).or_default();
+        for pair in values {
+            let Some(pair) = pair.as_array() else {
+                continue;
+            };
+            let Some(t) = pair.first().and_then(|t| t.as_f64()) else {
+                continue;
+            };
+            let Some(value) = pair
+                .get(1)
+                .and_then(|raw| raw.as_str())
+                .and_then(|text| text.parse::<f64>().ok())
+            else {
+                continue;
+            };
+            *bucket.entry(t as i64).or_insert(0.0) += value;
+        }
+    }
+
+    for (key, points) in per_class {
+        let points: Vec<FlowSeriesPoint> = points
+            .into_iter()
+            .map(|(t, flows_per_sec)| FlowSeriesPoint { t, flows_per_sec })
+            .collect();
+        match key {
+            "internet" => series.internet = points,
+            "lan" => series.lan = points,
+            "cluster" => series.cluster = points,
+            _ => {}
+        }
+    }
+}
+
+/// Flow-event rates by destination class
+#[utoipa::path(
+    get,
+    path = "/api/networking/flow-classes",
+    tag = "Networking",
+    params(FlowClassQuery),
+    responses((status = 200, body = FlowClassResponse))
+)]
+async fn get_flow_classes(
+    Query(query): Query<FlowClassQuery>,
+    _auth: Authorized<NetworkingView>,
+) -> Result<impl IntoResponse> {
+    use crate::endpoints::monitoring::query_vm_range;
+
+    let window = query.window.unwrap_or_else(|| "15m".to_string());
+    let (span, step) = window_span_and_step(&window);
+    let end = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as f64)
+        .unwrap_or_default();
+    let start = end - span as f64;
+
+    // Trace points are not interchangeable. External classes are counted at
+    // to-network, where internet and LAN are measured identically; cluster
+    // traffic at to-endpoint; and per-app attribution at to-stack, the last
+    // point before masquerading erases the pod identity.
+    let external = |verdict: &str| {
+        format!(
+            "sum by (destination) (rate(hubble_flows_processed_total{{traffic_direction=\"egress\",subtype=\"to-network\",verdict=\"{verdict}\"}}[1m]))"
+        )
+    };
+    let internal = |verdict: &str| {
+        format!(
+            "sum by (destination) (rate(hubble_flows_processed_total{{traffic_direction=\"egress\",subtype=\"to-endpoint\",verdict=\"{verdict}\"}}[1m]))"
+        )
+    };
+    let per_app = |verdict: &str| {
+        format!(
+            "sum by (source, destination) (rate(hubble_flows_processed_total{{traffic_direction=\"egress\",subtype=\"to-stack\",verdict=\"{verdict}\"}}[1m]))"
+        )
+    };
+
+    let external_forwarded = query_vm_range(&external("FORWARDED"), end, end, &step).await;
+    let external_dropped = query_vm_range(&external("DROPPED"), end, end, &step).await;
+    let internal_forwarded = query_vm_range(&internal("FORWARDED"), end, end, &step).await;
+    let internal_dropped = query_vm_range(&internal("DROPPED"), end, end, &step).await;
+    let app_forwarded = query_vm_range(&per_app("FORWARDED"), end, end, &step).await;
+    let app_dropped = query_vm_range(&per_app("DROPPED"), end, end, &step).await;
+
+    let mut totals = ClassTotals::default();
+    absorb_totals(&mut totals, &external_forwarded, false);
+    absorb_totals(&mut totals, &external_dropped, true);
+    absorb_totals(&mut totals, &internal_forwarded, false);
+    absorb_totals(&mut totals, &internal_dropped, true);
+
+    let mut series = FlowSeries::default();
+    absorb_series(
+        &mut series,
+        &query_vm_range(&external("FORWARDED"), start, end, &step).await,
+    );
+    absorb_series(
+        &mut series,
+        &query_vm_range(&internal("FORWARDED"), start, end, &step).await,
+    );
+
+    let stale = is_stale(&external_forwarded) && is_stale(&internal_forwarded);
+
+    Ok((
+        [crate::endpoints::short_cache(10)],
+        Json(FlowClassResponse {
+            observed_at: end as i64,
+            stale,
+            totals,
+            by_app: apps_from_vm(&app_forwarded, &app_dropped),
+            series,
+        }),
+    ))
+}
+
+#[cfg(test)]
+mod flow_class_tests {
+    use super::*;
+
+    #[test]
+    fn windows_map_to_a_span_and_about_sixty_points() {
+        assert_eq!(window_span_and_step("15m"), (15 * 60, "15s".to_string()));
+        assert_eq!(window_span_and_step("1h"), (60 * 60, "1m".to_string()));
+        assert_eq!(window_span_and_step("6h"), (6 * 60 * 60, "6m".to_string()));
+        assert_eq!(
+            window_span_and_step("24h"),
+            (24 * 60 * 60, "24m".to_string())
+        );
+        assert_eq!(
+            window_span_and_step("garbage"),
+            (15 * 60, "15s".to_string())
+        );
+    }
+
+    #[test]
+    fn folds_victoriametrics_rows_into_class_totals() {
+        let rows = serde_json::json!([
+            { "metric": { "destination": "reserved:world" }, "value": [1.0, "4.133"] },
+            { "metric": { "destination": "cidr:192.168.1.0/24,reserved:world" }, "value": [1.0, "5.083"] }
+        ]);
+        let mut totals = ClassTotals::default();
+        absorb_totals(&mut totals, rows.as_array().expect("array"), false);
+
+        assert_eq!(totals.internet.flows_per_sec, 4.133);
+        assert_eq!(totals.lan.flows_per_sec, 5.083);
+        assert_eq!(totals.cluster.flows_per_sec, 0.0);
+    }
+
+    #[test]
+    fn several_cluster_destinations_add_up_into_one_class() {
+        // Every namespace is its own destination label, so cluster totals are a
+        // sum rather than a single row.
+        let rows = serde_json::json!([
+            { "metric": { "destination": "victoriametrics" }, "value": [1.0, "13.625"] },
+            { "metric": { "destination": "kubarr-backend" }, "value": [1.0, "10.9"] }
+        ]);
+        let mut totals = ClassTotals::default();
+        absorb_totals(&mut totals, rows.as_array().expect("array"), false);
+
+        assert_eq!(totals.cluster.flows_per_sec, 24.525);
+    }
+
+    #[test]
+    fn drops_land_in_their_own_field() {
+        let rows = serde_json::json!([
+            { "metric": { "destination": "reserved:world" }, "value": [1.0, "0.2"] }
+        ]);
+        let mut totals = ClassTotals::default();
+        absorb_totals(&mut totals, rows.as_array().expect("array"), true);
+
+        assert_eq!(totals.internet.drops_per_sec, 0.2);
+        assert_eq!(totals.internet.flows_per_sec, 0.0);
+    }
+
+    #[test]
+    fn per_app_rows_group_by_source_and_class() {
+        let rows = serde_json::json!([
+            { "metric": { "source": "qbittorrent", "destination": "reserved:world" }, "value": [1.0, "10.99"] },
+            { "metric": { "source": "", "destination": "cidr:192.168.1.0/24,reserved:world" }, "value": [1.0, "4.692"] }
+        ]);
+
+        let apps = apps_from_vm(rows.as_array().expect("array"), &[]);
+
+        let qb = apps
+            .iter()
+            .find(|a| a.app == "qbittorrent")
+            .expect("qbittorrent");
+        assert_eq!(qb.internet.flows_per_sec, 10.99);
+        // An empty source is the host: LAN traffic is kubelet NFS, not an app.
+        let host = apps.iter().find(|a| a.app == "host").expect("host");
+        assert_eq!(host.lan.flows_per_sec, 4.692);
+    }
+
+    #[test]
+    fn no_series_means_stale_rather_than_zero() {
+        assert!(is_stale(&[]));
+        let present = serde_json::json!([{ "metric": {}, "value": [1.0, "1"] }]);
+        assert!(!is_stale(present.as_array().expect("array")));
+    }
+
+    #[test]
+    fn malformed_samples_are_skipped_not_read_as_zero() {
+        let rows = serde_json::json!([
+            { "metric": { "destination": "reserved:world" }, "value": [1.0, "NaN-ish"] },
+            { "metric": { "destination": "cidr:10.0.0.0/8,reserved:world" }, "value": [1.0, "2.5"] }
+        ]);
+        let mut totals = ClassTotals::default();
+        absorb_totals(&mut totals, rows.as_array().expect("array"), false);
+
+        assert_eq!(totals.internet.flows_per_sec, 0.0);
+        assert_eq!(totals.lan.flows_per_sec, 2.5);
+    }
+
+    #[test]
+    fn series_rows_sum_per_class_and_timestamp() {
+        let rows = serde_json::json!([
+            { "metric": { "destination": "victoriametrics" },
+              "values": [[100.0, "2.0"], [160.0, "3.0"]] },
+            { "metric": { "destination": "kubarr-backend" },
+              "values": [[100.0, "1.0"], [160.0, "1.5"]] }
+        ]);
+        let mut series = FlowSeries::default();
+        absorb_series(&mut series, rows.as_array().expect("array"));
+
+        assert_eq!(series.cluster.len(), 2);
+        assert_eq!(series.cluster[0].t, 100);
+        assert_eq!(series.cluster[0].flows_per_sec, 3.0);
+        assert_eq!(series.cluster[1].flows_per_sec, 4.5);
     }
 }
