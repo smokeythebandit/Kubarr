@@ -139,7 +139,32 @@ pub struct AppHealth {
 #[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct PodQuery {
     pub namespace: Option<String>,
+    /// Comma-separated namespaces, so one dashboard load is one request
+    /// instead of one request per namespace.
+    pub namespaces: Option<String>,
     pub app: Option<String>,
+}
+
+impl PodQuery {
+    /// Namespaces this query asks about, falling back to the single-namespace
+    /// form and finally to the historical default.
+    pub fn requested_namespaces(&self) -> Vec<String> {
+        if let Some(list) = self.namespaces.as_deref() {
+            let names: Vec<String> = list
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(ToString::to_string)
+                .collect();
+            if !names.is_empty() {
+                return names;
+            }
+        }
+        vec![self
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "media".to_string())]
+    }
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
@@ -1170,16 +1195,20 @@ async fn get_pods(
     Query(query): Query<PodQuery>,
     _auth: Authorized<MonitoringView>,
 ) -> Result<impl IntoResponse> {
-    let namespace = query.namespace.unwrap_or_else(|| "media".to_string());
+    let namespaces = query.requested_namespaces();
 
-    let pods = if let Some(client) = state.k8s_client.read().await.as_ref() {
-        client
-            .get_pod_status(&namespace, query.app.as_deref())
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let mut pods: Vec<PodStatus> = Vec::new();
+    if let Some(client) = state.k8s_client.read().await.as_ref() {
+        for namespace in &namespaces {
+            // One unreadable namespace must not blank the whole response.
+            pods.extend(
+                client
+                    .get_pod_status(namespace, query.app.as_deref())
+                    .await
+                    .unwrap_or_default(),
+            );
+        }
+    }
 
     Ok(([crate::endpoints::short_cache(5)], Json(pods)))
 }
@@ -1362,6 +1391,31 @@ async fn check_metrics_available(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query(namespace: Option<&str>, namespaces: Option<&str>) -> PodQuery {
+        PodQuery {
+            namespace: namespace.map(ToString::to_string),
+            namespaces: namespaces.map(ToString::to_string),
+            app: None,
+        }
+    }
+
+    #[test]
+    fn pod_query_accepts_one_namespace_or_many() {
+        assert_eq!(query(Some("sonarr"), None).requested_namespaces(), ["sonarr"]);
+        // One dashboard load watches a dozen namespaces; it should ask once.
+        assert_eq!(
+            query(None, Some("sonarr,radarr,jackett")).requested_namespaces(),
+            ["sonarr", "radarr", "jackett"]
+        );
+        // Hand-built query strings bring blanks and stray whitespace.
+        assert_eq!(
+            query(None, Some("sonarr,, radarr ")).requested_namespaces(),
+            ["sonarr", "radarr"]
+        );
+        assert_eq!(query(None, None).requested_namespaces(), ["media"]);
+        assert_eq!(query(Some("sonarr"), Some("")).requested_namespaces(), ["sonarr"]);
+    }
 
     fn sample(metric_value: &str, ts: f64, node: &str, instance: &str) -> serde_json::Value {
         serde_json::json!({
