@@ -396,199 +396,59 @@ git commit -m "perf(frontend): one query cache instead of four fetch layers"
 
 ---
 
-### Task 5: The worker samples pod status into an unlogged table
+### Tasks 5-6: Pod status from a Kubernetes watch (completed, revised design)
+
+These two tasks were planned as a 15-second sampler plus a freshness window.
+They shipped as a Kubernetes **watch** instead: `kube` already enables its
+`runtime` feature, so the worker holds one `watcher` over all pods and writes
+each affected namespace as events arrive. That removed the interval to tune, the
+window in which the dashboard contradicts a just-taken action, and most of the
+staleness the original design had to mitigate.
 
 **Files:**
-- Create: `code/api/src/migrations/m20260226_000033_create_pod_status_samples.rs`
-- Modify: `code/api/src/migrations/mod.rs`
-- Create: `code/api/src/models/pod_status_sample.rs`
-- Modify: `code/api/src/models/mod.rs`, `code/api/src/models/prelude.rs`
-- Modify: `code/api/src/services/scheduler.rs`
-- Test: `code/api/src/services/pod_status_sampler_tests.rs`
+- Created: `code/api/src/migrations/m20260226_000033_create_pod_status_cache.rs`
+- Created: `code/api/src/services/pod_cache.rs` (storage and trusted reads)
+- Created: `code/api/src/services/pod_watch.rs` (event folding and watch loop)
+- Modified: `code/api/src/services/mod.rs`, `code/api/src/application/runtime.rs`
+  (spawn the watch in the worker), `code/api/src/services/app_manager.rs`
+  (invalidate after install/update/delete/restart),
+  `code/api/src/endpoints/monitoring.rs` (`get_pods`, `pods_for`),
+  `code/api/src/services/k8s.rs` (`pod_status_from_pod`, `format_age` now crate-visible)
+- Tests: `code/api/tests/pod_cache_tests.rs`,
+  `code/api/tests/pod_cache_postgres_tests.rs`,
+  inline tests in `pod_watch.rs` and `monitoring.rs`
 
-**Interfaces:**
-- Produces: table `pod_status_samples(namespace TEXT, payload JSONB, observed_at TIMESTAMPTZ, PRIMARY KEY(namespace))`, and
-  `pub async fn sample_pod_status(state: &AppState) -> Result<usize>` returning rows written.
-- Produces: `pub async fn recent_pod_status(db: &DbConn, namespaces: &[String], max_age: Duration) -> Vec<PodStatus>`.
+**Interfaces produced:**
+- Tables `pod_status_cache(namespace PK, payload, observed_unix)` and
+  `pod_watch_heartbeat(id PK, synced_unix)`, UNLOGGED on PostgreSQL, epoch
+  seconds rather than TIMESTAMP so both backends behave identically.
+- `pod_cache::store_namespace`, `touch_heartbeat`, `invalidate`, `heartbeat_age`
+- `pod_cache::fresh_namespaces(db, namespaces, max_silence) -> HashMap<String, Vec<PodStatus>>`
+- `pod_watch::run(client, db)`, `pod_watch::PodWatchState`, `pod_watch::MAX_STREAM_SILENCE`
 
-- [ ] **Step 1: Write the failing test**
+**Design decisions worth keeping:**
+- A missing namespace means "not observed", never "no pods" — the API falls back
+  to a live read per namespace. An emptied namespace is written as `[]` so the
+  two cases stay distinguishable.
+- Stream health lives in its own heartbeat row: a quiet cluster emits no events,
+  and an empty namespace never updates its own row, so neither can vouch for
+  freshness. Withholding the heartbeat on watch errors is what makes readers
+  degrade to live queries. This also covers PostgreSQL truncating unlogged
+  tables after an unclean shutdown.
+- `PodStatus::age` is recomputed on read from each pod's creation time; a watch
+  only writes on change, so a stored age string would freeze.
+- A relist (`Init`/`InitApply`/`InitDone`) is buffered and applied wholesale,
+  because mid-relist a pod's absence does not mean it is gone.
+- Responses carry `X-Pod-Watch-Age-Seconds`; the JSON shape is unchanged, so the
+  frontend needed no further change and its 15s `refetchInterval` no longer
+  governs staleness.
 
-```rust
-#[tokio::test]
-async fn samples_are_written_then_read_back_within_their_window() {
-    let db = make_test_db().await;
-    upsert_pod_status(&db, "sonarr", serde_json::json!([{"name": "sonarr-0"}])).await.expect("write");
-
-    let fresh = recent_pod_status(&db, &["sonarr".to_string()], Duration::from_secs(60)).await;
-    assert_eq!(fresh.len(), 1, "a fresh sample is served from the table");
-
-    // A sample older than the window must not be presented as current.
-    let stale = recent_pod_status(&db, &["sonarr".to_string()], Duration::from_secs(0)).await;
-    assert!(stale.is_empty(), "an expired sample is ignored");
-
-    let missing = recent_pod_status(&db, &["radarr".to_string()], Duration::from_secs(60)).await;
-    assert!(missing.is_empty(), "a namespace never sampled returns nothing");
-}
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cd code/api && cargo test --locked samples_are_written_then_read_back`
-Expected: FAIL — `upsert_pod_status` not found.
-
-- [ ] **Step 3: Write the migration**
-
-```rust
-use sea_orm_migration::prelude::*;
-
-#[derive(DeriveMigrationName)]
-pub struct Migration;
-
-#[async_trait::async_trait]
-impl MigrationTrait for Migration {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // UNLOGGED: these are sampled observations, cheap to lose and not
-        // worth the write-ahead log on every poll.
-        manager
-            .get_connection()
-            .execute_unprepared(
-                "CREATE UNLOGGED TABLE IF NOT EXISTS pod_status_samples (
-                     namespace   TEXT PRIMARY KEY,
-                     payload     JSONB NOT NULL,
-                     observed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                 )",
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .get_connection()
-            .execute_unprepared("DROP TABLE IF EXISTS pod_status_samples")
-            .await?;
-        Ok(())
-    }
-}
-```
-
-SQLite is used in unit tests and does not know `UNLOGGED`; branch on
-`manager.get_database_backend()` and emit a plain `CREATE TABLE` for
-`DbBackend::Sqlite`.
-
-Register it in `migrations/mod.rs` alongside the existing entries.
-
-- [ ] **Step 4: Implement the read and write helpers**
-
-In `code/api/src/services/pod_status_sampler.rs`:
-
-```rust
-pub async fn upsert_pod_status(db: &DbConn, namespace: &str, payload: serde_json::Value) -> Result<()> {
-    db.execute(Statement::from_sql_and_values(
-        db.get_database_backend(),
-        "INSERT INTO pod_status_samples (namespace, payload, observed_at)
-         VALUES ($1, $2, now())
-         ON CONFLICT (namespace) DO UPDATE SET payload = $2, observed_at = now()",
-        [namespace.into(), payload.into()],
-    ))
-    .await?;
-    Ok(())
-}
-
-/// Samples newer than `max_age`. An empty result means "ask Kubernetes",
-/// never "there are no pods".
-pub async fn recent_pod_status(db: &DbConn, namespaces: &[String], max_age: Duration) -> Vec<PodStatus> {
-    // SELECT payload WHERE namespace = ANY($1) AND observed_at > now() - $2,
-    // then flatten each payload array into PodStatus values.
-}
-```
-
-Then `sample_pod_status(state)`: read every namespace the catalog knows,
-call `get_pod_status` for each, and upsert the result.
-
-- [ ] **Step 5: Schedule it in the worker**
-
-Register `sample_pod_status` in `services/scheduler.rs` on a 15-second
-interval, matching the dashboard's old refresh cadence.
-
-- [ ] **Step 6: Run the suite**
-
-Run: `cd code/api && cargo test --locked`
-Expected: PASS apart from the known failure.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add code/api/src
-git commit -m "feat(worker): sample pod status into an unlogged table"
-```
+**Verified:** 893 lib tests plus the new suites pass; the migration and upsert
+were additionally run against a real PostgreSQL 16 to confirm `relpersistence='u'`
+and the `ON CONFLICT` path, which SQLite would have accepted either way.
 
 ---
 
-### Task 6: The API prefers a fresh sample
-
-**Files:**
-- Modify: `code/api/src/endpoints/monitoring.rs` (`get_pods`)
-- Test: `code/api/src/endpoints/monitoring.rs` (test module)
-
-**Interfaces:**
-- Consumes: `recent_pod_status` from Task 5, `requested_namespaces` from Task 2.
-
-- [ ] **Step 1: Write the failing test**
-
-```rust
-#[tokio::test]
-async fn live_kubernetes_is_only_consulted_when_no_fresh_sample_exists() {
-    let db = make_test_db().await;
-    let state = make_test_state(db.clone()).await;   // no Kubernetes client
-    upsert_pod_status(&db, "sonarr", serde_json::json!([{"name": "sonarr-0"}])).await.expect("write");
-
-    let served = pods_for(&state, &["sonarr".to_string()], None).await;
-    assert_eq!(served.len(), 1, "a fresh sample answers without Kubernetes");
-
-    // Nothing sampled and no Kubernetes client: an empty list, not an error.
-    let empty = pods_for(&state, &["radarr".to_string()], None).await;
-    assert!(empty.is_empty());
-}
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cd code/api && cargo test --locked live_kubernetes_is_only_consulted`
-Expected: FAIL — `pods_for` not found.
-
-- [ ] **Step 3: Implement**
-
-```rust
-/// Prefer a sample the worker took recently; fall back to a live read so a
-/// stopped worker degrades to the old behaviour rather than an empty page.
-async fn pods_for(state: &AppState, namespaces: &[String], app: Option<&str>) -> Vec<PodStatus> {
-    if let Ok(db) = state.get_db().await {
-        let sampled = recent_pod_status(&db, namespaces, Duration::from_secs(30)).await;
-        if !sampled.is_empty() {
-            return match app {
-                Some(app) => sampled.into_iter().filter(|pod| pod.app == app).collect(),
-                None => sampled,
-            };
-        }
-    }
-    live_pod_status(state, namespaces, app).await
-}
-```
-
-- [ ] **Step 4: Run the suite**
-
-Run: `cd code/api && cargo test --locked`
-Expected: PASS apart from the known failure.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add code/api/src/endpoints/monitoring.rs
-git commit -m "perf(api): serve pod status from the worker's samples"
-```
-
----
 
 ### Task 7: Release
 
