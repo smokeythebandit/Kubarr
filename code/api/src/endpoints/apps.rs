@@ -36,6 +36,7 @@ pub fn apps_routes(state: AppState) -> Router {
             get(get_install_options),
         )
         .route("/catalog/{app_name}/icon", get(get_app_icon))
+        .route("/catalog/icons", get(list_app_icons))
         .route("/installed", get(list_installed_apps))
         .route("/gpu/nodes", get(gpu_nodes))
         .route("/install", post(install_app))
@@ -191,6 +192,47 @@ async fn get_app_from_catalog(
     Ok(Json(app))
 }
 
+/// Read every chart icon in one pass.
+///
+/// Blocking file reads belong on the blocking pool: a dashboard asks for
+/// twenty-nine icons at once, and on a CPU-limited runtime those reads
+/// otherwise occupy threads that should be serving other requests.
+async fn read_icon_bundle(
+    dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, String> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut bundle = std::collections::BTreeMap::new();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return bundle;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains('/') || name.contains("..") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(entry.path().join("icon.svg")) {
+                bundle.insert(name, content);
+            }
+        }
+        bundle
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Every catalog icon in one response, so a dashboard load fetches them once.
+#[utoipa::path(
+    get,
+    path = "/api/apps/catalog/icons",
+    tag = "Apps",
+    responses((status = 200, description = "App name to SVG"))
+)]
+async fn list_app_icons(_auth: Authorized<AppsView>) -> Result<impl IntoResponse> {
+    let bundle = read_icon_bundle(&CONFIG.charts.dir).await;
+    Ok(([super::short_cache(600)], Json(bundle)))
+}
+
 /// Get the icon for an app (SVG)
 #[utoipa::path(
     get,
@@ -207,15 +249,10 @@ async fn get_app_icon(Path(app_name): Path<String>) -> Result<Response> {
 
     let icon_path = CONFIG.charts.dir.join(&app_name).join("icon.svg");
 
-    if !icon_path.exists() {
-        return Err(AppError::NotFound(format!(
-            "Icon not found for app '{}'",
-            app_name
-        )));
-    }
-
-    let content = std::fs::read(&icon_path)
-        .map_err(|e| AppError::Internal(format!("Failed to read icon: {}", e)))?;
+    let content = tokio::task::spawn_blocking(move || std::fs::read(&icon_path))
+        .await
+        .map_err(|e| AppError::Internal(format!("Icon read cancelled: {}", e)))?
+        .map_err(|_| AppError::NotFound(format!("Icon not found for app '{}'", app_name)))?;
 
     Ok((
         [
@@ -882,6 +919,30 @@ async fn log_app_access(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn icon_bundle_reads_every_chart_icon_once() {
+        let charts = tempfile::tempdir().expect("tmpdir");
+        for app in ["sonarr", "radarr"] {
+            let dir = charts.path().join(app);
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            std::fs::write(dir.join("icon.svg"), format!("<svg id=\"{app}\"/>")).expect("write");
+        }
+        std::fs::create_dir_all(charts.path().join("no-icon")).expect("mkdir");
+
+        let bundle = read_icon_bundle(charts.path()).await;
+        assert_eq!(bundle.len(), 2, "charts without an icon are skipped");
+        assert_eq!(bundle["sonarr"], "<svg id=\"sonarr\"/>");
+        assert!(!bundle.contains_key("no-icon"));
+    }
+
+    #[tokio::test]
+    async fn icon_bundle_is_empty_when_no_charts_are_synced() {
+        let empty = tempfile::tempdir().expect("tmpdir");
+        assert!(read_icon_bundle(empty.path()).await.is_empty());
+        // A missing directory must not panic a request thread.
+        assert!(read_icon_bundle(&empty.path().join("absent")).await.is_empty());
+    }
 
     #[test]
     fn namespace_query_deser_with_value() {
