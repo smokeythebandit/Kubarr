@@ -86,6 +86,23 @@ pub async fn run_worker() -> anyhow::Result<()> {
         }
     });
     let domain_reconciler = Arc::new(DomainReconciler::new(conn.clone(), k8s_client.clone()));
+
+    // One watch feeds the pod status cache for every dashboard viewer, so the
+    // cost of knowing pod state no longer scales with the number of people
+    // looking at it. If no cluster is reachable the cache simply stays empty
+    // and readers keep querying Kubernetes directly.
+    if let Some(client) = k8s_client.read().await.as_ref().map(|c| c.client().clone()) {
+        let watch_conn = conn.clone();
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancellation.cancelled() => {}
+                _ = crate::services::pod_watch::run(client, watch_conn) => {}
+            }
+        });
+        tracing::info!("Pod status watch started");
+    }
+
     let manager = Arc::new(AppManager::new(conn, k8s_client, catalog));
 
     // Only aged claims are recovered: a recent claim might belong to a still

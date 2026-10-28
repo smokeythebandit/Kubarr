@@ -9,6 +9,8 @@ pub mod domain_reconciler;
 pub mod gpu;
 pub mod install_options;
 pub mod k8s;
+pub mod pod_cache;
+pub mod pod_watch;
 pub mod network_broadcaster;
 pub mod notification;
 pub mod scheduler;

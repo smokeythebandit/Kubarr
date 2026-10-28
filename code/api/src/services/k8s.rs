@@ -541,7 +541,7 @@ fn regular_container_statuses(spec: &PodSpec, status: &K8sPodStatus) -> Vec<PodC
     containers
 }
 
-fn pod_status_from_pod(pod: Pod, namespace: &str) -> PodStatus {
+pub(crate) fn pod_status_from_pod(pod: Pod, namespace: &str) -> PodStatus {
     let metadata = pod.metadata;
     let spec = pod.spec.unwrap_or_default();
     let status = pod.status.unwrap_or_default();
@@ -593,7 +593,7 @@ fn pod_status_from_pod(pod: Pod, namespace: &str) -> PodStatus {
     }
 }
 
-fn format_age(total_seconds: i64) -> String {
+pub(crate) fn format_age(total_seconds: i64) -> String {
     if total_seconds < 60 {
         format!("{}s", total_seconds)
     } else if total_seconds < 3600 {

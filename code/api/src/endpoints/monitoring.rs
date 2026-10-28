@@ -1196,21 +1196,74 @@ async fn get_pods(
     _auth: Authorized<MonitoringView>,
 ) -> Result<impl IntoResponse> {
     let namespaces = query.requested_namespaces();
+    let db = state.get_db().await.ok();
+    let client = state.k8s_client.read().await;
 
-    let mut pods: Vec<PodStatus> = Vec::new();
-    if let Some(client) = state.k8s_client.read().await.as_ref() {
-        for namespace in &namespaces {
-            // One unreadable namespace must not blank the whole response.
-            pods.extend(
-                client
-                    .get_pod_status(namespace, query.app.as_deref())
-                    .await
-                    .unwrap_or_default(),
+    let pods = pods_for(
+        db.as_ref(),
+        client.as_ref(),
+        &namespaces,
+        query.app.as_deref(),
+    )
+    .await;
+
+    // How long ago the watch last reported in, so a stale dashboard can be
+    // diagnosed from the response alone. Absent when no watch has ever synced.
+    let watch_age = match db.as_ref() {
+        Some(db) => crate::services::pod_cache::heartbeat_age(db).await,
+        None => None,
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    let (name, value) = crate::endpoints::short_cache(5);
+    headers.insert(name, value);
+    if let Some(age) = watch_age {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&age.to_string()) {
+            headers.insert(
+                axum::http::HeaderName::from_static("x-pod-watch-age-seconds"),
+                value,
             );
         }
     }
 
-    Ok(([crate::endpoints::short_cache(5)], Json(pods)))
+    Ok((headers, Json(pods)))
+}
+
+/// Pod status for each namespace, preferring the worker's watch over live reads.
+///
+/// The cache answers only for namespaces the watch has actually observed while
+/// its stream is healthy; anything else falls through to Kubernetes, so a dead
+/// worker degrades performance rather than correctness.
+async fn pods_for(
+    db: Option<&sea_orm::DatabaseConnection>,
+    client: Option<&crate::services::K8sClient>,
+    namespaces: &[String],
+    app: Option<&str>,
+) -> Vec<PodStatus> {
+    use crate::services::{pod_cache, pod_watch};
+
+    let mut cached = match db {
+        Some(db) => pod_cache::fresh_namespaces(db, namespaces, pod_watch::MAX_STREAM_SILENCE).await,
+        None => std::collections::HashMap::new(),
+    };
+
+    let mut pods: Vec<PodStatus> = Vec::new();
+    for namespace in namespaces {
+        match cached.remove(namespace) {
+            Some(observed) => pods.extend(
+                observed
+                    .into_iter()
+                    .filter(|pod| app.is_none_or(|app| pod.app == app)),
+            ),
+            // One unreadable namespace must not blank the whole response.
+            None => {
+                if let Some(client) = client {
+                    pods.extend(client.get_pod_status(namespace, app).await.unwrap_or_default());
+                }
+            }
+        }
+    }
+
+    pods
 }
 
 /// Get pod metrics
@@ -1817,9 +1870,64 @@ mod tests {
         assert!(json["cpu_series"].is_array());
     }
 
+    /// With no Kubernetes client at all, anything returned must have come from
+    /// the cache — which is exactly what the dashboard's hot path relies on.
+    #[tokio::test]
+    async fn serves_pods_from_the_watch_cache_without_a_cluster() {
+        use crate::services::k8s::PodStatus;
+        use crate::services::pod_cache::{self, CachedPod};
+
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("in-memory db");
+        let observed = CachedPod {
+            pod: PodStatus {
+                name: "sonarr-0".to_string(),
+                app: "sonarr".to_string(),
+                namespace: "sonarr".to_string(),
+                status: "Running".to_string(),
+                ready: true,
+                restart_count: 0,
+                containers: Vec::new(),
+                age: "1m".to_string(),
+                node: None,
+                ip: None,
+                cpu_usage: None,
+                memory_usage: None,
+            },
+            created_unix: None,
+        };
+        pod_cache::store_namespace(&db, "sonarr", &[observed])
+            .await
+            .expect("store");
+        pod_cache::touch_heartbeat(&db).await.expect("heartbeat");
+
+        let pods = super::pods_for(Some(&db), None, &["sonarr".to_string()], None).await;
+
+        assert_eq!(pods.len(), 1);
+        assert_eq!(pods[0].name, "sonarr-0");
+    }
+
+    /// A namespace the watch has never reported must not read as "no pods".
+    #[tokio::test]
+    async fn an_unobserved_namespace_yields_nothing_from_cache_alone() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("in-memory db");
+        crate::services::pod_cache::touch_heartbeat(&db)
+            .await
+            .expect("heartbeat");
+
+        // No client to fall back to here, so the empty result proves only that
+        // the cache declined to answer; get_pods would query Kubernetes.
+        let pods = super::pods_for(Some(&db), None, &["bazarr".to_string()], None).await;
+
+        assert!(pods.is_empty());
+    }
+
     #[test]
     fn app_health_serializes() {
-        use crate::services::k8s::{PodStatus, ServiceEndpoint};
+        use crate::services::k8s::ServiceEndpoint;
         let h = AppHealth {
             app_name: "sonarr".to_string(),
             namespace: "media".to_string(),

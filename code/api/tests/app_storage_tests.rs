@@ -9,7 +9,7 @@ use kubarr::services::{
 use sea_orm::{
     ActiveModelTrait, ConnectionTrait, Database, EntityTrait, Set, Statement, TransactionTrait,
 };
-use sea_orm_migration::MigratorTrait;
+use sea_orm_migration::{MigrationName, MigratorTrait};
 use std::collections::BTreeMap;
 
 fn mount(source: &str) -> Mount {
@@ -53,9 +53,14 @@ fn options(source: &str) -> InstallOptions {
 #[tokio::test]
 async fn sqlite_upgrade_saved_configuration_merges_defaults_and_rolls_back_atomically() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&db, Some((Migrator::migrations().len() - 1) as u32))
-        .await
-        .unwrap();
+    // Apply everything up to, but not including, the migration under test.
+    // Pinned by name: counting from the end breaks whenever a later migration
+    // is added.
+    let before_storage = Migrator::migrations()
+        .iter()
+        .position(|migration| migration.name().contains("create_app_storage_configs"))
+        .expect("app storage migration is registered") as u32;
+    Migrator::up(&db, Some(before_storage)).await.unwrap();
     let before = db
         .query_one_raw(Statement::from_string(
             sea_orm::DbBackend::Sqlite,
@@ -180,7 +185,10 @@ async fn sqlite_upgrade_saved_configuration_merges_defaults_and_rolls_back_atomi
         .unwrap_err()
         .to_string()
         .contains("Unsupported saved storage schema"));
-    Migrator::down(&db, Some(1)).await.unwrap();
+    // Roll back far enough to undo the migration under test, which is no longer
+    // the most recent one.
+    let through_storage = Migrator::migrations().len() as u32 - before_storage;
+    Migrator::down(&db, Some(through_storage)).await.unwrap();
     assert!(db
         .query_one_raw(Statement::from_string(
             sea_orm::DbBackend::Sqlite,

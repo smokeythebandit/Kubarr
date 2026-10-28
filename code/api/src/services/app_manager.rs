@@ -1230,7 +1230,7 @@ impl AppManager {
             .ok_or_else(|| AppError::Internal("Kubernetes client not available".to_string()))?;
         let catalog = self.catalog.read().await;
 
-        match operation.operation.as_str() {
+        let outcome = match operation.operation.as_str() {
             OP_INSTALL | OP_UPDATE => {
                 self.execute_install_or_update(operation, client, &catalog, stop)
                     .await
@@ -1251,7 +1251,19 @@ impl AppManager {
                 "Unsupported operation '{}'",
                 operation.operation
             ))),
+        };
+
+        // These operations change pods on purpose, and whoever triggered one is
+        // about to look. Dropping the cached row closes the gap between the
+        // action landing and the watch reporting it, so the dashboard cannot
+        // show the pre-action state back to them.
+        if let Err(error) =
+            crate::services::pod_cache::invalidate(&self.db, &operation.app_name).await
+        {
+            tracing::warn!(%error, app = %operation.app_name, "failed to invalidate pod status cache");
         }
+
+        outcome
     }
 
     async fn execute_install_or_update(
