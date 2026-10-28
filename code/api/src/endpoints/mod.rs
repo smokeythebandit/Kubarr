@@ -322,3 +322,36 @@ async fn swagger_ui() -> Html<&'static str> {
 </html>"#,
     )
 }
+
+/// A short private cache window for read-only responses. The dashboard
+/// re-renders the same panels far faster than this data changes, and without
+/// a window every repaint is a fresh round trip.
+pub fn short_cache(
+    seconds: u32,
+) -> (axum::http::header::HeaderName, axum::http::HeaderValue) {
+    let value = format!("private, max-age={seconds}, stale-while-revalidate=30");
+    (
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_str(&value).expect("ascii cache-control"),
+    )
+}
+
+#[cfg(test)]
+mod cache_header_tests {
+    use super::*;
+
+    #[test]
+    fn short_cache_allows_reuse_and_background_revalidation() {
+        let (name, value) = short_cache(5);
+        assert_eq!(name, axum::http::header::CACHE_CONTROL);
+        let rendered = value.to_str().expect("header is ascii");
+        assert!(rendered.contains("max-age=5"), "{rendered}");
+        // A dashboard repaints the same panels repeatedly; let the browser
+        // serve the previous answer while it fetches a fresh one.
+        assert!(rendered.contains("stale-while-revalidate"), "{rendered}");
+        assert!(
+            rendered.contains("private"),
+            "monitoring data is per user: {rendered}"
+        );
+    }
+}

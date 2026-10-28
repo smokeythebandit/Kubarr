@@ -1,4 +1,5 @@
 use axum::{
+    response::IntoResponse,
     extract::{Path, Query, State},
     routing::get,
     Json, Router,
@@ -1168,7 +1169,7 @@ async fn get_pods(
     State(state): State<AppState>,
     Query(query): Query<PodQuery>,
     _auth: Authorized<MonitoringView>,
-) -> Result<Json<Vec<PodStatus>>> {
+) -> Result<impl IntoResponse> {
     let namespace = query.namespace.unwrap_or_else(|| "media".to_string());
 
     let pods = if let Some(client) = state.k8s_client.read().await.as_ref() {
@@ -1180,7 +1181,7 @@ async fn get_pods(
         Vec::new()
     };
 
-    Ok(Json(pods))
+    Ok(([crate::endpoints::short_cache(5)], Json(pods)))
 }
 
 /// Get pod metrics

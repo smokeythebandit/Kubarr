@@ -158,7 +158,7 @@ async fn gpu_nodes(
 async fn list_catalog(
     State(state): State<AppState>,
     _auth: Authorized<AppsView>,
-) -> Result<Json<Vec<AppConfig>>> {
+) -> Result<impl IntoResponse> {
     let catalog = state.catalog.read().await;
     let apps: Vec<AppConfig> = catalog
         .get_all_apps()
@@ -166,7 +166,8 @@ async fn list_catalog(
         .filter(|app| !app.is_hidden)
         .cloned()
         .collect();
-    Ok(Json(apps))
+    // The catalog only changes when charts sync.
+    Ok(([super::short_cache(60)], Json(apps)))
 }
 
 /// Get a specific app from the catalog
@@ -236,7 +237,7 @@ async fn get_app_icon(Path(app_name): Path<String>) -> Result<Response> {
 async fn list_installed_apps(
     State(state): State<AppState>,
     _auth: Authorized<AppsView>,
-) -> Result<Json<Vec<String>>> {
+) -> Result<impl IntoResponse> {
     let k8s = state.k8s_client.read().await;
     let catalog = state.catalog.read().await;
 
@@ -247,7 +248,7 @@ async fn list_installed_apps(
         Vec::new()
     };
 
-    Ok(Json(apps))
+    Ok(([super::short_cache(5)], Json(apps)))
 }
 
 /// Install an app
