@@ -145,12 +145,19 @@ kubarr_network_flow_watch_connected 1
 Cardinality is roughly 20 apps × 3 classes × 2 verdicts ≈ 120 series.
 
 **`code/api/src/services/flow_watch.rs`** — the gRPC consumer. Opens Hubble's
-`Observe` streaming RPC with `follow=true`, classifies each flow, increments
-counters, and reconnects with backoff. Sets the connected gauge to 0 while
+`observer.Observer/GetFlows` streaming RPC with `follow=true`, classifies each
+flow, increments counters, and reconnects with backoff.
+
+Only flows with `traffic_direction == EGRESS` and `Type == L3_L4` are counted.
+Every pod-to-pod flow is reported at both ends, so counting ingress as well
+would double every figure, and L7 events shadow the L3 flow they belong to.
+Verdicts other than `FORWARDED` and `DROPPED` describe policy evaluation rather
+than traffic and are skipped. Apps are attributed from the flow's *source*
+namespace, which is what makes egress-only counting the right choice. Sets the connected gauge to 0 while
 disconnected so staleness is visible downstream.
 
-Hubble's protos (`observer.proto`, `flow.proto`) are vendored from
-cilium/cilium at the pinned version and compiled with `tonic-build` in a
+Hubble's protos (`observer.proto`, `flow.proto`, and `relay.proto`, which
+`observer.proto` imports) are vendored from cilium/cilium at the pinned version and compiled with `tonic-build` in a
 `build.rs`; `tonic` and `prost` are new dependencies.
 
 **Metrics listener.** The worker currently has no HTTP surface at all — no
