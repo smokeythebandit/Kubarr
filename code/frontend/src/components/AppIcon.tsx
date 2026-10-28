@@ -1,4 +1,5 @@
 import { useState, useEffect, memo } from 'react'
+import { appsApi } from '../api/apps'
 
 interface AppIconProps {
   appName: string
@@ -222,9 +223,31 @@ export async function preloadIcon(appName: string): Promise<void> {
   }
 }
 
-// Preload multiple icons in parallel
+// Preload every catalog icon with a single request.
+//
+// Fetching them one at a time made twenty-nine round trips on a cold
+// dashboard load. The bundle endpoint returns all of them together; anything
+// it does not know about still falls back to its own request.
 export async function preloadIcons(appNames: string[]): Promise<void> {
-  await Promise.all(appNames.map(preloadIcon))
+  const missing = appNames.filter((name) => !iconCache.has(name.toLowerCase()))
+  if (missing.length === 0) return
+
+  try {
+    const bundle = await appsApi.getIcons()
+    for (const [name, svg] of Object.entries(bundle)) {
+      const cacheKey = name.toLowerCase()
+      if (iconCache.has(cacheKey)) continue
+      const blob = new Blob([svg], { type: 'image/svg+xml' })
+      const colors = await extractDominantColors(blob.slice())
+      iconCache.set(cacheKey, { loaded: true, dataUrl: URL.createObjectURL(blob), colors })
+    }
+  } catch {
+    // The bundle is an optimisation, never a requirement.
+  }
+
+  await Promise.all(
+    missing.filter((name) => !iconCache.has(name.toLowerCase())).map(preloadIcon),
+  )
 }
 
 // Get cached icon URL

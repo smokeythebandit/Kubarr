@@ -37,6 +37,12 @@ export const appsApi = {
   },
 
   // Get installed apps
+  // Every catalog icon in one response, instead of one request per app.
+  getIcons: async (): Promise<Record<string, string>> => {
+    const response = await apiClient.get<Record<string, string>>('/apps/catalog/icons');
+    return response.data;
+  },
+
   getInstalled: async (): Promise<string[]> => {
     const response = await apiClient.get<string[]>('/apps/installed');
     return response.data;

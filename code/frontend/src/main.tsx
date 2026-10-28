@@ -9,6 +9,11 @@ const queryClient = new QueryClient({
     queries: {
       refetchOnWindowFocus: false,
       retry: 1,
+      // The dashboard mounts the same panels repeatedly. Without a window
+      // every mount refetches, which is how one load made twenty-one
+      // duplicate requests.
+      staleTime: 5_000,
+      gcTime: 5 * 60_000,
     },
   },
 })

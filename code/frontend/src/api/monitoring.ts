@@ -109,6 +109,14 @@ export const monitoringApi = {
     const response = await apiClient.get<GpuMetricsResponse>('/monitoring/vm/gpus');
     return response.data;
   },
+  // One request for many namespaces; a dashboard watches a dozen at once.
+  getPodStatusFor: async (namespaces: string[], app?: string): Promise<PodStatus[]> => {
+    const response = await apiClient.get<PodStatus[]>('/monitoring/pods', {
+      params: { namespaces: namespaces.join(','), app },
+    });
+    return response.data;
+  },
+
   // Get pod status
   getPodStatus: async (namespace: string = 'media', app?: string): Promise<PodStatus[]> => {
     const response = await apiClient.get<PodStatus[]>('/monitoring/pods', {

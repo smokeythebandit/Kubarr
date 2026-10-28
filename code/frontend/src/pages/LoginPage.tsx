@@ -3,12 +3,14 @@ import { Ship, Shield, ArrowLeft, Loader2, User, Check, Key } from 'lucide-react
 import { sessionLogin, verify2FA, loginWithRecoveryCode, SessionLoginResponse, getAccounts, switchAccount, AccountInfo } from '../api/auth'
 import { getCurrentUser } from '../api/users'
 import { oauthApi, AvailableProvider } from '../api/oauth'
-import { precacheDashboard } from '../utils/precache'
 import { Link } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
+import { appsApi } from '../api/apps'
 
 type LoginStep = 'credentials' | '2fa_required' | '2fa_setup_required' | 'recovery_code'
 
 export default function LoginPage() {
+  const queryClient = useQueryClient()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -115,8 +117,10 @@ export default function LoginPage() {
   // This means data will be ready instantly when they switch accounts
   useEffect(() => {
     if (existingAccounts.length > 0) {
-      // Start fetching dashboard data in the background
-      precacheDashboard()
+      // Warm the same queries the dashboard will ask for, so switching
+      // accounts lands on data that is already cached.
+      queryClient.prefetchQuery({ queryKey: ['apps', 'catalog'], queryFn: () => appsApi.getCatalog() })
+      queryClient.prefetchQuery({ queryKey: ['apps', 'installed'], queryFn: () => appsApi.getInstalled() })
     }
   }, [existingAccounts])
 

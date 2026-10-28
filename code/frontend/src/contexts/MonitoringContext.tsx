@@ -1,10 +1,9 @@
-import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { createContext, useContext, useEffect, useMemo, ReactNode } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { monitoringApi, ClusterMetrics } from '../api/monitoring'
 import { appsApi } from '../api/apps'
 import { preloadIcons } from '../components/AppIcon'
 import type { AppConfig, AppState, PodStatus } from '../types'
-import { getPrecached, clearPrecache } from '../utils/precache'
 
 interface AppStatusInfo {
   healthy: boolean
@@ -32,141 +31,112 @@ interface MonitoringState {
 
 const MonitoringContext = createContext<MonitoringState | null>(null)
 
+// Query keys are shared so that any component asking the same question joins
+// the same request. Four independent fetch layers previously made one
+// dashboard load fetch twenty-one URLs two to four times each.
+export const monitoringKeys = {
+  metricsAvailable: ['monitoring', 'available'] as const,
+  clusterMetrics: ['monitoring', 'cluster'] as const,
+  catalog: ['apps', 'catalog'] as const,
+  installed: ['apps', 'installed'] as const,
+  states: ['apps', 'states'] as const,
+  pods: (namespaces: string[]) => ['monitoring', 'pods', namespaces.join(',')] as const,
+}
+
 export function MonitoringProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
 
-  // Check for precached data on initial mount
-  const precachedMetrics = getPrecached<ClusterMetrics>('clusterMetrics')
-  const precachedCatalog = getPrecached<AppConfig[]>('catalog')
-  const precachedInstalled = getPrecached<string[]>('installed')
+  const availability = useQuery({
+    queryKey: monitoringKeys.metricsAvailable,
+    queryFn: () => monitoringApi.checkMetricsAvailable(),
+  })
+  const metricsAvailable = availability.data?.available ?? null
 
-  // Cluster metrics state - initialize from precache if available
-  const [clusterMetrics, setClusterMetrics] = useState<ClusterMetrics | null>(precachedMetrics)
-  const [metricsLoading, setMetricsLoading] = useState(!precachedMetrics)
-  const [metricsAvailable, setMetricsAvailable] = useState<boolean | null>(precachedMetrics ? true : null)
+  const metrics = useQuery({
+    queryKey: monitoringKeys.clusterMetrics,
+    queryFn: () => monitoringApi.getClusterMetrics(),
+    enabled: metricsAvailable === true,
+    refetchInterval: 10_000,
+  })
 
-  // Apps state - initialize from precache if available
-  const [catalog, setCatalog] = useState<AppConfig[]>(precachedCatalog || [])
-  const [catalogLoading, setCatalogLoading] = useState(!precachedCatalog)
-  const [installedApps, setInstalledApps] = useState<string[]>(precachedInstalled || [])
-  const [appStates, setAppStates] = useState<Record<string, AppState>>({})
-  const [appStatuses, setAppStatuses] = useState<Record<string, AppStatusInfo>>({})
+  const catalog = useQuery({
+    queryKey: monitoringKeys.catalog,
+    queryFn: () => appsApi.getCatalog(),
+    // The catalog only changes when charts sync.
+    staleTime: 60_000,
+  })
 
-  // Fetch cluster metrics
-  const refreshMetrics = useCallback(async () => {
-    try {
-      // Check VictoriaMetrics availability first
-      const status = await monitoringApi.checkMetricsAvailable()
-      setMetricsAvailable(status.available)
+  const installed = useQuery({
+    queryKey: monitoringKeys.installed,
+    queryFn: () => appsApi.getInstalled(),
+    refetchInterval: 15_000,
+  })
 
-      if (status.available) {
-        setMetricsLoading(true)
-        const metrics = await monitoringApi.getClusterMetrics()
-        setClusterMetrics(metrics)
-        // Also update query cache for components using useQuery
-        queryClient.setQueryData(['monitoring', 'cluster'], metrics)
-      }
-    } catch (error) {
-      console.error('Failed to fetch cluster metrics:', error)
-    } finally {
-      setMetricsLoading(false)
-    }
-  }, [queryClient])
+  const states = useQuery({
+    queryKey: monitoringKeys.states,
+    queryFn: () => appsApi.getStates().catch(() => []),
+    refetchInterval: 15_000,
+  })
 
-  // Fetch app statuses
-  const refreshAppStatuses = useCallback(async () => {
-    try {
-      // Fetch catalog and installed apps
-      const [catalogData, installedData, statesData] = await Promise.all([
-        appsApi.getCatalog(),
-        appsApi.getInstalled(),
-        appsApi.getStates().catch(() => [])
-      ])
+  // Each installed app lives in a namespace of the same name, so the whole
+  // dashboard needs one request rather than one per app.
+  const namespaces = useMemo(
+    () => (installed.data ?? []).slice().sort(),
+    [installed.data],
+  )
 
-      setCatalog(catalogData)
-      setInstalledApps(installedData)
-      setAppStates(Object.fromEntries(statesData.map(state => [state.app_name, state])))
-      setCatalogLoading(false)
+  const pods = useQuery({
+    queryKey: monitoringKeys.pods(namespaces),
+    queryFn: () => monitoringApi.getPodStatusFor(namespaces),
+    enabled: namespaces.length > 0,
+    refetchInterval: 15_000,
+  })
 
-      // Preload all app icons in the background
-      preloadIcons(catalogData.map(app => app.name))
-
-      // Update query cache
-      queryClient.setQueryData(['apps', 'catalog'], catalogData)
-      queryClient.setQueryData(['apps', 'installed'], installedData)
-      queryClient.setQueryData(['apps', 'states'], statesData)
-
-      // Fetch pod status for each installed app
-      const installedAppConfigs = catalogData.filter(app => installedData.includes(app.name))
-
-      const statusPromises = installedAppConfigs.map(async (app) => {
-        try {
-          const pods = await monitoringApi.getPodStatus(app.name)
-          const mainPods = pods.filter(p => p.app === app.name)
-          const healthy = mainPods.length > 0 && mainPods.every(p => p.ready && p.status === 'Running')
-
-          return {
-            name: app.name,
-            status: { healthy, loading: false, pods }
-          }
-        } catch {
-          return {
-            name: app.name,
-            status: { healthy: false, loading: false, pods: [] }
-          }
-        }
-      })
-
-      const statuses = await Promise.all(statusPromises)
-      const statusMap: Record<string, AppStatusInfo> = {}
-      statuses.forEach(({ name, status }) => {
-        statusMap[name] = status
-        // Update query cache for individual pod queries
-        queryClient.setQueryData(['monitoring', 'pods', name], status.pods)
-      })
-
-      setAppStatuses(statusMap)
-    } catch (error) {
-      console.error('Failed to fetch app statuses:', error)
-    }
-  }, [queryClient])
-
-  // Initial fetch on mount
   useEffect(() => {
-    // Clear precache after consuming it - data will now be managed by this provider
-    clearPrecache()
-
-    refreshMetrics()
-    refreshAppStatuses()
-
-    // Set up periodic refresh (continuous streaming)
-    const metricsInterval = setInterval(refreshMetrics, 10000)
-    const statusInterval = setInterval(refreshAppStatuses, 15000)
-
-    return () => {
-      clearInterval(metricsInterval)
-      clearInterval(statusInterval)
+    if (catalog.data) {
+      preloadIcons(catalog.data.map((app) => app.name))
     }
-  }, [refreshMetrics, refreshAppStatuses])
+  }, [catalog.data])
+
+  const appStatuses = useMemo(() => {
+    const byApp: Record<string, AppStatusInfo> = {}
+    for (const name of namespaces) {
+      const appPods = (pods.data ?? []).filter((pod) => pod.app === name)
+      byApp[name] = {
+        pods: appPods,
+        loading: pods.isLoading,
+        healthy:
+          appPods.length > 0 &&
+          appPods.every((pod) => pod.ready && pod.status === 'Running'),
+      }
+    }
+    return byApp
+  }, [namespaces, pods.data, pods.isLoading])
+
+  const appStates = useMemo(
+    () => Object.fromEntries((states.data ?? []).map((state) => [state.app_name, state])),
+    [states.data],
+  )
 
   const value: MonitoringState = {
-    clusterMetrics,
-    metricsLoading,
+    clusterMetrics: metrics.data ?? null,
+    metricsLoading: metrics.isLoading,
     metricsAvailable,
-    catalog,
-    catalogLoading,
-    installedApps,
+    catalog: catalog.data ?? [],
+    catalogLoading: catalog.isLoading,
+    installedApps: installed.data ?? [],
     appStates,
     appStatuses,
-    refreshMetrics,
-    refreshAppStatuses,
+    refreshMetrics: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['monitoring'] })
+    },
+    refreshAppStatuses: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['apps'] })
+      await queryClient.invalidateQueries({ queryKey: ['monitoring', 'pods'] })
+    },
   }
 
-  return (
-    <MonitoringContext.Provider value={value}>
-      {children}
-    </MonitoringContext.Provider>
-  )
+  return <MonitoringContext.Provider value={value}>{children}</MonitoringContext.Provider>
 }
 
 export function useMonitoring() {
