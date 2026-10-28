@@ -45,7 +45,7 @@ import {
 
 interface TrafficNodeData {
   label: string
-  type: 'external' | 'app'
+  type: 'external' | 'app' | 'lan' | 'infra'
   rx: number
   tx: number
   total: number

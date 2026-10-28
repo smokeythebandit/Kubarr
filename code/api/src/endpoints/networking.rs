@@ -55,6 +55,12 @@ pub struct NetworkEdge {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     pub label: String,
+    /// Measured flow-event rate, when Hubble reported traffic on this edge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flows_per_sec: Option<f64>,
+    /// True when traffic was actually seen. A Service-derived edge with no
+    /// traffic stays in the graph but must not imply activity.
+    pub observed: bool,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -206,6 +212,80 @@ async fn get_network_topology(
     edges.sort_by(|a, b| (&a.source, &a.target).cmp(&(&b.source, &b.target)));
     edges.dedup_by(|a, b| a.source == b.source && a.target == b.target);
 
+    // Fold in what Hubble actually saw. Pod-to-pod traffic is counted at
+    // to-endpoint and traffic leaving the pod at to-stack, which is the last
+    // point where the source pod is still identifiable.
+    let observed = {
+        use crate::endpoints::monitoring::query_vm_range;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs() as f64)
+            .unwrap_or_default();
+        let mut rows = query_vm_range(
+            "sum by (source, destination) (rate(hubble_flows_processed_total{traffic_direction=\"egress\",subtype=\"to-endpoint\",verdict=\"FORWARDED\"}[1m]))",
+            now,
+            now,
+            "1m",
+        )
+        .await;
+        rows.extend(
+            query_vm_range(
+                "sum by (source, destination) (rate(hubble_flows_processed_total{traffic_direction=\"egress\",subtype=\"to-stack\",verdict=\"FORWARDED\"}[1m]))",
+                now,
+                now,
+                "1m",
+            )
+            .await,
+        );
+        rows
+    };
+    let edges = merge_observed_edges(edges, &observed);
+
+    // Give the class nodes somewhere to attach. The internet reuses the
+    // existing external node; LAN and node traffic had nowhere to go before.
+    let referenced: HashSet<&str> = edges.iter().map(|edge| edge.target.as_str()).collect();
+    if referenced.contains(LAN_NODE) && !nodes.iter().any(|node| node.id == LAN_NODE) {
+        nodes.push(NetworkNode {
+            id: LAN_NODE.to_string(),
+            name: "LAN".to_string(),
+            // Its own type, not "external": the page identifies the internet
+            // node by that type, and a second one would make the lookup depend
+            // on array order.
+            node_type: "lan".to_string(),
+            rx_bytes_per_sec: 0.0,
+            tx_bytes_per_sec: 0.0,
+            total_traffic: 0.0,
+            pod_count: 0,
+            color: "#14b8a6".to_string(),
+        });
+    }
+    if referenced.contains(NODE_NODE) && !nodes.iter().any(|node| node.id == NODE_NODE) {
+        nodes.push(NetworkNode {
+            id: NODE_NODE.to_string(),
+            name: "Cluster nodes".to_string(),
+            node_type: "infra".to_string(),
+            rx_bytes_per_sec: 0.0,
+            tx_bytes_per_sec: 0.0,
+            total_traffic: 0.0,
+            pod_count: 0,
+            color: "#64748b".to_string(),
+        });
+    }
+    // Traffic from the host itself: NFS mounts are performed by the kubelet.
+    if edges.iter().any(|edge| edge.source == "host") && !nodes.iter().any(|node| node.id == "host")
+    {
+        nodes.push(NetworkNode {
+            id: "host".to_string(),
+            name: "Host".to_string(),
+            node_type: "infra".to_string(),
+            rx_bytes_per_sec: 0.0,
+            tx_bytes_per_sec: 0.0,
+            total_traffic: 0.0,
+            pod_count: 0,
+            color: "#64748b".to_string(),
+        });
+    }
+
     Ok(Json(NetworkTopology { nodes, edges }))
 }
 
@@ -258,6 +338,8 @@ async fn discover_service_connections(
                                         port: None,
                                         protocol: Some("HTTP".to_string()),
                                         label: String::new(),
+                                        flows_per_sec: None,
+                                        observed: false,
                                     });
                                 }
                             }
@@ -294,6 +376,8 @@ async fn discover_service_connections(
                                                     port,
                                                     protocol: Some("TCP".to_string()),
                                                     label: String::new(),
+                                                    flows_per_sec: None,
+                                                    observed: false,
                                                 });
                                             }
                                         }
@@ -334,6 +418,8 @@ async fn discover_service_connections(
                                         port,
                                         protocol: Some("HTTP".to_string()),
                                         label: String::new(),
+                                        flows_per_sec: None,
+                                        observed: false,
                                     });
                                 }
                             }
@@ -364,6 +450,8 @@ async fn discover_service_connections(
                                 port: spec.ports.as_ref().and_then(|p| p.first()).map(|p| p.port),
                                 protocol: Some("HTTP".to_string()),
                                 label: String::new(),
+                                flows_per_sec: None,
+                                observed: false,
                             });
                             break; // One external edge per namespace is enough
                         }
@@ -391,6 +479,8 @@ async fn discover_service_connections(
                         port: Some(443),
                         protocol: Some("HTTPS".to_string()),
                         label: String::new(),
+                        flows_per_sec: None,
+                        observed: false,
                     });
                 }
 
@@ -419,6 +509,8 @@ async fn discover_service_connections(
                                                             .and_then(|p| p.number),
                                                         protocol: Some("HTTP".to_string()),
                                                         label: String::new(),
+                                                        flows_per_sec: None,
+                                                        observed: false,
                                                     });
                                                 }
                                             }
@@ -499,6 +591,8 @@ async fn discover_service_connections(
                     port: None,
                     protocol: Some("TCP".to_string()),
                     label: String::new(),
+                    flows_per_sec: None,
+                    observed: false,
                 });
             }
         }
@@ -783,6 +877,8 @@ mod tests {
             port: Some(80),
             protocol: Some("TCP".to_string()),
             label: "HTTP".to_string(),
+            flows_per_sec: None,
+            observed: false,
         };
         let json = serde_json::to_string(&e).expect("ser");
         assert!(json.contains("\"port\":80"));
@@ -798,6 +894,8 @@ mod tests {
             port: None,
             protocol: None,
             label: String::new(),
+            flows_per_sec: None,
+            observed: false,
         };
         let json = serde_json::to_string(&e).expect("ser");
         assert!(!json.contains("\"port\""));
@@ -1258,5 +1356,205 @@ mod flow_class_tests {
         assert_eq!(series.cluster[0].t, 100);
         assert_eq!(series.cluster[0].flows_per_sec, 3.0);
         assert_eq!(series.cluster[1].flows_per_sec, 4.5);
+    }
+}
+
+// ============================================================================
+// Observed topology edges
+//
+// `discover_service_connections` reports what Services make possible. Hubble
+// reports what actually happened. The merge keeps Service metadata — names and
+// ports, which Hubble has no label for — and takes existence and weight from
+// the measurements.
+// ============================================================================
+
+/// Node id used for traffic leaving the cluster to the internet.
+///
+/// Reuses the existing `external` node rather than introducing a second
+/// internet node, so the current page keeps rendering while sub-project B
+/// reworks it.
+const INTERNET_NODE: &str = "external";
+const LAN_NODE: &str = "lan";
+const NODE_NODE: &str = "node";
+
+/// Resolve a Hubble destination label to a topology node id.
+fn edge_target(destination: &str) -> Option<String> {
+    match classify_destination(destination)? {
+        FlowClass::Internet => Some(INTERNET_NODE.to_string()),
+        FlowClass::Lan => Some(LAN_NODE.to_string()),
+        FlowClass::Cluster => {
+            if destination.contains(':') {
+                // A reserved identity: the nodes themselves, not a namespace.
+                Some(NODE_NODE.to_string())
+            } else {
+                Some(destination.to_string())
+            }
+        }
+    }
+}
+
+/// Merge measured traffic into Service-derived edges.
+pub(crate) fn merge_observed_edges(
+    service_edges: Vec<NetworkEdge>,
+    observed: &[serde_json::Value],
+) -> Vec<NetworkEdge> {
+    use std::collections::BTreeMap;
+
+    let mut merged: BTreeMap<(String, String), NetworkEdge> = service_edges
+        .into_iter()
+        .map(|edge| ((edge.source.clone(), edge.target.clone()), edge))
+        .collect();
+
+    for row in observed {
+        let Some(target) = edge_target(&metric_label(row, "destination")) else {
+            continue;
+        };
+        let Some(rate) = sample_value(row) else {
+            continue;
+        };
+        let source = metric_label(row, "source");
+        // An empty source is the host: LAN traffic is kubelet NFS activity
+        // rather than anything an app did.
+        let source = if source.is_empty() {
+            "host".to_string()
+        } else {
+            source
+        };
+        if source == target {
+            continue;
+        }
+
+        let key = (source.clone(), target.clone());
+        let entry = merged.entry(key).or_insert_with(|| NetworkEdge {
+            source,
+            target,
+            edge_type: "observed".to_string(),
+            port: None,
+            protocol: None,
+            label: String::new(),
+            flows_per_sec: None,
+            observed: false,
+        });
+        // Several destination rows can resolve to one node, so rates add up.
+        entry.flows_per_sec = Some(entry.flows_per_sec.unwrap_or(0.0) + rate);
+        entry.observed = true;
+        if entry.label.is_empty() {
+            entry.label = format!("{:.2} flows/s", entry.flows_per_sec.unwrap_or(0.0));
+        }
+    }
+
+    merged.into_values().collect()
+}
+
+#[cfg(test)]
+mod topology_merge_tests {
+    use super::*;
+
+    fn service_edge(source: &str, target: &str, port: i32) -> NetworkEdge {
+        NetworkEdge {
+            source: source.to_string(),
+            target: target.to_string(),
+            edge_type: "service".to_string(),
+            port: Some(port),
+            protocol: Some("TCP".to_string()),
+            label: format!("{port}/TCP"),
+            flows_per_sec: None,
+            observed: false,
+        }
+    }
+
+    fn observed_row(source: &str, destination: &str, rate: &str) -> serde_json::Value {
+        serde_json::json!({
+            "metric": { "source": source, "destination": destination },
+            "value": [1.0, rate]
+        })
+    }
+
+    #[test]
+    fn a_service_edge_with_traffic_keeps_its_port_and_gains_a_weight() {
+        let merged = merge_observed_edges(
+            vec![service_edge("kubarr-backend", "victoriametrics", 8428)],
+            &[observed_row("kubarr-backend", "victoriametrics", "13.625")],
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].port, Some(8428));
+        assert_eq!(merged[0].flows_per_sec, Some(13.625));
+        assert!(merged[0].observed);
+        // The Service label is not overwritten by the rate.
+        assert_eq!(merged[0].label, "8428/TCP");
+    }
+
+    #[test]
+    fn traffic_with_no_service_still_becomes_an_edge() {
+        // qbittorrent to the internet has no Service and can never appear on a
+        // Service-derived graph.
+        let merged = merge_observed_edges(
+            Vec::new(),
+            &[observed_row("qbittorrent", "reserved:world", "10.99")],
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].source, "qbittorrent");
+        assert_eq!(merged[0].target, INTERNET_NODE);
+        assert!(merged[0].observed);
+        assert_eq!(merged[0].port, None);
+        assert_eq!(merged[0].label, "10.99 flows/s");
+    }
+
+    #[test]
+    fn a_service_nobody_uses_is_kept_but_marked_unobserved() {
+        // Retained so the graph still shows the wiring, but the UI can draw it
+        // differently rather than implying traffic that is not happening.
+        let merged = merge_observed_edges(vec![service_edge("sonarr", "jackett", 9117)], &[]);
+
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].observed);
+        assert_eq!(merged[0].flows_per_sec, None);
+    }
+
+    #[test]
+    fn external_destinations_collapse_into_class_nodes() {
+        let merged = merge_observed_edges(
+            Vec::new(),
+            &[
+                observed_row("", "cidr:192.168.1.0/24,reserved:world", "4.692"),
+                observed_row(
+                    "kubarr-worker",
+                    "cidr:10.0.0.0/8,cidr:192.168.1.20/32,reserved:host",
+                    "7.4",
+                ),
+            ],
+        );
+
+        let targets: Vec<&str> = merged.iter().map(|e| e.target.as_str()).collect();
+        assert!(targets.contains(&LAN_NODE));
+        // Node traffic is cluster infrastructure, not LAN.
+        assert!(targets.contains(&NODE_NODE));
+        // An empty source is the host.
+        assert!(merged.iter().any(|e| e.source == "host"));
+    }
+
+    #[test]
+    fn rows_resolving_to_the_same_node_add_up() {
+        // Several reserved identities all map to the node, and world-ipv4 and
+        // world-ipv6 both map to the internet.
+        let merged = merge_observed_edges(
+            Vec::new(),
+            &[
+                observed_row("sonarr", "reserved:world-ipv4", "1.5"),
+                observed_row("sonarr", "reserved:world-ipv6", "0.5"),
+            ],
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].flows_per_sec, Some(2.0));
+    }
+
+    #[test]
+    fn a_namespace_talking_to_itself_is_not_an_edge() {
+        let merged = merge_observed_edges(Vec::new(), &[observed_row("sonarr", "sonarr", "4.0")]);
+
+        assert!(merged.is_empty());
     }
 }

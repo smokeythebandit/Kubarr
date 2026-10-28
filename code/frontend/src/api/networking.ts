@@ -3,7 +3,7 @@ import apiClient from './client'
 export interface NetworkNode {
   id: string
   name: string
-  type: 'app' | 'external'
+  type: 'app' | 'external' | 'lan' | 'infra'
   rx_bytes_per_sec: number
   tx_bytes_per_sec: number
   total_traffic: number
