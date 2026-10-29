@@ -6,6 +6,7 @@ import {
   FlowSeries,
   NetworkStats,
   formatFlowRate,
+  totalByteRate,
   totalFlowRate,
 } from '../../api/networking'
 import { FlowClassCards } from './FlowClassCards'
@@ -13,16 +14,27 @@ import { FlowClassChart } from './FlowClassChart'
 import { FlowSplitBar } from './FlowSplitBar'
 import { NetworkStatsTable } from './NetworkStatsTable'
 
+type ClassName = 'internet' | 'lan' | 'cluster' | 'storage'
+
+/**
+ * Bytes are what the page leads with, so they are what these helpers set. A
+ * flow count is a separate, optional measure: storage has none at all.
+ */
 function totals(
-  internet: number,
-  lan: number,
-  cluster: number,
-  drops: Partial<Record<'internet' | 'lan' | 'cluster', number>> = {}
+  bytes: Partial<Record<ClassName, number>>,
+  flows: Partial<Record<ClassName, number>> = {},
+  drops: Partial<Record<ClassName, number>> = {}
 ): ClassTotals {
+  const rates = (name: ClassName) => ({
+    bytes_per_sec: bytes[name] ?? 0,
+    flows_per_sec: flows[name] ?? 0,
+    drops_per_sec: drops[name] ?? 0,
+  })
   return {
-    internet: { flows_per_sec: internet, drops_per_sec: drops.internet ?? 0 },
-    lan: { flows_per_sec: lan, drops_per_sec: drops.lan ?? 0 },
-    cluster: { flows_per_sec: cluster, drops_per_sec: drops.cluster ?? 0 },
+    internet: rates('internet'),
+    lan: rates('lan'),
+    cluster: rates('cluster'),
+    storage: rates('storage'),
   }
 }
 
@@ -43,7 +55,7 @@ function stat(overrides: Partial<NetworkStats> & { namespace: string }): Network
 }
 
 function appRates(app: string, internet: number, lan: number, cluster: number): AppClassRates {
-  return { app, ...totals(internet, lan, cluster) }
+  return { app, ...totals({}, { internet, lan, cluster }) }
 }
 
 describe('formatFlowRate', () => {
@@ -64,13 +76,21 @@ describe('formatFlowRate', () => {
 
 describe('totalFlowRate', () => {
   it('sums all three classes', () => {
-    expect(totalFlowRate(totals(2.85, 3.43, 61.42))).toBeCloseTo(67.7, 5)
+    // Storage carries no connection count, so it must not be summed in here.
+    expect(
+      totalFlowRate(totals({}, { internet: 2.85, lan: 3.43, cluster: 61.42, storage: 0 }))
+    ).toBeCloseTo(67.7, 5)
+    expect(
+      totalByteRate(totals({ internet: 100, lan: 200, cluster: 300, storage: 400 }))
+    ).toBe(1000)
   })
 })
 
 describe('FlowSplitBar', () => {
   it('gives a real but tiny class a visible sliver', () => {
-    const { container } = render(<FlowSplitBar totals={totals(100, 0.4, 100)} />)
+    const { container } = render(
+      <FlowSplitBar totals={totals({ internet: 100, lan: 0.4, cluster: 100 })} />
+    )
 
     const segments = container.querySelectorAll('[title]')
     const lan = [...segments].find(node => node.getAttribute('title')?.startsWith('LAN'))
@@ -82,7 +102,9 @@ describe('FlowSplitBar', () => {
   })
 
   it('draws nothing for a class with no traffic', () => {
-    const { container } = render(<FlowSplitBar totals={totals(10, 0, 10)} />)
+    const { container } = render(
+      <FlowSplitBar totals={totals({ internet: 10, lan: 0, cluster: 10 })} />
+    )
 
     const titles = [...container.querySelectorAll('[title]')].map(node =>
       node.getAttribute('title')
@@ -92,11 +114,11 @@ describe('FlowSplitBar', () => {
   })
 
   it('reports every class in its accessible label, including the silent one', () => {
-    render(<FlowSplitBar totals={totals(10, 0, 10)} />)
+    render(<FlowSplitBar totals={totals({ internet: 10240, lan: 0, cluster: 10240 })} />)
 
     expect(screen.getByRole('img')).toHaveAttribute(
       'aria-label',
-      'Internet 10.0/s, LAN 0/s, In-cluster 10.0/s'
+      'Internet 10 KB/s, LAN 0 B/s, In-cluster 10 KB/s, Storage 0 B/s'
     )
   })
 })
@@ -104,20 +126,31 @@ describe('FlowSplitBar', () => {
 describe('FlowClassCards', () => {
   it('shows each class rate and its share of the total', () => {
     render(
-      <FlowClassCards totals={totals(2.85, 3.43, 61.42)} stale={false} totalRx={0} totalTx={0} />
+      <FlowClassCards
+        totals={totals(
+          { internet: 1024, lan: 2048, cluster: 4096, storage: 8192 },
+          { internet: 2.85, lan: 3.43, cluster: 61.42 }
+        )}
+        stale={false}
+        totalRx={0}
+        totalTx={0}
+      />
     )
 
-    expect(screen.getByText('2.85/s')).toBeInTheDocument()
-    expect(screen.getByText('3.43/s')).toBeInTheDocument()
-    expect(screen.getByText('61.4/s')).toBeInTheDocument()
-    // 61.42 of 67.7 is 91%.
-    expect(screen.getByText('91% of flows')).toBeInTheDocument()
+    expect(screen.getByText('1 KB/s')).toBeInTheDocument()
+    expect(screen.getByText('2 KB/s')).toBeInTheDocument()
+    expect(screen.getByText('4 KB/s')).toBeInTheDocument()
+    expect(screen.getByText('8 KB/s')).toBeInTheDocument()
+    // 4096 of 15360 is 27%.
+    expect(screen.getByText('27% of bytes')).toBeInTheDocument()
+    // Connection counts stay visible, but only where one exists.
+    expect(screen.getByText('61.4/s conn')).toBeInTheDocument()
   })
 
   it('says there is no data rather than drawing a convincing zero', () => {
-    render(<FlowClassCards totals={totals(0, 0, 0)} stale totalRx={1024} totalTx={0} />)
+    render(<FlowClassCards totals={totals({})} stale totalRx={1024} totalTx={0} />)
 
-    expect(screen.getAllByText('No data')).toHaveLength(3)
+    expect(screen.getAllByText('No data')).toHaveLength(4)
     expect(screen.queryByText('0/s')).not.toBeInTheDocument()
     // Byte volumes come from cAdvisor and are unaffected by Hubble being down.
     expect(screen.getByText('1 KB/s')).toBeInTheDocument()
@@ -126,20 +159,20 @@ describe('FlowClassCards', () => {
   it('surfaces denied flows next to the class that was denied', () => {
     render(
       <FlowClassCards
-        totals={totals(5, 0, 0, { internet: 1.25 })}
+        totals={totals({ internet: 5120 }, { internet: 5 }, { internet: 1.25 })}
         stale={false}
         totalRx={0}
         totalTx={0}
       />
     )
 
-    expect(screen.getByText('1.25/s dropped')).toBeInTheDocument()
+    expect(screen.getByText('1.25/s denied')).toBeInTheDocument()
   })
 })
 
 describe('FlowClassChart', () => {
   const series = (points: Array<[number, number]>) =>
-    points.map(([t, flows_per_sec]) => ({ t, flows_per_sec }))
+    points.map(([t, bytes_per_sec]) => ({ t, flows_per_sec: 0, bytes_per_sec }))
 
   it('treats a class missing from a bucket as zero rather than dropping the column', () => {
     // internet reports at every step; lan only reports once. Stacking needs all
@@ -238,7 +271,7 @@ describe('NetworkStatsTable', () => {
     render(
       <NetworkStatsTable
         stats={[stat({ namespace: 'sonarr' })]}
-        byApp={[{ app: 'sonarr', ...totals(1, 0, 0, { internet: 0.5 }) }]}
+        byApp={[{ app: 'sonarr', ...totals({}, { internet: 1 }, { internet: 0.5 }) }]}
         stale={false}
       />
     )

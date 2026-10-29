@@ -52,14 +52,25 @@ export interface NetworkStats {
 // would read as measurement while being a guess.
 // ============================================================================
 
-/** The three destinations a flow can be headed for. */
-export type FlowClassName = 'internet' | 'lan' | 'cluster'
+/** Where traffic is headed. */
+export type FlowClassName = 'internet' | 'lan' | 'cluster' | 'storage'
 
-export const FLOW_CLASS_NAMES: FlowClassName[] = ['internet', 'lan', 'cluster']
+export const FLOW_CLASS_NAMES: FlowClassName[] = ['internet', 'lan', 'cluster', 'storage']
+
+/**
+ * Storage is measured, but not by the same thing as the rest.
+ *
+ * NFS is mounted by the node's own kernel rather than by the pods that use it,
+ * so it never crosses a Cilium endpoint and neither Hubble nor the conntrack
+ * map sees a byte of it. Its bytes come from the kernel's NFS client counters,
+ * and it has no connection count at all.
+ */
+export const CLASSES_WITH_FLOW_COUNTS: FlowClassName[] = ['internet', 'lan', 'cluster']
 
 export interface ClassRates {
   flows_per_sec: number
   drops_per_sec: number
+  bytes_per_sec: number
 }
 
 export type ClassTotals = Record<FlowClassName, ClassRates>
@@ -71,6 +82,7 @@ export interface AppClassRates extends ClassTotals {
 export interface FlowSeriesPoint {
   t: number
   flows_per_sec: number
+  bytes_per_sec: number
 }
 
 export type FlowSeries = Record<FlowClassName, FlowSeriesPoint[]>
@@ -144,7 +156,28 @@ export function formatFlowRate(flowsPerSec: number): string {
   return `${(flowsPerSec / 1000).toFixed(2)}k/s`
 }
 
-/** Sum of all three classes, used for share-of-total arithmetic. */
+export const EMPTY_CLASS_RATES: ClassRates = {
+  flows_per_sec: 0,
+  drops_per_sec: 0,
+  bytes_per_sec: 0,
+}
+
+/** Zeroed totals, built from the class list so a new class is never missed. */
+export function emptyClassTotals(): ClassTotals {
+  return Object.fromEntries(
+    FLOW_CLASS_NAMES.map(name => [name, { ...EMPTY_CLASS_RATES }])
+  ) as ClassTotals
+}
+
+/** Sum of the classes that have a connection count. */
 export function totalFlowRate(totals: ClassTotals): number {
-  return FLOW_CLASS_NAMES.reduce((sum, name) => sum + totals[name].flows_per_sec, 0)
+  return CLASSES_WITH_FLOW_COUNTS.reduce(
+    (sum, name) => sum + totals[name].flows_per_sec,
+    0
+  )
+}
+
+/** Sum of measured bytes across every class, storage included. */
+export function totalByteRate(totals: ClassTotals): number {
+  return FLOW_CLASS_NAMES.reduce((sum, name) => sum + totals[name].bytes_per_sec, 0)
 }

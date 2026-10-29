@@ -3,7 +3,7 @@ import {
   FLOW_CLASS_NAMES,
   FlowClassName,
   FlowSeries,
-  formatFlowRate,
+  formatBandwidth,
 } from '../../api/networking'
 import { flowClassStyle } from './flowClasses'
 
@@ -13,11 +13,10 @@ interface FlowClassChartProps {
 }
 
 /**
- * In-cluster chatter runs an order of magnitude above the other two — 61/s
- * against 3/s was the live reading — so on one shared axis internet and LAN
- * flatten into slivers at the baseline. Hiding a class rescales the axis to
- * what is left, which is the only way to read the small classes against each
- * other.
+ * The classes differ by orders of magnitude — storage ran at 38 MB/s while the
+ * internet managed kilobytes — so on one shared axis the small ones flatten
+ * into slivers at the baseline. Hiding a class rescales the axis to what is
+ * left, which is the only way to read them against each other.
  */
 type HiddenClasses = Partial<Record<FlowClassName, boolean>>
 
@@ -27,7 +26,7 @@ interface Column {
   total: number
 }
 
-const PAD_LEFT = 44
+const PAD_LEFT = 78
 const PAD_RIGHT = 8
 const PAD_TOP = 8
 const PAD_BOTTOM = 20
@@ -46,16 +45,17 @@ function toColumns(series: FlowSeries): Column[] {
 
   FLOW_CLASS_NAMES.forEach(name => {
     ;(series[name] ?? []).forEach(point => {
-      if (!Number.isFinite(point.flows_per_sec)) return
+      if (!Number.isFinite(point.bytes_per_sec)) return
       const existing = byTime.get(point.t)
       if (existing) {
-        existing[name] = point.flows_per_sec
+        existing[name] = point.bytes_per_sec
       } else {
         byTime.set(point.t, {
           internet: 0,
           lan: 0,
           cluster: 0,
-          [name]: point.flows_per_sec,
+          storage: 0,
+          [name]: point.bytes_per_sec,
         } as Record<FlowClassName, number>)
       }
     })
@@ -78,7 +78,7 @@ function formatClock(unixSeconds: number): string {
 }
 
 /**
- * Stacked flow rate over the selected window. Stacked rather than overlaid
+ * Stacked byte rate over the selected window. Stacked rather than overlaid
  * because the question is "how is the total split", and the total is the top
  * edge of the stack.
  */
@@ -200,7 +200,7 @@ export function FlowClassChart({ series, height = 220 }: FlowClassChartProps) {
               />
               <span>{style.label}</span>
               <span className="font-mono font-semibold">
-                {formatFlowRate(latest.values[name])}
+                {formatBandwidth(latest.values[name])}
               </span>
             </button>
           )
@@ -243,7 +243,7 @@ export function FlowClassChart({ series, height = 220 }: FlowClassChartProps) {
                 className="fill-gray-400 text-[10px] dark:fill-gray-500"
                 style={{ fontSize: 10 }}
               >
-                {formatFlowRate(value)}
+                {formatBandwidth(value)}
               </text>
             </g>
           )
@@ -298,7 +298,7 @@ export function FlowClassChart({ series, height = 220 }: FlowClassChartProps) {
                 <span className={`h-2 w-2 rounded-full ${style.swatch}`} />
                 <span className="text-gray-300">{style.label}</span>
                 <span className="ml-auto font-mono">
-                  {formatFlowRate(hovered.values[name])}
+                  {formatBandwidth(hovered.values[name])}
                 </span>
               </div>
             )
@@ -308,7 +308,7 @@ export function FlowClassChart({ series, height = 220 }: FlowClassChartProps) {
               {visibleClasses.length === FLOW_CLASS_NAMES.length ? 'Total' : 'Shown'}
             </span>
             <span className="ml-auto font-mono">
-              {formatFlowRate(
+              {formatBandwidth(
                 visibleClasses.reduce((sum, name) => sum + hovered.values[name], 0)
               )}
             </span>

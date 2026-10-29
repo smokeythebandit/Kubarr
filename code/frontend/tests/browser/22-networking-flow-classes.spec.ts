@@ -13,39 +13,53 @@ import type {
  */
 const observedAt = 1793292168
 
-function series(base: number) {
-  return Array.from({ length: 16 }, (_, index) => ({
-    t: observedAt - (15 - index) * 60,
-    flows_per_sec: Number((base * (0.8 + (index % 4) * 0.1)).toFixed(3)),
-  }))
+function series(bytes: number, flows = 0) {
+  return Array.from({ length: 16 }, (_, index) => {
+    const scale = 0.8 + (index % 4) * 0.1
+    return {
+      t: observedAt - (15 - index) * 60,
+      flows_per_sec: Number((flows * scale).toFixed(3)),
+      bytes_per_sec: Number((bytes * scale).toFixed(0)),
+    }
+  })
+}
+
+/** Storage has bytes and no connection count; the others have both. */
+function rates(bytes_per_sec: number, flows_per_sec = 0, drops_per_sec = 0) {
+  return { bytes_per_sec, flows_per_sec, drops_per_sec }
 }
 
 const flowClasses: FlowClassResponse = {
   observed_at: observedAt,
   stale: false,
   totals: {
-    internet: { flows_per_sec: 2.85, drops_per_sec: 0 },
-    lan: { flows_per_sec: 3.43, drops_per_sec: 0 },
-    cluster: { flows_per_sec: 61.42, drops_per_sec: 0.25 },
+    internet: rates(2_949_120, 2.85),
+    lan: rates(307_200, 3.43),
+    cluster: rates(3_250_586, 61.42, 0.25),
+    // Measured on the real cluster under load: 38.5 MB/s off the NFS share.
+    storage: rates(40_395_593),
   },
   by_app: [
     {
       app: 'qbittorrent',
-      internet: { flows_per_sec: 5.22, drops_per_sec: 0 },
-      lan: { flows_per_sec: 0, drops_per_sec: 0 },
-      cluster: { flows_per_sec: 1.1, drops_per_sec: 0 },
+      internet: rates(0, 5.22),
+      lan: rates(0),
+      cluster: rates(0, 1.1),
+      storage: rates(0),
     },
     {
       app: 'host',
-      internet: { flows_per_sec: 0, drops_per_sec: 0 },
-      lan: { flows_per_sec: 3.43, drops_per_sec: 0 },
-      cluster: { flows_per_sec: 0, drops_per_sec: 0 },
+      internet: rates(0),
+      lan: rates(0, 3.43),
+      cluster: rates(0),
+      storage: rates(0),
     },
   ],
   series: {
-    internet: series(2.85),
-    lan: series(3.43),
-    cluster: series(61.42),
+    internet: series(2_949_120, 2.85),
+    lan: series(307_200, 3.43),
+    cluster: series(3_250_586, 61.42),
+    storage: series(40_395_593),
   },
 }
 
@@ -145,22 +159,27 @@ test.beforeEach(async ({ api, context }) => {
   await context.routeWebSocket('**/api/networking/ws', socket => socket.close())
 })
 
-test('the page separates internet, LAN and in-cluster traffic', async ({ page }) => {
+test('the page separates internet, LAN, in-cluster and storage traffic', async ({ page }) => {
   await page.goto('/networking')
   await expect(page.getByRole('heading', { name: 'Networking' })).toBeVisible()
 
-  // The three classes, each with its own measured rate. Each appears twice —
+  // Four classes, each with its own measured byte rate. Each appears twice —
   // once on its card, once in the split bar's legend — so take the first.
-  await expect(page.getByText('2.85/s').first()).toBeVisible()
-  await expect(page.getByText('3.43/s').first()).toBeVisible()
-  await expect(page.getByText('61.4/s').first()).toBeVisible()
+  await expect(page.getByText('2.81 MB/s').first()).toBeVisible()
+  await expect(page.getByText('300 KB/s').first()).toBeVisible()
+  await expect(page.getByText('3.1 MB/s').first()).toBeVisible()
+  // Storage is the one Cilium cannot see at all; it comes from the kernel.
+  await expect(page.getByText('38.52 MB/s').first()).toBeVisible()
 
-  // In-cluster dominates, and the card says so as a share rather than leaving
-  // the reader to divide three numbers.
-  await expect(page.getByText('91% of flows')).toBeVisible()
+  // Storage dominates, and the card says so as a share rather than leaving the
+  // reader to divide four numbers.
+  await expect(page.getByText('86% of bytes')).toBeVisible()
 
-  // A denied flow is surfaced where the denial happened.
-  await expect(page.getByText('0.25/s dropped')).toBeVisible()
+  // Connection counts survive where one exists, and storage shows none.
+  await expect(page.getByText('61.4/s conn')).toBeVisible()
+
+  // A denied connection is surfaced where the denial happened.
+  await expect(page.getByText('0.25/s denied')).toBeVisible()
 
   await expect(page.getByRole('heading', { name: 'Where traffic goes' })).toBeVisible()
 })
@@ -229,12 +248,13 @@ test('with no Hubble data the page says so instead of showing zeros', async ({ p
         observed_at: observedAt,
         stale: true,
         totals: {
-          internet: { flows_per_sec: 0, drops_per_sec: 0 },
-          lan: { flows_per_sec: 0, drops_per_sec: 0 },
-          cluster: { flows_per_sec: 0, drops_per_sec: 0 },
+          internet: rates(0),
+          lan: rates(0),
+          cluster: rates(0),
+          storage: rates(0),
         },
         by_app: [],
-        series: { internet: [], lan: [], cluster: [] },
+        series: { internet: [], lan: [], cluster: [], storage: [] },
       } satisfies FlowClassResponse,
     }))
   }
@@ -242,7 +262,7 @@ test('with no Hubble data the page says so instead of showing zeros', async ({ p
   await page.goto('/networking')
   await expect(page.getByRole('heading', { name: 'Networking' })).toBeVisible()
 
-  await expect(page.getByText('No data')).toHaveCount(3)
+  await expect(page.getByText('No data')).toHaveCount(4)
   await expect(page.getByText('No flow data available')).toBeVisible()
   // The byte volumes are a different source and keep working.
   await expect(page.getByText('Total Receive')).toBeVisible()

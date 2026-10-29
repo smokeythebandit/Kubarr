@@ -8,7 +8,7 @@ import {
   Network,
   RefreshCw,
 } from 'lucide-react'
-import { FlowWindow } from '../api/networking'
+import { emptyClassTotals, FlowWindow } from '../api/networking'
 import { appVpnApi } from '../api/vpn'
 import { useNetworkMetricsWs } from '../hooks/useNetworkMetricsWs'
 import { useFlowClasses } from '../hooks/useFlowClasses'
@@ -105,11 +105,7 @@ export default function NetworkingPage() {
   // in both cases the honest answer is "no data", not a zero.
   const flowsUnavailable = flowClassesError || (flowClasses?.stale ?? false)
 
-  const totals = flowClasses?.totals ?? {
-    internet: { flows_per_sec: 0, drops_per_sec: 0 },
-    lan: { flows_per_sec: 0, drops_per_sec: 0 },
-    cluster: { flows_per_sec: 0, drops_per_sec: 0 },
-  }
+  const totals = flowClasses?.totals ?? emptyClassTotals()
 
   // Filter topology based on showInfra toggle
   const filteredTopology = useMemo(() => {
@@ -187,7 +183,7 @@ export default function NetworkingPage() {
               Where traffic goes
             </h2>
             <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Flow events per second, split by destination
+              Bytes per second, split by destination
             </p>
           </div>
           <FlowWindowSelector value={flowWindow} onChange={setFlowWindow} />

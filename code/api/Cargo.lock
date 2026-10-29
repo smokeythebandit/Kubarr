@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "kubarr"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -959,6 +959,14 @@ use crate::services::flow_classes::{classify_destination, FlowClass};
 pub struct ClassRates {
     pub flows_per_sec: f64,
     pub drops_per_sec: f64,
+    /// Measured bytes per second, where a source for them exists.
+    ///
+    /// Hubble counts connection events and carries no byte field, so this does
+    /// not come from the same place as `flows_per_sec`: the three network
+    /// classes get theirs from Cilium's conntrack map and storage from the
+    /// kernel's NFS client counters. A class with no byte source reports zero
+    /// here and the UI shows its flow rate instead.
+    pub bytes_per_sec: f64,
 }
 
 #[derive(Debug, Default, Clone, Serialize, utoipa::ToSchema)]
@@ -966,6 +974,15 @@ pub struct ClassTotals {
     pub internet: ClassRates,
     pub lan: ClassRates,
     pub cluster: ClassRates,
+    /// NFS traffic, which none of the other three can see.
+    ///
+    /// Storage is mounted by the node's own kernel rather than by the pods that
+    /// use it, so it never crosses a Cilium endpoint: measured on a live
+    /// cluster while reading hundreds of megabytes off the share, both Hubble
+    /// and the conntrack map reported exactly zero. These bytes come from
+    /// node-exporter's `mountstats` collector, and there is no flow count for
+    /// them.
+    pub storage: ClassRates,
 }
 
 #[derive(Debug, Default, Clone, Serialize, utoipa::ToSchema)]
@@ -974,12 +991,16 @@ pub struct AppClassRates {
     pub internet: ClassRates,
     pub lan: ClassRates,
     pub cluster: ClassRates,
+    /// Always empty per app: the kernel attributes NFS to the node, not to
+    /// whichever pod caused the read.
+    pub storage: ClassRates,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct FlowSeriesPoint {
     pub t: i64,
     pub flows_per_sec: f64,
+    pub bytes_per_sec: f64,
 }
 
 #[derive(Debug, Default, Clone, Serialize, utoipa::ToSchema)]
@@ -987,6 +1008,7 @@ pub struct FlowSeries {
     pub internet: Vec<FlowSeriesPoint>,
     pub lan: Vec<FlowSeriesPoint>,
     pub cluster: Vec<FlowSeriesPoint>,
+    pub storage: Vec<FlowSeriesPoint>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -1063,10 +1085,89 @@ fn absorb_totals(totals: &mut ClassTotals, rows: &[serde_json::Value], drops: bo
     }
 }
 
+/// Fold the flow exporter's byte rows into the class totals.
+///
+/// These rows carry a `class` label the exporter already decided, rather than
+/// the `destination` identity Hubble reports, so they are not interchangeable
+/// with the flow rows and get their own reader. A class name that is not one of
+/// the three is skipped: a future exporter version adding one must not have its
+/// bytes land silently in the wrong bucket.
+fn absorb_class_bytes(totals: &mut ClassTotals, rows: &[serde_json::Value]) {
+    for row in rows {
+        let Some(value) = sample_value(row) else {
+            continue;
+        };
+        let rates = match metric_label(row, "class").as_str() {
+            "internet" => &mut totals.internet,
+            "lan" => &mut totals.lan,
+            "cluster" => &mut totals.cluster,
+            _ => continue,
+        };
+        rates.bytes_per_sec += value;
+    }
+}
+
+/// Merge a byte series onto the flow series that is already built.
+///
+/// The two come from different metrics on different scrape intervals, so their
+/// timestamps rarely line up exactly. A byte sample is attached to the point it
+/// matches and otherwise becomes a point of its own, leaving the flow rate at
+/// zero there rather than inventing one.
+fn absorb_byte_series(series: &mut FlowSeries, rows: &[serde_json::Value]) {
+    for row in rows {
+        let target = match metric_label(row, "class").as_str() {
+            "internet" => &mut series.internet,
+            "lan" => &mut series.lan,
+            "cluster" => &mut series.cluster,
+            _ => continue,
+        };
+        merge_byte_points(target, row);
+    }
+}
+
+/// The storage series has no class label: it is one number for the whole node.
+fn absorb_storage_series(series: &mut FlowSeries, rows: &[serde_json::Value]) {
+    for row in rows {
+        merge_byte_points(&mut series.storage, row);
+    }
+}
+
+fn merge_byte_points(points: &mut Vec<FlowSeriesPoint>, row: &serde_json::Value) {
+    let Some(values) = row.get("values").and_then(|values| values.as_array()) else {
+        return;
+    };
+    for pair in values {
+        let Some(pair) = pair.as_array() else {
+            continue;
+        };
+        let Some(t) = pair.first().and_then(|t| t.as_f64()) else {
+            continue;
+        };
+        let Some(value) = pair
+            .get(1)
+            .and_then(|raw| raw.as_str())
+            .and_then(|text| text.parse::<f64>().ok())
+        else {
+            continue;
+        };
+        let t = t as i64;
+        match points.iter_mut().find(|point| point.t == t) {
+            Some(point) => point.bytes_per_sec += value,
+            None => points.push(FlowSeriesPoint {
+                t,
+                flows_per_sec: 0.0,
+                bytes_per_sec: value,
+            }),
+        }
+    }
+    points.sort_by_key(|point| point.t);
+}
+
 /// Group per-source rows by app and class.
 ///
-/// An empty source is the host: LAN traffic is kubelet NFS activity rather than
-/// anything an app did.
+/// An empty source is the host rather than any pod. That is not NFS, despite an
+/// earlier note here saying so: storage never reaches Hubble at all. Host rows
+/// are the node's own traffic, which on this cluster is mostly its router.
 fn apps_from_vm(
     forwarded: &[serde_json::Value],
     dropped: &[serde_json::Value],
@@ -1105,6 +1206,7 @@ fn apps_from_vm(
             internet: totals.internet,
             lan: totals.lan,
             cluster: totals.cluster,
+            storage: totals.storage,
         })
         .collect()
 }
@@ -1153,7 +1255,11 @@ fn absorb_series(series: &mut FlowSeries, rows: &[serde_json::Value]) {
     for (key, points) in per_class {
         let points: Vec<FlowSeriesPoint> = points
             .into_iter()
-            .map(|(t, flows_per_sec)| FlowSeriesPoint { t, flows_per_sec })
+            .map(|(t, flows_per_sec)| FlowSeriesPoint {
+                t,
+                flows_per_sec,
+                bytes_per_sec: 0.0,
+            })
             .collect();
         match key {
             "internet" => series.internet = points,
@@ -1205,6 +1311,17 @@ async fn get_flow_classes(
         )
     };
 
+    // Bytes come from somewhere else entirely, because Hubble has none.
+    //
+    // The three network classes are counted by the flow exporter, which reads
+    // Cilium's conntrack map. Storage is counted by the kernel's NFS client,
+    // and must be de-duplicated: every mount of the same server shares one set
+    // of counters, so a plain sum multiplies the rate by the number of mounts.
+    // Measured on a live cluster: summing reported 539 MB/s where the real
+    // figure was 38.5 MB/s across 14 mounts.
+    const BYTES_BY_CLASS: &str = "sum by (class) (rate(kubarr_network_bytes_total[1m]))";
+    const STORAGE_BYTES: &str = "sum(max by (mountaddr) (rate(node_mountstats_nfs_read_bytes_total[1m]))) + sum(max by (mountaddr) (rate(node_mountstats_nfs_write_bytes_total[1m])))";
+
     let (q_ext_fwd, q_ext_drop) = (external("FORWARDED"), external("DROPPED"));
     let (q_int_fwd, q_int_drop) = (internal("FORWARDED"), internal("DROPPED"));
     let (q_app_fwd, q_app_drop) = (per_app("FORWARDED"), per_app("DROPPED"));
@@ -1234,11 +1351,21 @@ async fn get_flow_classes(
         query_vm_with_timeout(&q_app_drop, OPTIONAL_QUERY_TIMEOUT_SECONDS)
     );
 
+    let (class_bytes, storage_bytes) = tokio::join!(
+        query_vm_with_timeout(BYTES_BY_CLASS, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_with_timeout(STORAGE_BYTES, OPTIONAL_QUERY_TIMEOUT_SECONDS)
+    );
+
     let mut totals = ClassTotals::default();
     absorb_totals(&mut totals, &external_forwarded, false);
     absorb_totals(&mut totals, &external_dropped, true);
     absorb_totals(&mut totals, &internal_forwarded, false);
     absorb_totals(&mut totals, &internal_dropped, true);
+    absorb_class_bytes(&mut totals, &class_bytes);
+    totals.storage.bytes_per_sec = storage_bytes
+        .first()
+        .and_then(sample_value)
+        .unwrap_or_default();
 
     let mut series = FlowSeries::default();
     let (external_series, internal_series) = tokio::join!(
@@ -1260,7 +1387,32 @@ async fn get_flow_classes(
     absorb_series(&mut series, &external_series);
     absorb_series(&mut series, &internal_series);
 
-    let stale = is_stale(&external_forwarded) && is_stale(&internal_forwarded);
+    let (byte_series, storage_series) = tokio::join!(
+        query_vm_range_with_timeout(
+            BYTES_BY_CLASS,
+            start,
+            end,
+            &step,
+            OPTIONAL_QUERY_TIMEOUT_SECONDS
+        ),
+        query_vm_range_with_timeout(
+            STORAGE_BYTES,
+            start,
+            end,
+            &step,
+            OPTIONAL_QUERY_TIMEOUT_SECONDS
+        )
+    );
+    absorb_byte_series(&mut series, &byte_series);
+    absorb_storage_series(&mut series, &storage_series);
+
+    // Four sources now feed this panel. It is only empty when every one of
+    // them is: with Hubble off but the flow exporter running, the page still
+    // has real byte rates to show.
+    let stale = is_stale(&external_forwarded)
+        && is_stale(&internal_forwarded)
+        && is_stale(&class_bytes)
+        && totals.storage.bytes_per_sec == 0.0;
 
     Ok((
         [crate::endpoints::short_cache(10)],
@@ -1288,6 +1440,87 @@ mod flow_class_tests {
     /// points -- so every panel reported `stale` and every topology edge drew
     /// as unobserved while the cluster was serving the data fine. Nothing
     /// failed; the page simply said there was no data.
+    #[test]
+    fn byte_rows_are_read_by_class_not_by_destination() {
+        // The exporter has already decided the class, so these rows carry a
+        // `class` label where Hubble's carry a `destination` identity. Reading
+        // one with the other's key silently drops every byte.
+        let rows = serde_json::json!([
+            { "metric": { "class": "internet" }, "value": [1.0, "2048"] },
+            { "metric": { "class": "lan" }, "value": [1.0, "512"] },
+            { "metric": { "class": "cluster" }, "value": [1.0, "40000"] }
+        ]);
+        let mut totals = ClassTotals::default();
+        absorb_class_bytes(&mut totals, rows.as_array().expect("array"));
+
+        assert_eq!(totals.internet.bytes_per_sec, 2048.0);
+        assert_eq!(totals.lan.bytes_per_sec, 512.0);
+        assert_eq!(totals.cluster.bytes_per_sec, 40000.0);
+        // Bytes must never be mistaken for flows: they have no flow count.
+        assert_eq!(totals.internet.flows_per_sec, 0.0);
+    }
+
+    #[test]
+    fn an_unknown_class_is_skipped_rather_than_misfiled() {
+        let rows = serde_json::json!([
+            { "metric": { "class": "storage" }, "value": [1.0, "999"] },
+            { "metric": {}, "value": [1.0, "111"] }
+        ]);
+        let mut totals = ClassTotals::default();
+        absorb_class_bytes(&mut totals, rows.as_array().expect("array"));
+
+        // Storage has its own source; a byte row claiming that class must not
+        // land in one of the three network buckets.
+        assert_eq!(totals.internet.bytes_per_sec, 0.0);
+        assert_eq!(totals.lan.bytes_per_sec, 0.0);
+        assert_eq!(totals.cluster.bytes_per_sec, 0.0);
+        assert_eq!(totals.storage.bytes_per_sec, 0.0);
+    }
+
+    #[test]
+    fn byte_samples_merge_onto_the_flow_series_by_timestamp() {
+        let mut series = FlowSeries::default();
+        absorb_series(
+            &mut series,
+            serde_json::json!([
+                { "metric": { "destination": "reserved:world" }, "values": [[100.0, "3.0"]] }
+            ])
+            .as_array()
+            .expect("array"),
+        );
+        absorb_byte_series(
+            &mut series,
+            serde_json::json!([
+                { "metric": { "class": "internet" }, "values": [[100.0, "2048"], [160.0, "4096"]] }
+            ])
+            .as_array()
+            .expect("array"),
+        );
+
+        assert_eq!(series.internet.len(), 2);
+        // The shared timestamp carries both measures.
+        assert_eq!(series.internet[0].flows_per_sec, 3.0);
+        assert_eq!(series.internet[0].bytes_per_sec, 2048.0);
+        // The byte-only timestamp keeps a zero flow rate rather than a guess.
+        assert_eq!(series.internet[1].flows_per_sec, 0.0);
+        assert_eq!(series.internet[1].bytes_per_sec, 4096.0);
+    }
+
+    #[test]
+    fn storage_series_needs_no_class_label() {
+        let mut series = FlowSeries::default();
+        absorb_storage_series(
+            &mut series,
+            serde_json::json!([{ "metric": {}, "values": [[100.0, "40395593"]] }])
+                .as_array()
+                .expect("array"),
+        );
+
+        assert_eq!(series.storage.len(), 1);
+        assert_eq!(series.storage[0].bytes_per_sec, 40395593.0);
+        assert!(series.internet.is_empty());
+    }
+
     #[test]
     fn an_instant_row_and_a_range_row_are_not_interchangeable() {
         let instant = serde_json::json!({

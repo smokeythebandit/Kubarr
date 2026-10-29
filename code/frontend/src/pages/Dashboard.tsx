@@ -7,7 +7,7 @@ import { MiniSparkline } from './MonitoringPage'
 import { Cpu, MemoryStick, Container, HardDrive, Activity, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { appsApi } from '../api/apps'
-import { FLOW_CLASS_NAMES, formatFlowRate, totalFlowRate } from '../api/networking'
+import { FLOW_CLASS_NAMES, formatBandwidth, totalByteRate } from '../api/networking'
 import { useFlowClasses } from '../hooks/useFlowClasses'
 import { FlowSplitBar } from '../components/networking/FlowSplitBar'
 import { flowClassStyle } from '../components/networking/flowClasses'
@@ -418,7 +418,7 @@ export default function Dashboard() {
                   <div className="text-gray-500 dark:text-gray-400 text-sm font-medium">Network I/O</div>
                   {flowsAvailable && flowTotals && (
                     <div className="text-xs text-gray-400 dark:text-gray-500">
-                      {formatFlowRate(totalFlowRate(flowTotals))} flows
+                      {formatBandwidth(totalByteRate(flowTotals))} classified
                     </div>
                   )}
                 </div>
@@ -431,20 +431,30 @@ export default function Dashboard() {
               {flowsAvailable && flowTotals ? (
                 <div className="relative">
                   <FlowSplitBar totals={flowTotals} height={6} />
-                  <div className="mt-1.5 flex items-center justify-between gap-1">
-                    {FLOW_CLASS_NAMES.map((name) => {
-                      const style = flowClassStyle(name)
-                      return (
-                        <div key={name} className="flex min-w-0 items-center gap-1">
-                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.swatch}`} />
-                          <span className="truncate text-[10px] text-gray-500 dark:text-gray-400">{style.label}</span>
-                          <span className="font-mono text-[10px] font-semibold text-gray-700 dark:text-gray-200">
-                            {formatFlowRate(flowTotals[name].flows_per_sec)}
-                          </span>
-                        </div>
-                      )
-                    })}
-                  </div>
+                  {/* Four labelled figures do not fit across a 125px tile --
+                      they truncate to "Int…" and wrap. The bar carries the
+                      split (each segment has its own tooltip) and this line
+                      names whichever class dominates it; the full breakdown is
+                      one click away on the network page. */}
+                  {(() => {
+                    const total = totalByteRate(flowTotals)
+                    const [leader] = [...FLOW_CLASS_NAMES].sort(
+                      (a, b) => flowTotals[b].bytes_per_sec - flowTotals[a].bytes_per_sec
+                    )
+                    const share = total > 0 ? (flowTotals[leader].bytes_per_sec / total) * 100 : 0
+                    const style = flowClassStyle(leader)
+                    return (
+                      <div className="mt-1.5 flex items-center gap-1.5 text-[11px]">
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.swatch}`} />
+                        <span className="text-gray-500 dark:text-gray-400">
+                          mostly {style.label}
+                        </span>
+                        <span className="font-mono font-semibold text-gray-700 dark:text-gray-200">
+                          {share.toFixed(0)}%
+                        </span>
+                      </div>
+                    )
+                  })()}
                 </div>
               ) : networkHistory?.rx_series && networkHistory.rx_series.length >= 2 ? (
                 <div className="relative -mx-5 -mb-5">

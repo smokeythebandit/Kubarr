@@ -1,4 +1,4 @@
-import { Globe, Router, Boxes } from 'lucide-react'
+import { Globe, Router, Boxes, HardDrive } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { FlowClassName } from '../../api/networking'
 
@@ -63,6 +63,18 @@ export const FLOW_CLASS_STYLES: Record<FlowClassName, FlowClassStyle> = {
     bg: 'bg-violet-500/10',
     border: 'border-violet-500/30',
     swatch: 'bg-violet-500',
+  },
+  storage: {
+    name: 'storage',
+    label: 'Storage',
+    description: 'NFS reads and writes, counted by the node\u2019s kernel',
+    icon: HardDrive,
+    stroke: '#14b8a6',
+    fill: 'rgba(20, 184, 166, 0.18)',
+    text: 'text-teal-600 dark:text-teal-400',
+    bg: 'bg-teal-500/10',
+    border: 'border-teal-500/30',
+    swatch: 'bg-teal-500',
   },
 }
 

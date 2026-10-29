@@ -1,8 +1,8 @@
 import {
   ClassTotals,
   FLOW_CLASS_NAMES,
-  formatFlowRate,
-  totalFlowRate,
+  formatBandwidth,
+  totalByteRate,
 } from '../../api/networking'
 import { flowClassStyle } from './flowClasses'
 
@@ -16,11 +16,12 @@ interface FlowSplitBarProps {
 }
 
 /**
- * The three-way split as one bar: who is talking where, at a glance.
+ * The split as one bar: how much traffic went where, at a glance.
  *
- * A class with a real but tiny share still gets a visible sliver, because
- * "almost no LAN traffic" and "no LAN traffic" are different answers and the
- * bar is often the only place the difference shows.
+ * Proportions are by bytes, which is what the page leads with. A class with a
+ * real but tiny share still gets a visible sliver, because "almost no LAN
+ * traffic" and "no LAN traffic" are different answers and the bar is often the
+ * only place the difference shows.
  */
 const MIN_VISIBLE_SHARE = 0.02
 
@@ -30,11 +31,11 @@ export function FlowSplitBar({
   showLegend = false,
   className = '',
 }: FlowSplitBarProps) {
-  const total = totalFlowRate(totals)
+  const total = totalByteRate(totals)
 
   const segments = FLOW_CLASS_NAMES.map(name => {
     const style = flowClassStyle(name)
-    const rate = totals[name].flows_per_sec
+    const rate = totals[name].bytes_per_sec
     const share = total > 0 ? rate / total : 0
     return {
       style,
@@ -54,7 +55,7 @@ export function FlowSplitBar({
         style={{ height }}
         role="img"
         aria-label={segments
-          .map(s => `${s.style.label} ${formatFlowRate(s.rate)}`)
+          .map(s => `${s.style.label} ${formatBandwidth(s.rate)}`)
           .join(', ')}
       >
         {widthSum > 0 &&
@@ -64,7 +65,7 @@ export function FlowSplitBar({
                 key={segment.style.name}
                 className={`${segment.style.swatch} transition-all duration-500`}
                 style={{ width: `${(segment.width / widthSum) * 100}%` }}
-                title={`${segment.style.label}: ${formatFlowRate(segment.rate)} (${(
+                title={`${segment.style.label}: ${formatBandwidth(segment.rate)} (${(
                   segment.share * 100
                 ).toFixed(0)}%)`}
               />
@@ -83,7 +84,7 @@ export function FlowSplitBar({
                 {segment.style.label}
               </span>
               <span className="font-mono text-xs font-semibold text-gray-700 dark:text-gray-200">
-                {formatFlowRate(segment.rate)}
+                {formatBandwidth(segment.rate)}
               </span>
             </div>
           ))}

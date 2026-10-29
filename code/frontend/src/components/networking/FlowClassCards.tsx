@@ -1,10 +1,11 @@
 import { ArrowDownToLine, ArrowUpFromLine, ShieldAlert } from 'lucide-react'
 import {
   ClassTotals,
+  CLASSES_WITH_FLOW_COUNTS,
   FLOW_CLASS_NAMES,
   formatBandwidth,
   formatFlowRate,
-  totalFlowRate,
+  totalByteRate,
 } from '../../api/networking'
 import { flowClassStyle } from './flowClasses'
 
@@ -20,24 +21,27 @@ const cardShell =
   'rounded-xl border p-4 bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700'
 
 /**
- * The page's headline row: where traffic is going (three measured classes, in
- * flows per second) next to how much of it there is (bytes, from cAdvisor).
+ * The page's headline row: how much traffic went where.
  *
- * The two halves are deliberately separate cards rather than one blended
- * number. Hubble has no byte counters and cAdvisor has no destinations, so a
- * per-class byte figure would have to be invented.
+ * Every figure here is measured, but not all by the same thing. The three
+ * network classes are counted by Cilium's conntrack map, storage by the
+ * kernel's NFS client, and the two totals on the right by cAdvisor. Nothing is
+ * apportioned from one source to another: where a class has no connection
+ * count, it simply does not show one.
  */
 export function FlowClassCards({ totals, stale, totalRx, totalTx }: FlowClassCardsProps) {
-  const total = totalFlowRate(totals)
+  const total = totalByteRate(totals)
 
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-6">
       {FLOW_CLASS_NAMES.map(name => {
         const style = flowClassStyle(name)
         const Icon = style.icon
-        const rate = totals[name].flows_per_sec
+        const bytes = totals[name].bytes_per_sec
+        const flows = totals[name].flows_per_sec
         const drops = totals[name].drops_per_sec
-        const share = total > 0 ? (rate / total) * 100 : 0
+        const share = total > 0 ? (bytes / total) * 100 : 0
+        const hasFlowCount = CLASSES_WITH_FLOW_COUNTS.includes(name)
 
         return (
           <div key={name} className={cardShell} title={style.description}>
@@ -55,17 +59,20 @@ export function FlowClassCards({ totals, stale, totalRx, totalTx }: FlowClassCar
             ) : (
               <>
                 <div className={`font-mono text-2xl font-bold ${style.text}`}>
-                  {formatFlowRate(rate)}
+                  {formatBandwidth(bytes)}
                 </div>
-                <div className="mt-1 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                  <span>{share.toFixed(0)}% of flows</span>
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-gray-500 dark:text-gray-400">
+                  <span>{share.toFixed(0)}% of bytes</span>
+                  {/* Storage has no connection count: the kernel reports bytes
+                      per mount, not per connection. */}
+                  {hasFlowCount && <span>{formatFlowRate(flows)} conn</span>}
                   {drops > 0 && (
                     <span
                       className="flex items-center gap-1 text-red-500"
-                      title="Flows the network policy denied"
+                      title="Connections the network policy denied"
                     >
                       <ShieldAlert size={12} />
-                      {formatFlowRate(drops)} dropped
+                      {formatFlowRate(drops)} denied
                     </span>
                   )}
                 </div>

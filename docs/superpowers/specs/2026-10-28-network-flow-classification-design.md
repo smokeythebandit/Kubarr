@@ -98,10 +98,17 @@ exactly twice the real flow rate — 1795 flows to `reserved:world` where the
 agent had counted 1182 and the Service path 611 of the same events. The CLI
 sets no Pod annotations for this reason, and a test asserts it stays that way.
 
-A documented consequence: **LAN traffic is host-originated**, because the NFS
-mounts are performed by the kubelet rather than by the pods. Per-app LAN
-attribution is therefore legitimately near-empty — that is the system telling
-the truth, not a bug.
+A documented consequence: **LAN traffic is host-originated**, so per-app LAN
+attribution is legitimately near-empty.
+
+> **Correction, 2026-10-29.** An earlier revision said that host-originated LAN
+> traffic *was* the NFS mounts. It is not. Measured while actively reading
+> hundreds of megabytes off the share, Hubble reported **zero** flows to the NFS
+> server and Cilium's conntrack map held **zero** entries for it. The NFS client
+> is the node's own kernel (`clientaddr=192.168.1.20`), so that traffic never
+> crosses a Cilium endpoint at all. What LAN actually contains on this cluster
+> is traffic to the router at `192.168.1.1`. Storage needed a different source
+> entirely; see "Bytes" below.
 
 ## Architecture
 
@@ -220,9 +227,41 @@ over seven components, `window.location.reload()` became query invalidation, VPN
 configs moved onto the query cache instead of their own timer, and the HTTP
 polling fallback went from 1 s to 5 s.
 
+## Bytes
+
+Added 2026-10-29, after the first revision concluded per-class bytes were not
+measurable. They are, from two sources that between them cover all four classes.
+Hubble is not one of them: a live flow event carries `ethernet`, `IP`, `l4`,
+identities and flags, and no length field anywhere.
+
+| Class | Source | How |
+|---|---|---|
+| internet, lan, cluster | Cilium's BPF conntrack map | `bpf.ctAccounting` fills in `Packets=` and `Bytes=` per connection; a DaemonSet samples the map and exports `kubarr_network_bytes_total{class}` |
+| storage | The kernel's NFS client | node-exporter's `mountstats` collector, as `node_mountstats_nfs_{read,write}_bytes_total` |
+
+Two measured traps, each of the same shape as the duplicate-scrape bug:
+
+- **Every mount of one NFS server shares one set of counters.** Summing across
+  the `export` label multiplies the rate by the number of mounts. Measured:
+  `sum(rate(...))` reported 539 MB/s where the real figure was 38.5 MB/s across
+  14 mounts. The query takes `max by (mountaddr)` first.
+- **A conntrack entry's byte count can go down**, because the slot is recycled
+  for a new connection. Subtracting underflows; the exporter treats a decrease
+  as a fresh connection and counts the current value.
+
+Two consequences worth stating plainly. Storage has **no connection count** —
+the kernel reports bytes per mount, not per connection — so its card shows a
+byte rate and nothing else. And storage has **no per-app attribution**, because
+the kernel attributes every read to the node rather than to whichever pod asked
+for it; it therefore has no column in the per-app table.
+
+The DaemonSet keeps the privilege in one container: a sidecar on the Cilium
+image dumps the map to a shared file, and the exporter that parses it holds no
+capabilities and never touches the host.
+
 ## Out of scope
 
-- Per-class byte volumes. Not measurable.
+- Per-app storage attribution. The kernel does not record it.
 - Hubble relay, Hubble UI, and L7/DNS metrics. The `flow` and `drop` metrics are
   enough for this; DNS and HTTP metrics are a cheap follow-up once the scrape
   exists.
