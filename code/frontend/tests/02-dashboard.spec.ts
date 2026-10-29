@@ -127,11 +127,13 @@ test.describe('Dashboard', () => {
       await expect(page).toHaveURL('/storage');
     });
 
-    test('Network card links to resources page', async ({ page }) => {
-      const networkCard = page.locator('a[href="/resources"]:has-text("Network I/O")');
+    test('Network card links to the networking page', async ({ page }) => {
+      // The tile carries the internet/LAN/in-cluster split, so it leads to the
+      // page that breaks that split down rather than to the resource metrics.
+      const networkCard = page.locator('a[href="/networking"]:has-text("Network I/O")');
       await expect(networkCard).toBeVisible({ timeout: 15000 });
       await networkCard.click();
-      await expect(page).toHaveURL('/resources');
+      await expect(page).toHaveURL('/networking');
     });
   });
 });
