@@ -18,6 +18,10 @@ export interface NetworkEdge {
   port?: number
   protocol?: string
   label: string
+  /** Measured flow-event rate, present only when Hubble saw traffic here. */
+  flows_per_sec?: number
+  /** False for a Service-derived edge with no traffic behind it. */
+  observed: boolean
 }
 
 export interface NetworkTopology {
@@ -39,6 +43,51 @@ export interface NetworkStats {
   pod_count: number
 }
 
+// ============================================================================
+// Flow classification
+//
+// Hubble counts flow *events*, not bytes — its flow protocol carries no byte
+// field. So everything below is in flows per second, and the byte figures above
+// stay the only measure of volume. Mixing the two into one "traffic" number
+// would read as measurement while being a guess.
+// ============================================================================
+
+/** The three destinations a flow can be headed for. */
+export type FlowClassName = 'internet' | 'lan' | 'cluster'
+
+export const FLOW_CLASS_NAMES: FlowClassName[] = ['internet', 'lan', 'cluster']
+
+export interface ClassRates {
+  flows_per_sec: number
+  drops_per_sec: number
+}
+
+export type ClassTotals = Record<FlowClassName, ClassRates>
+
+export interface AppClassRates extends ClassTotals {
+  app: string
+}
+
+export interface FlowSeriesPoint {
+  t: number
+  flows_per_sec: number
+}
+
+export type FlowSeries = Record<FlowClassName, FlowSeriesPoint[]>
+
+export interface FlowClassResponse {
+  observed_at: number
+  /** True when Hubble reports nothing. Say so; never draw a convincing zero. */
+  stale: boolean
+  totals: ClassTotals
+  by_app: AppClassRates[]
+  series: FlowSeries
+}
+
+/** Windows the backend accepts, in the order they're offered. */
+export const FLOW_WINDOWS = ['15m', '1h', '6h', '24h'] as const
+export type FlowWindow = (typeof FLOW_WINDOWS)[number]
+
 export const networkingApi = {
   getTopology: async (): Promise<NetworkTopology> => {
     const response = await apiClient.get<NetworkTopology>('/networking/topology')
@@ -47,6 +96,13 @@ export const networkingApi = {
 
   getStats: async (): Promise<NetworkStats[]> => {
     const response = await apiClient.get<NetworkStats[]>('/networking/stats')
+    return response.data
+  },
+
+  getFlowClasses: async (window: FlowWindow = '15m'): Promise<FlowClassResponse> => {
+    const response = await apiClient.get<FlowClassResponse>('/networking/flow-classes', {
+      params: { window },
+    })
     return response.data
   },
 }
@@ -75,4 +131,20 @@ export function formatPackets(packetsPerSec: number): string {
   if (packetsPerSec < 1000) return `${packetsPerSec.toFixed(1)} pps`
   if (packetsPerSec < 1000000) return `${(packetsPerSec / 1000).toFixed(2)} Kpps`
   return `${(packetsPerSec / 1000000).toFixed(2)} Mpps`
+}
+
+/**
+ * Flow rates are small numbers that matter at low magnitudes: 0.4/s of LAN
+ * traffic is a real reading, so it must not round to "0".
+ */
+export function formatFlowRate(flowsPerSec: number): string {
+  if (flowsPerSec === 0) return '0/s'
+  if (flowsPerSec < 10) return `${flowsPerSec.toFixed(2)}/s`
+  if (flowsPerSec < 1000) return `${flowsPerSec.toFixed(1)}/s`
+  return `${(flowsPerSec / 1000).toFixed(2)}k/s`
+}
+
+/** Sum of all three classes, used for share-of-total arithmetic. */
+export function totalFlowRate(totals: ClassTotals): number {
+  return FLOW_CLASS_NAMES.reduce((sum, name) => sum + totals[name].flows_per_sec, 0)
 }

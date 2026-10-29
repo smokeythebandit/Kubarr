@@ -12,8 +12,12 @@ test.describe('Networking Page', () => {
       await expect(page.locator('text=Network topology and traffic flow')).toBeVisible();
     });
 
-    test('shows Internet Traffic stat card', async ({ page }) => {
-      await expect(page.locator('text=Internet Traffic')).toBeVisible({ timeout: 15000 });
+    test('shows a card for each traffic class', async ({ page }) => {
+      // The three destinations are the point of this page: a reader must be
+      // able to tell internet traffic from LAN traffic from pod-to-pod.
+      await expect(page.locator('text=Internet').first()).toBeVisible({ timeout: 15000 });
+      await expect(page.locator('text=LAN').first()).toBeVisible({ timeout: 15000 });
+      await expect(page.locator('text=In-cluster').first()).toBeVisible({ timeout: 15000 });
     });
 
     test('shows Total Receive stat card', async ({ page }) => {
@@ -24,12 +28,24 @@ test.describe('Networking Page', () => {
       await expect(page.locator('text=Total Transmit')).toBeVisible({ timeout: 15000 });
     });
 
-    test('shows Errors/sec stat card', async ({ page }) => {
-      await expect(page.locator('text=Errors/sec')).toBeVisible({ timeout: 15000 });
+    test('shows the traffic-by-destination section', async ({ page }) => {
+      await expect(page.locator('h2:has-text("Where traffic goes")')).toBeVisible({ timeout: 15000 });
     });
 
-    test('shows Dropped/sec stat card', async ({ page }) => {
-      await expect(page.locator('text=Dropped/sec')).toBeVisible({ timeout: 15000 });
+    test('offers the time window choices', async ({ page }) => {
+      const group = page.locator('[role="group"][aria-label="Time window"]');
+      await expect(group).toBeVisible({ timeout: 15000 });
+      for (const window of ['15m', '1h', '6h', '24h']) {
+        await expect(group.locator(`button:has-text("${window}")`)).toBeVisible();
+      }
+    });
+
+    test('switching the window keeps the section on screen', async ({ page }) => {
+      const group = page.locator('[role="group"][aria-label="Time window"]');
+      await expect(group).toBeVisible({ timeout: 15000 });
+      await group.locator('button:has-text("1h")').click();
+      await expect(group.locator('button:has-text("1h")')).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.locator('h2:has-text("Where traffic goes")')).toBeVisible();
     });
 
     test('shows Network Flow section', async ({ page }) => {
@@ -164,7 +180,7 @@ test.describe('Networking Page', () => {
       await page.waitForLoadState('networkidle');
 
       // Check all visible stat cards
-      const statLabels = ['Internet Traffic', 'Total Receive', 'Total Transmit', 'Errors/sec', 'Dropped/sec'];
+      const statLabels = ['Internet', 'LAN', 'In-cluster', 'Total Receive', 'Total Transmit'];
 
       for (const label of statLabels) {
         const card = page.locator(`text=${label}`).first();
@@ -181,11 +197,10 @@ test.describe('Networking Page', () => {
       }
     });
 
-    test('stat cards display numeric or formatted values', async ({ page }) => {
+    test('byte cards display formatted bandwidth values', async ({ page }) => {
       await page.waitForLoadState('networkidle');
 
-      // Internet Traffic card should show some value (0 B/s, 1.2 MB/s, etc.)
-      const trafficCard = page.locator('text=Internet Traffic').first();
+      const trafficCard = page.locator('text=Total Receive').first();
       const isVisible = await trafficCard.isVisible({ timeout: 15000 }).catch(() => false);
 
       if (isVisible) {
@@ -197,27 +212,19 @@ test.describe('Networking Page', () => {
       }
     });
 
-    test('Errors/sec and Dropped/sec default to 0 with no errors', async ({ page }) => {
+    test('a class with no traffic says so without inventing a rate', async ({ page }) => {
       await page.waitForLoadState('networkidle');
 
-      // These should show 0 when there are no network errors in a test environment
-      const errorsCard = page.locator('text=Errors/sec').first();
-      const droppedCard = page.locator('text=Dropped/sec').first();
+      // With no Hubble data the cards must read "No data"; with data they carry
+      // a per-second rate. Either is fine — a blank or a NaN is not.
+      const lanCard = page.locator('text=LAN').first();
+      const isVisible = await lanCard.isVisible({ timeout: 15000 }).catch(() => false);
 
-      const errorsVisible = await errorsCard.isVisible({ timeout: 10000 }).catch(() => false);
-      const droppedVisible = await droppedCard.isVisible({ timeout: 10000 }).catch(() => false);
-
-      if (errorsVisible) {
-        const errorsText = await errorsCard.locator('../..').textContent().catch(() => '');
-        // Should not show NaN or undefined
-        expect(errorsText).not.toContain('NaN');
-        expect(errorsText).not.toContain('undefined');
-      }
-
-      if (droppedVisible) {
-        const droppedText = await droppedCard.locator('../..').textContent().catch(() => '');
-        expect(droppedText).not.toContain('NaN');
-        expect(droppedText).not.toContain('undefined');
+      if (isVisible) {
+        const cardText = (await lanCard.locator('../..').textContent().catch(() => '')) ?? '';
+        expect(cardText).not.toContain('NaN');
+        expect(cardText).not.toContain('undefined');
+        expect(/No data|\/s/.test(cardText)).toBe(true);
       }
     });
   });

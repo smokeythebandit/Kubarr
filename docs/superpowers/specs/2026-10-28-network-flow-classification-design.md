@@ -86,6 +86,18 @@ The queries therefore are:
 | Topology edges | `sum by (source, destination) (... subtype="to-endpoint" ...)` |
 | Drops | same shape with `verdict="DROPPED"` |
 
+### One scrape path, not two
+
+Enabling `hubble.metrics.enabled` makes Cilium's own chart create a
+`hubble-metrics` Service that already carries `prometheus.io/scrape`, and
+VictoriaMetrics discovers Services as well as Pods. Annotating the agent Pods
+as well therefore gives one counter two scrape paths. Measured on production:
+146 identical series under `job="kubernetes-pods"` and 146 more under
+`job="kubernetes-services"`, which made every `sum by (destination)` report
+exactly twice the real flow rate — 1795 flows to `reserved:world` where the
+agent had counted 1182 and the Service path 611 of the same events. The CLI
+sets no Pod annotations for this reason, and a test asserts it stays that way.
+
 A documented consequence: **LAN traffic is host-originated**, because the NFS
 mounts are performed by the kubelet rather than by the pods. Per-app LAN
 attribution is therefore legitimately near-empty — that is the system telling
@@ -97,12 +109,13 @@ the truth, not a bug.
 kubarr-cli --helm upgrade--> Cilium 1.20.4
                                hubble.metrics.enabled = flow + drop,
                                destinationContext = namespace|identity
-                               podAnnotations: prometheus.io/scrape :9965
+                                 (which makes Cilium's own chart create the
+                                  already-annotated hubble-metrics Service)
                                      |
                      CiliumClusterwideNetworkPolicy (selects no pod)
                        mints cidr: identities for the LAN ranges
                                      |
-                        VictoriaMetrics (existing kubernetes-pods job)
+                  VictoriaMetrics (existing kubernetes-services job)
                                      | rate() over 1m
                      kubarr-backend  GET /api/networking/flow-classes
                                      GET /api/networking/topology (edges merged)
@@ -153,7 +166,8 @@ weights, with Service-derived ports and names preserved.
 
 `kubarr-cli` enables Hubble metrics on an existing Cilium release using
 `--reuse-values`, and adds `kube-system` to the VM scrape list it already
-passes. Where no Cilium release exists it warns and continues: the single-node
+passes. It deliberately annotates nothing: see "One scrape path, not two".
+Where no Cilium release exists it warns and continues: the single-node
 path installs k3s with its own flannel, and replacing a working CNI is not
 something an app installer should do quietly.
 
@@ -174,13 +188,40 @@ something an app installer should do quietly.
 | API handler | Seeded VM responses: populated, empty, malformed samples, and missing series -> `stale` |
 | Topology merge | A Hubble edge with no Service keeps its weight; a Service with no traffic is not drawn; ports survive the merge |
 | Charts | Rendered-manifest assertions that VM's egress includes `kube-system` and that the CCNP renders only with the Cilium CRD present |
-| CLI | Dry-run assertion of the Helm arguments, including `--reuse-values` and no `--version` pin against a running CNI |
+| CLI | Dry-run assertion of the Helm arguments, including `--reuse-values`, no `--version` pin against a running CNI, and no Pod annotations (which would double-count) |
+
+## Sub-project B: the UI
+
+Built 2026-10-29 on the API above.
+
+| Piece | What it does |
+|---|---|
+| Dashboard tile | Keeps the byte figures, adds total flow rate and a three-segment bar with per-class rates. Links to `/networking` rather than `/resources`. Falls back to the old rx/tx sparkline when Hubble has nothing. |
+| Summary cards | Internet, LAN and In-cluster rates with each class's share of the total and its denied-flow rate, beside the two byte cards. The always-`0.00` Errors and Dropped cards are gone: those were cAdvisor interface counters, and policy denials are the drop that matters. |
+| `Where traffic goes` | A window selector (15m/1h/6h/24h), the split bar, and a stacked area chart. |
+| Per-app table | Three class columns beside the byte columns. Rows are the union of both sources, so a flow source with no pod behind it still appears. |
+| Topology edges | Width and particle speed come from the measured flow rate on a log scale; a Service-derived edge with no traffic is drawn thin and dashed with nothing moving on it, and the graph carries a legend saying which is which. |
+
+Three decisions worth keeping:
+
+- **Flow rates are never converted to bytes.** Hubble counts events; cAdvisor
+  counts bytes with no destination. The two stay in separate cards.
+- **Classes can be hidden from the chart.** In-cluster runs an order of
+  magnitude above the other two — 61/s against 3/s on the live cluster — so on
+  one shared axis internet and LAN flatten onto the baseline. Clicking a legend
+  entry drops that class and rescales the axis, which is the only way to read
+  the small classes against each other.
+- **A real but tiny class still gets a visible sliver** in the split bar. LAN at
+  0.2% of the total would otherwise vanish, and "almost no LAN traffic" is a
+  different answer from "none".
+
+Also done here: `NetworkingPage.tsx` dropped from 1063 lines to a composition
+over seven components, `window.location.reload()` became query invalidation, VPN
+configs moved onto the query cache instead of their own timer, and the HTTP
+polling fallback went from 1 s to 5 s.
 
 ## Out of scope
 
-- Sub-project B: the tile's three-way row, the page's summary cards, per-app
-  class columns, window selector, splitting the 1063-line `NetworkingPage.tsx`,
-  replacing `window.location.reload()`, and the 1 s polling fallback.
 - Per-class byte volumes. Not measurable.
 - Hubble relay, Hubble UI, and L7/DNS metrics. The `flow` and `drop` metrics are
   enough for this; DNS and HTTP metrics are a cheap follow-up once the scrape

@@ -21,7 +21,11 @@ interface UseNetworkMetricsWsResult {
 
 const MAX_RECONNECT_DELAY = 30000 // 30 seconds
 const INITIAL_RECONNECT_DELAY = 1000 // 1 second
-const POLLING_INTERVAL = 1000 // 1 second
+// The HTTP fallback used to poll every second. Both endpoints query
+// VictoriaMetrics and the cluster, so a second-by-second poll spent far more
+// work than the data changed: cAdvisor itself only updates on its own scrape
+// interval. Five seconds still reads as live and costs a fifth as much.
+const POLLING_INTERVAL = 5000 // 5 seconds
 
 export function useNetworkMetricsWs(): UseNetworkMetricsWsResult {
   const [topology, setTopology] = useState<NetworkTopology | null>(null)

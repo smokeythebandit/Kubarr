@@ -7,6 +7,10 @@ import { MiniSparkline } from './MonitoringPage'
 import { Cpu, MemoryStick, Container, HardDrive, Activity, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { appsApi } from '../api/apps'
+import { FLOW_CLASS_NAMES, formatFlowRate, totalFlowRate } from '../api/networking'
+import { useFlowClasses } from '../hooks/useFlowClasses'
+import { FlowSplitBar } from '../components/networking/FlowSplitBar'
+import { flowClassStyle } from '../components/networking/flowClasses'
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B'
@@ -180,6 +184,12 @@ export default function Dashboard() {
       .filter((app): app is NonNullable<typeof app> => Boolean(app)),
     [availableUpdates, catalog]
   )
+
+  // Where network traffic is headed: internet, LAN, or pod-to-pod. Measured by
+  // Hubble, so it answers a question the byte counters cannot.
+  const { data: flowClasses } = useFlowClasses('15m')
+  const flowTotals = flowClasses?.totals
+  const flowsAvailable = Boolean(flowClasses) && !flowClasses?.stale && Boolean(flowTotals)
 
   // Fetch cluster network history for sparkline
   const { data: networkHistory } = useQuery({
@@ -391,9 +401,12 @@ export default function Dashboard() {
               )}
             </Link>
 
-            {/* Network Traffic */}
+            {/* Network Traffic
+                Two measures, because neither alone answers the question: bytes
+                say how much, and the class split says where it went. The tile
+                leads to /networking, where both are broken out in full. */}
             <Link
-              to="/resources"
+              to="/networking"
               className="relative bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 rounded-xl p-5 h-[125px] border border-gray-200/60 dark:border-gray-700/60 shadow-[0_4px_12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.1)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)] hover:shadow-[0_12px_28px_rgba(34,197,94,0.2),0_4px_8px_rgba(0,0,0,0.1)] dark:hover:shadow-[0_12px_28px_rgba(34,197,94,0.25)] hover:-translate-y-1 transition-all duration-200 cursor-pointer group overflow-hidden flex flex-col justify-between"
             >
               <div className="absolute inset-0 bg-gradient-to-br from-green-500/10 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
@@ -401,19 +414,43 @@ export default function Dashboard() {
                 <div className="p-2.5 bg-gradient-to-br from-green-500/20 to-green-600/10 rounded-xl shadow-inner group-hover:from-green-500/30 group-hover:to-green-600/20 transition-colors">
                   <Activity className="w-5 h-5 text-green-500 dark:text-green-400" />
                 </div>
-                <div className="flex-1">
+                <div className="flex-1 min-w-0">
                   <div className="text-gray-500 dark:text-gray-400 text-sm font-medium">Network I/O</div>
+                  {flowsAvailable && flowTotals && (
+                    <div className="text-xs text-gray-400 dark:text-gray-500">
+                      {formatFlowRate(totalFlowRate(flowTotals))} flows
+                    </div>
+                  )}
                 </div>
                 <div className="text-right">
                   <div className="text-sm font-bold text-green-500 dark:text-green-400">↓ {formatBytesPerSec(clusterMetrics.network_receive_bytes_per_sec)}</div>
                   <div className="text-sm font-bold text-red-500 dark:text-red-400">↑ {formatBytesPerSec(clusterMetrics.network_transmit_bytes_per_sec)}</div>
                 </div>
               </div>
-              {networkHistory?.rx_series && networkHistory.rx_series.length >= 2 && (
+
+              {flowsAvailable && flowTotals ? (
+                <div className="relative">
+                  <FlowSplitBar totals={flowTotals} height={6} />
+                  <div className="mt-1.5 flex items-center justify-between gap-1">
+                    {FLOW_CLASS_NAMES.map((name) => {
+                      const style = flowClassStyle(name)
+                      return (
+                        <div key={name} className="flex min-w-0 items-center gap-1">
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.swatch}`} />
+                          <span className="truncate text-[10px] text-gray-500 dark:text-gray-400">{style.label}</span>
+                          <span className="font-mono text-[10px] font-semibold text-gray-700 dark:text-gray-200">
+                            {formatFlowRate(flowTotals[name].flows_per_sec)}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ) : networkHistory?.rx_series && networkHistory.rx_series.length >= 2 ? (
                 <div className="relative -mx-5 -mb-5">
                   <MiniSparkline data={networkHistory.rx_series} color="green" secondaryData={networkHistory.tx_series} secondaryColor="red" height={45} interactive formatValue={formatBytesPerSec} />
                 </div>
-              )}
+              ) : null}
             </Link>
 
             {/* Running Containers */}
