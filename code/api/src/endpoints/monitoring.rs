@@ -199,13 +199,26 @@ pub struct ClusterMetricsHistory {
 // ============================================================================
 
 async fn query_vm(query: &str) -> Vec<serde_json::Value> {
+    query_vm_with_timeout(query, 10).await
+}
+
+/// An instant query: one sample per series, shaped `{"value": [t, "n"]}`.
+///
+/// This is not interchangeable with a range query. A range query returns
+/// `{"values": [[t, "n"], ...]}`, and asking for a range whose start equals its
+/// end returns no points at all -- VictoriaMetrics finds the series and hands
+/// back an empty matrix. Anything that wants "the rate right now" belongs here.
+pub(crate) async fn query_vm_with_timeout(
+    query: &str,
+    timeout_seconds: u64,
+) -> Vec<serde_json::Value> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/v1/query", VICTORIAMETRICS_URL);
 
     match client
         .get(&url)
         .query(&[("query", query)])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(timeout_seconds))
         .send()
         .await
     {

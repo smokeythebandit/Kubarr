@@ -216,27 +216,22 @@ async fn get_network_topology(
     // to-endpoint and traffic leaving the pod at to-stack, which is the last
     // point where the source pod is still identifiable.
     let observed = {
-        use crate::endpoints::monitoring::query_vm_range_with_timeout;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_secs() as f64)
-            .unwrap_or_default();
+        use crate::endpoints::monitoring::query_vm_with_timeout;
+        // Instant queries: an edge weight is a rate right now, not a series.
+        // Asking for a range whose start equals its end returns no points at
+        // all, which drew every edge as unobserved on a cluster that was
+        // reporting traffic.
+        //
         // Concurrent, and on a short leash. Observed weights enrich the graph;
         // when VictoriaMetrics is absent the graph must still render promptly
         // from Service definitions rather than waiting out a default timeout.
         let (endpoint_rows, stack_rows) = tokio::join!(
-            query_vm_range_with_timeout(
+            query_vm_with_timeout(
                 "sum by (source, destination) (rate(hubble_flows_processed_total{traffic_direction=\"egress\",subtype=\"to-endpoint\",verdict=\"FORWARDED\"}[1m]))",
-                now,
-                now,
-                "1m",
                 OPTIONAL_QUERY_TIMEOUT_SECONDS,
             ),
-            query_vm_range_with_timeout(
+            query_vm_with_timeout(
                 "sum by (source, destination) (rate(hubble_flows_processed_total{traffic_direction=\"egress\",subtype=\"to-stack\",verdict=\"FORWARDED\"}[1m]))",
-                now,
-                now,
-                "1m",
                 OPTIONAL_QUERY_TIMEOUT_SECONDS,
             )
         );
@@ -1181,7 +1176,7 @@ async fn get_flow_classes(
     Query(query): Query<FlowClassQuery>,
     _auth: Authorized<NetworkingView>,
 ) -> Result<impl IntoResponse> {
-    use crate::endpoints::monitoring::query_vm_range_with_timeout;
+    use crate::endpoints::monitoring::{query_vm_range_with_timeout, query_vm_with_timeout};
     let window = query.window.unwrap_or_else(|| "15m".to_string());
     let (span, step) = window_span_and_step(&window);
     let end = std::time::SystemTime::now()
@@ -1214,8 +1209,14 @@ async fn get_flow_classes(
     let (q_int_fwd, q_int_drop) = (internal("FORWARDED"), internal("DROPPED"));
     let (q_app_fwd, q_app_drop) = (per_app("FORWARDED"), per_app("DROPPED"));
 
-    // Issued together rather than one after another: eight sequential round
-    // trips would make an unreachable VictoriaMetrics look like a hung request
+    // The totals are instant queries, not ranges. A range whose start equals
+    // its end returns an empty matrix -- VictoriaMetrics finds the series and
+    // hands back no points -- and its rows would carry `values` where
+    // `sample_value` reads `value`. Asking for a range here made every panel
+    // report `stale` on a cluster that was serving the data fine.
+    //
+    // Issued together rather than one after another: six sequential round trips
+    // would make an unreachable VictoriaMetrics look like a hung request
     // instead of an empty panel.
     let (
         external_forwarded,
@@ -1225,12 +1226,12 @@ async fn get_flow_classes(
         app_forwarded,
         app_dropped,
     ) = tokio::join!(
-        query_vm_range_with_timeout(&q_ext_fwd, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
-        query_vm_range_with_timeout(&q_ext_drop, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
-        query_vm_range_with_timeout(&q_int_fwd, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
-        query_vm_range_with_timeout(&q_int_drop, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
-        query_vm_range_with_timeout(&q_app_fwd, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS),
-        query_vm_range_with_timeout(&q_app_drop, end, end, &step, OPTIONAL_QUERY_TIMEOUT_SECONDS)
+        query_vm_with_timeout(&q_ext_fwd, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_with_timeout(&q_ext_drop, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_with_timeout(&q_int_fwd, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_with_timeout(&q_int_drop, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_with_timeout(&q_app_fwd, OPTIONAL_QUERY_TIMEOUT_SECONDS),
+        query_vm_with_timeout(&q_app_drop, OPTIONAL_QUERY_TIMEOUT_SECONDS)
     );
 
     let mut totals = ClassTotals::default();
@@ -1276,6 +1277,64 @@ async fn get_flow_classes(
 #[cfg(test)]
 mod flow_class_tests {
     use super::*;
+
+    /// VictoriaMetrics answers an instant query and a range query in two
+    /// different shapes, and this module reads both: totals and edge weights
+    /// come from `value`, the chart's series from `values`.
+    ///
+    /// Confusing them is not a parse error, it is silence. The handler once
+    /// asked for a range whose start equalled its end, which VictoriaMetrics
+    /// answers with an empty matrix -- it finds the series and returns no
+    /// points -- so every panel reported `stale` and every topology edge drew
+    /// as unobserved while the cluster was serving the data fine. Nothing
+    /// failed; the page simply said there was no data.
+    #[test]
+    fn an_instant_row_and_a_range_row_are_not_interchangeable() {
+        let instant = serde_json::json!({
+            "metric": { "destination": "reserved:world" },
+            "value": [1.0, "4.133"]
+        });
+        let range = serde_json::json!({
+            "metric": { "destination": "reserved:world" },
+            "values": [[1.0, "4.133"], [2.0, "4.2"]]
+        });
+
+        // Totals and edge weights read an instant row and only an instant row.
+        assert_eq!(sample_value(&instant), Some(4.133));
+        assert_eq!(
+            sample_value(&range),
+            None,
+            "a range row must not be read as a total: it carries `values`, not `value`"
+        );
+
+        // The chart reads a range row and only a range row.
+        let mut from_range = FlowSeries::default();
+        absorb_series(&mut from_range, std::slice::from_ref(&range));
+        assert_eq!(from_range.internet.len(), 2);
+
+        let mut from_instant = FlowSeries::default();
+        absorb_series(&mut from_instant, std::slice::from_ref(&instant));
+        assert!(
+            from_instant.internet.is_empty(),
+            "an instant row carries no series"
+        );
+    }
+
+    #[test]
+    fn totals_stay_empty_when_handed_range_rows() {
+        // The shape the handler used to receive. Every row is skipped, the
+        // totals stay at zero, and `is_stale` is left to call it no data --
+        // which is exactly how a working cluster looked broken.
+        let rows = serde_json::json!([
+            { "metric": { "destination": "reserved:world" }, "values": [[1.0, "4.133"]] },
+            { "metric": { "destination": "cidr:192.168.0.0/16,reserved:world" }, "values": [[1.0, "5.083"]] }
+        ]);
+        let mut totals = ClassTotals::default();
+        absorb_totals(&mut totals, rows.as_array().expect("array"), false);
+
+        assert_eq!(totals.internet.flows_per_sec, 0.0);
+        assert_eq!(totals.lan.flows_per_sec, 0.0);
+    }
 
     #[test]
     fn windows_map_to_a_span_and_about_sixty_points() {
