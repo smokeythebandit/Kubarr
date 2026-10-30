@@ -118,12 +118,13 @@ function NetworkFlowVisualizationInner({ topology, isFullscreen, vpnConfigs = []
 
   // Convert topology to React Flow nodes and edges
   const { initialNodes, initialEdges } = useMemo(() => {
-    // Edge weight comes from Hubble's measured flow rate, not from the
-    // endpoints' total byte volume. A busy app talking to a quiet one used to
-    // make that link look busy; now the link carries its own measurement.
-    const maxFlowsPerSec = Math.max(
-      ...topology.edges.map(edge => edge.flows_per_sec ?? 0),
-      0.0001
+    // Edge weight is the link's own measured byte rate, not the endpoints'
+    // total volume and not a connection count. A busy app talking to a quiet
+    // one used to make that link look busy, and weighting by connections made
+    // a chatty link outrank one carrying a download.
+    const maxBytesPerSec = Math.max(
+      ...topology.edges.map(edge => edge.bytes_per_sec ?? 0),
+      1
     )
 
     const nodes: Node<TrafficNodeData>[] = topology.nodes.map((node) => {
@@ -156,8 +157,8 @@ function NetworkFlowVisualizationInner({ topology, isFullscreen, vpnConfigs = []
       target: edge.target,
       type: 'animated',
       data: {
-        flowsPerSec: edge.flows_per_sec ?? 0,
-        maxFlowsPerSec,
+        bytesPerSec: edge.bytes_per_sec ?? 0,
+        maxBytesPerSec,
         observed: edge.observed,
         isHighlighted: false,
         isFaded: false,
@@ -226,8 +227,8 @@ function NetworkFlowVisualizationInner({ topology, isFullscreen, vpnConfigs = []
               ...edge,
               data: {
                 ...edge.data,
-                flowsPerSec: newEdgeData.data?.flowsPerSec ?? 0,
-                maxFlowsPerSec: newEdgeData.data?.maxFlowsPerSec ?? 1,
+                bytesPerSec: newEdgeData.data?.bytesPerSec ?? 0,
+                maxBytesPerSec: newEdgeData.data?.maxBytesPerSec ?? 1,
                 observed: newEdgeData.data?.observed ?? false,
               },
             }
@@ -363,7 +364,7 @@ function NetworkFlowVisualizationInner({ topology, isFullscreen, vpnConfigs = []
           <svg width="26" height="6" aria-hidden>
             <line x1="0" y1="3" x2="26" y2="3" stroke="#3b82f6" strokeWidth="4" />
           </svg>
-          <span>Measured traffic — thicker is busier</span>
+          <span>Measured traffic — thicker moves more data</span>
         </div>
         <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400">
           <svg width="26" height="6" aria-hidden>

@@ -119,6 +119,7 @@ const topology: NetworkTopology = {
       type: 'external',
       label: 'internet',
       flows_per_sec: 5.22,
+      bytes_per_sec: 2_949_120,
       observed: true,
     },
     // Configured by a Service, never used. It must stay on the graph without
@@ -171,9 +172,10 @@ test('the page separates internet, LAN, in-cluster and storage traffic', async (
   // Storage is the one Cilium cannot see at all; it comes from the kernel.
   await expect(page.getByText('38.52 MB/s').first()).toBeVisible()
 
-  // Storage dominates, and the card says so as a share rather than leaving the
-  // reader to divide four numbers.
-  await expect(page.getByText('86% of bytes')).toBeVisible()
+  // Shares are of the three destinations. Storage is the same bytes written
+  // down after arriving, so it is not in the denominator and claims no share.
+  await expect(page.getByText('50% of traffic')).toBeVisible()
+  await expect(page.getByText('read + written')).toBeVisible()
 
   // Connection counts survive where one exists, and storage shows none.
   await expect(page.getByText('61.4/s conn')).toBeVisible()
@@ -220,7 +222,7 @@ test('the per-app table keeps a flow source that has no pod', async ({ page }) =
 test('an unmeasured edge is drawn but not animated', async ({ page }) => {
   await page.goto('/networking')
 
-  await expect(page.getByText('Measured traffic — thicker is busier')).toBeVisible()
+  await expect(page.getByText('Measured traffic — thicker moves more data')).toBeVisible()
   await expect(page.getByText('Can talk, nothing seen')).toBeVisible()
 
   // The measured edge carries particles; the Service-only edge is dashed and

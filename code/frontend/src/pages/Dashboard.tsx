@@ -7,7 +7,7 @@ import { MiniSparkline } from './MonitoringPage'
 import { Cpu, MemoryStick, Container, HardDrive, Activity, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { appsApi } from '../api/apps'
-import { FLOW_CLASS_NAMES, formatBandwidth, totalByteRate } from '../api/networking'
+import { CLASSES_WITH_FLOW_COUNTS, formatBandwidth, totalByteRate } from '../api/networking'
 import { useFlowClasses } from '../hooks/useFlowClasses'
 import { FlowSplitBar } from '../components/networking/FlowSplitBar'
 import { flowClassStyle } from '../components/networking/flowClasses'
@@ -418,7 +418,7 @@ export default function Dashboard() {
                   <div className="text-gray-500 dark:text-gray-400 text-sm font-medium">Network I/O</div>
                   {flowsAvailable && flowTotals && (
                     <div className="text-xs text-gray-400 dark:text-gray-500">
-                      {formatBandwidth(totalByteRate(flowTotals))} classified
+                      {formatBandwidth(totalByteRate(flowTotals))} to the network
                     </div>
                   )}
                 </div>
@@ -438,7 +438,11 @@ export default function Dashboard() {
                       one click away on the network page. */}
                   {(() => {
                     const total = totalByteRate(flowTotals)
-                    const [leader] = [...FLOW_CLASS_NAMES].sort(
+                    // Storage is excluded here for the same reason it is
+                    // excluded from the total: it is the same bytes written
+                    // down after arriving, so it would always dominate a bar
+                    // that is meant to show where traffic went.
+                    const [leader] = [...CLASSES_WITH_FLOW_COUNTS].sort(
                       (a, b) => flowTotals[b].bytes_per_sec - flowTotals[a].bytes_per_sec
                     )
                     const share = total > 0 ? (flowTotals[leader].bytes_per_sec / total) * 100 : 0

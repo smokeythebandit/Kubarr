@@ -1,10 +1,10 @@
 import { BaseEdge, Edge, EdgeProps, getBezierPath } from '@xyflow/react'
 
 export interface AnimatedEdgeData {
-  /** Measured flow events per second, 0 when Hubble saw nothing here. */
-  flowsPerSec: number
+  /** Measured bytes per second, 0 when nothing was seen on this link. */
+  bytesPerSec: number
   /** Busiest measured edge in the graph, for relative weighting. */
-  maxFlowsPerSec: number
+  maxBytesPerSec: number
   /** False for a Service-derived edge with no traffic behind it. */
   observed: boolean
   isHighlighted: boolean
@@ -15,8 +15,8 @@ export interface AnimatedEdgeData {
 /**
  * An edge now says two different things.
  *
- * An *observed* edge was measured by Hubble: its thickness and particle speed
- * come from the real flow rate. An *unobserved* edge exists only because a
+ * An *observed* edge was measured: its thickness and particle speed come from
+ * the real byte rate. An *unobserved* edge exists only because a
  * Kubernetes Service says those two could talk — it stays on the graph, because
  * knowing a link is configured is useful, but it is drawn as a thin dashed line
  * with nothing moving along it. Animating it would claim traffic that never
@@ -43,13 +43,16 @@ export function AnimatedEdge({
   })
 
   const observed = data?.observed ?? false
-  const flowsPerSec = data?.flowsPerSec ?? 0
-  const maxFlowsPerSec = Math.max(data?.maxFlowsPerSec ?? 1, 0.0001)
+  const bytesPerSec = data?.bytesPerSec ?? 0
+  const maxBytesPerSec = Math.max(data?.maxBytesPerSec ?? 1, 1)
 
-  // Flow rates span orders of magnitude (0.4/s of LAN beside 60/s in-cluster),
-  // so weight on a log scale or the quiet edges all collapse to the minimum.
+  // Weighted by bytes rather than connections: a chatty link moving very
+  // little should not look busier than a quiet one carrying a download.
+  // Byte rates span orders of magnitude (kilobytes of LAN chatter beside tens
+  // of megabytes to the internet), so weight on a log scale or every quiet
+  // edge collapses to the minimum.
   const intensity = observed
-    ? Math.min(1, Math.log1p(flowsPerSec) / Math.log1p(maxFlowsPerSec))
+    ? Math.min(1, Math.log1p(bytesPerSec) / Math.log1p(maxBytesPerSec))
     : 0
 
   const strokeWidth = observed ? 1.5 + intensity * 6.5 : 1.5

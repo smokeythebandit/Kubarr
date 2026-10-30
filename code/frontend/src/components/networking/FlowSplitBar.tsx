@@ -1,6 +1,6 @@
 import {
   ClassTotals,
-  FLOW_CLASS_NAMES,
+  CLASSES_WITH_FLOW_COUNTS,
   formatBandwidth,
   totalByteRate,
 } from '../../api/networking'
@@ -18,10 +18,13 @@ interface FlowSplitBarProps {
 /**
  * The split as one bar: how much traffic went where, at a glance.
  *
- * Proportions are by bytes, which is what the page leads with. A class with a
- * real but tiny share still gets a visible sliver, because "almost no LAN
- * traffic" and "no LAN traffic" are different answers and the bar is often the
- * only place the difference shows.
+ * Proportions are by bytes across the three destinations. Storage is not one
+ * of them -- it is the same bytes written down after arriving, so a segment
+ * for it would make the bar add up to more traffic than moved.
+ *
+ * A class with a real but tiny share still gets a visible sliver, because
+ * "almost no LAN traffic" and "no LAN traffic" are different answers and the
+ * bar is often the only place the difference shows.
  */
 const MIN_VISIBLE_SHARE = 0.02
 
@@ -33,7 +36,7 @@ export function FlowSplitBar({
 }: FlowSplitBarProps) {
   const total = totalByteRate(totals)
 
-  const segments = FLOW_CLASS_NAMES.map(name => {
+  const segments = CLASSES_WITH_FLOW_COUNTS.map(name => {
     const style = flowClassStyle(name)
     const rate = totals[name].bytes_per_sec
     const share = total > 0 ? rate / total : 0

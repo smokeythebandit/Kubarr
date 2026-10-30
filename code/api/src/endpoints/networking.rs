@@ -58,6 +58,13 @@ pub struct NetworkEdge {
     /// Measured flow-event rate, when Hubble reported traffic on this edge.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flows_per_sec: Option<f64>,
+    /// Measured bytes per second, from the conntrack exporter.
+    ///
+    /// Hubble counts connections, so an edge weighted by `flows_per_sec` makes
+    /// a chatty link look busier than a quiet one moving far more data. Where
+    /// a byte rate exists it is the better weight, and the graph uses it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_per_sec: Option<f64>,
     /// True when traffic was actually seen. A Service-derived edge with no
     /// traffic stays in the graph but must not imply activity.
     pub observed: bool,
@@ -204,6 +211,23 @@ async fn get_network_topology(
     let namespace_set: HashSet<String> = metrics_map.keys().cloned().collect();
     let edges = discover_service_connections(k8s, &namespace_set).await;
 
+    // Which Pod address belongs to which namespace. The exporter names Pod
+    // ends by address because it cannot resolve them; this is the other half.
+    let pods_by_ip: HashMap<String, String> = {
+        let mut map = HashMap::new();
+        for namespace in metrics_map.keys() {
+            let Ok(pods) = k8s.list_pods(namespace, None).await else {
+                continue;
+            };
+            for pod in pods {
+                if let Some(ip) = pod.status.as_ref().and_then(|s| s.pod_ip.clone()) {
+                    map.insert(ip, namespace.clone());
+                }
+            }
+        }
+        map
+    };
+
     // Drop the lock before returning
     drop(k8s_guard);
 
@@ -239,7 +263,17 @@ async fn get_network_topology(
         rows.extend(stack_rows);
         rows
     };
-    let edges = merge_observed_edges(edges, &observed);
+    let edge_bytes = {
+        use crate::endpoints::monitoring::query_vm_with_timeout;
+        query_vm_with_timeout(
+            "sum by (source, destination) (rate(kubarr_network_edge_bytes_total[1m]))",
+            OPTIONAL_QUERY_TIMEOUT_SECONDS,
+        )
+        .await
+    };
+    let mut edges = merge_observed_edges(edges, &observed);
+    merge_edge_bytes(&mut edges, &edge_bytes, &pods_by_ip);
+    let edges = edges;
 
     // Give the class nodes somewhere to attach. The internet reuses the
     // existing external node; LAN and node traffic had nowhere to go before.
@@ -339,6 +373,7 @@ async fn discover_service_connections(
                                         protocol: Some("HTTP".to_string()),
                                         label: String::new(),
                                         flows_per_sec: None,
+                                        bytes_per_sec: None,
                                         observed: false,
                                     });
                                 }
@@ -377,6 +412,7 @@ async fn discover_service_connections(
                                                     protocol: Some("TCP".to_string()),
                                                     label: String::new(),
                                                     flows_per_sec: None,
+                                                    bytes_per_sec: None,
                                                     observed: false,
                                                 });
                                             }
@@ -419,6 +455,7 @@ async fn discover_service_connections(
                                         protocol: Some("HTTP".to_string()),
                                         label: String::new(),
                                         flows_per_sec: None,
+                                        bytes_per_sec: None,
                                         observed: false,
                                     });
                                 }
@@ -451,6 +488,7 @@ async fn discover_service_connections(
                                 protocol: Some("HTTP".to_string()),
                                 label: String::new(),
                                 flows_per_sec: None,
+                                bytes_per_sec: None,
                                 observed: false,
                             });
                             break; // One external edge per namespace is enough
@@ -480,6 +518,7 @@ async fn discover_service_connections(
                         protocol: Some("HTTPS".to_string()),
                         label: String::new(),
                         flows_per_sec: None,
+                        bytes_per_sec: None,
                         observed: false,
                     });
                 }
@@ -510,6 +549,7 @@ async fn discover_service_connections(
                                                         protocol: Some("HTTP".to_string()),
                                                         label: String::new(),
                                                         flows_per_sec: None,
+                                                        bytes_per_sec: None,
                                                         observed: false,
                                                     });
                                                 }
@@ -592,6 +632,7 @@ async fn discover_service_connections(
                     protocol: Some("TCP".to_string()),
                     label: String::new(),
                     flows_per_sec: None,
+                    bytes_per_sec: None,
                     observed: false,
                 });
             }
@@ -878,6 +919,7 @@ mod tests {
             protocol: Some("TCP".to_string()),
             label: "HTTP".to_string(),
             flows_per_sec: None,
+            bytes_per_sec: None,
             observed: false,
         };
         let json = serde_json::to_string(&e).expect("ser");
@@ -895,6 +937,7 @@ mod tests {
             protocol: None,
             label: String::new(),
             flows_per_sec: None,
+            bytes_per_sec: None,
             observed: false,
         };
         let json = serde_json::to_string(&e).expect("ser");
@@ -1723,6 +1766,69 @@ fn edge_target(destination: &str) -> Option<String> {
 }
 
 /// Merge measured traffic into Service-derived edges.
+/// Resolve the exporter's edge rows onto the graph's nodes.
+///
+/// The exporter names a Pod end by its address, because it cannot resolve one:
+/// the Cilium identity list needs the agent's own API socket, which the
+/// exporter deliberately does not have. The backend already knows which Pod
+/// holds which address, so the mapping happens here.
+///
+/// An address with no Pod behind it any more -- a restarted workload, a
+/// connection outliving its Pod -- is dropped rather than drawn as its own
+/// node, which would litter the graph with bare IP addresses.
+fn resolve_edge_endpoint(name: &str, pods_by_ip: &HashMap<String, String>) -> Option<String> {
+    match name {
+        "internet" | "lan" => Some("external".to_string()),
+        "host" => Some("host".to_string()),
+        address => pods_by_ip.get(address).cloned(),
+    }
+}
+
+/// Fold measured byte rates onto the edges.
+///
+/// Byte rate is the better weight: Hubble counts connections, so an edge
+/// weighted by flows makes a chatty link look busier than a quiet one moving
+/// far more data. Flows stay on the edge as a second figure.
+pub(crate) fn merge_edge_bytes(
+    edges: &mut [NetworkEdge],
+    rows: &[serde_json::Value],
+    pods_by_ip: &HashMap<String, String>,
+) {
+    use std::collections::BTreeMap;
+
+    let mut by_pair: BTreeMap<(String, String), f64> = BTreeMap::new();
+    for row in rows {
+        let Some(rate) = sample_value(row) else {
+            continue;
+        };
+        let Some(source) = resolve_edge_endpoint(&metric_label(row, "source"), pods_by_ip) else {
+            continue;
+        };
+        let Some(target) = resolve_edge_endpoint(&metric_label(row, "destination"), pods_by_ip)
+        else {
+            continue;
+        };
+        if source == target {
+            continue;
+        }
+        // Several Pods share a namespace, so one graph edge is the sum of
+        // every Pod-to-Pod link beneath it.
+        *by_pair.entry((source, target)).or_insert(0.0) += rate;
+    }
+
+    for edge in edges.iter_mut() {
+        // A link is the same link whichever way round it was measured: the
+        // graph draws one edge per pair, not one per direction.
+        let forward = by_pair.get(&(edge.source.clone(), edge.target.clone()));
+        let reverse = by_pair.get(&(edge.target.clone(), edge.source.clone()));
+        let total: f64 = forward.copied().unwrap_or(0.0) + reverse.copied().unwrap_or(0.0);
+        if total > 0.0 {
+            edge.bytes_per_sec = Some(total);
+            edge.observed = true;
+        }
+    }
+}
+
 pub(crate) fn merge_observed_edges(
     service_edges: Vec<NetworkEdge>,
     observed: &[serde_json::Value],
@@ -1762,6 +1868,7 @@ pub(crate) fn merge_observed_edges(
             protocol: None,
             label: String::new(),
             flows_per_sec: None,
+            bytes_per_sec: None,
             observed: false,
         });
         // Several destination rows can resolve to one node, so rates add up.
@@ -1779,6 +1886,102 @@ pub(crate) fn merge_observed_edges(
 mod topology_merge_tests {
     use super::*;
 
+    #[test]
+    fn edge_bytes_resolve_pod_addresses_to_their_namespace() {
+        let mut pods_by_ip = HashMap::new();
+        pods_by_ip.insert("10.244.0.75".to_string(), "kubarr-backend".to_string());
+        pods_by_ip.insert("10.244.0.165".to_string(), "victoriametrics".to_string());
+
+        let mut edges = vec![NetworkEdge {
+            source: "kubarr-backend".to_string(),
+            target: "victoriametrics".to_string(),
+            edge_type: "service".to_string(),
+            port: Some(8428),
+            protocol: Some("TCP".to_string()),
+            label: "backend -> vm".to_string(),
+            flows_per_sec: None,
+            bytes_per_sec: None,
+            observed: false,
+        }];
+        let rows = serde_json::json!([
+            { "metric": { "source": "10.244.0.75", "destination": "10.244.0.165" }, "value": [1.0, "2048"] }
+        ]);
+        merge_edge_bytes(&mut edges, rows.as_array().expect("array"), &pods_by_ip);
+
+        assert_eq!(edges[0].bytes_per_sec, Some(2048.0));
+        assert!(edges[0].observed);
+        // Service metadata survives the merge.
+        assert_eq!(edges[0].port, Some(8428));
+    }
+
+    #[test]
+    fn both_directions_of_a_link_land_on_one_edge() {
+        // The graph draws one edge per pair. Measuring A->B and B->A as
+        // separate edges would halve each and double the count.
+        let mut pods_by_ip = HashMap::new();
+        pods_by_ip.insert("10.244.0.75".to_string(), "a".to_string());
+        pods_by_ip.insert("10.244.0.165".to_string(), "b".to_string());
+
+        let mut edges = vec![NetworkEdge {
+            source: "a".to_string(),
+            target: "b".to_string(),
+            edge_type: "service".to_string(),
+            port: None,
+            protocol: None,
+            label: String::new(),
+            flows_per_sec: None,
+            bytes_per_sec: None,
+            observed: false,
+        }];
+        let rows = serde_json::json!([
+            { "metric": { "source": "10.244.0.75", "destination": "10.244.0.165" }, "value": [1.0, "1000"] },
+            { "metric": { "source": "10.244.0.165", "destination": "10.244.0.75" }, "value": [1.0, "500"] }
+        ]);
+        merge_edge_bytes(&mut edges, rows.as_array().expect("array"), &pods_by_ip);
+
+        assert_eq!(edges[0].bytes_per_sec, Some(1500.0));
+    }
+
+    #[test]
+    fn an_address_with_no_pod_behind_it_is_dropped() {
+        // A connection can outlive the Pod that opened it. Drawing the bare
+        // address would litter the graph with nodes nobody recognises.
+        let pods_by_ip = HashMap::new();
+        let mut edges: Vec<NetworkEdge> = Vec::new();
+        let rows = serde_json::json!([
+            { "metric": { "source": "10.244.0.99", "destination": "10.244.0.98" }, "value": [1.0, "4096"] }
+        ]);
+        merge_edge_bytes(&mut edges, rows.as_array().expect("array"), &pods_by_ip);
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn external_ends_collapse_onto_the_internet_node() {
+        let mut pods_by_ip = HashMap::new();
+        pods_by_ip.insert("10.244.0.7".to_string(), "qbittorrent".to_string());
+
+        let mut edges = vec![NetworkEdge {
+            source: "qbittorrent".to_string(),
+            target: "external".to_string(),
+            edge_type: "external".to_string(),
+            port: None,
+            protocol: None,
+            label: String::new(),
+            flows_per_sec: None,
+            bytes_per_sec: None,
+            observed: false,
+        }];
+        // The exporter already collapsed thousands of torrent peers into one
+        // label, so the graph gets one edge rather than a cardinality bomb.
+        let rows = serde_json::json!([
+            { "metric": { "source": "10.244.0.7", "destination": "internet" }, "value": [1.0, "41000000"] }
+        ]);
+        merge_edge_bytes(&mut edges, rows.as_array().expect("array"), &pods_by_ip);
+
+        assert_eq!(edges[0].bytes_per_sec, Some(41000000.0));
+        assert!(edges[0].observed);
+    }
+
     fn service_edge(source: &str, target: &str, port: i32) -> NetworkEdge {
         NetworkEdge {
             source: source.to_string(),
@@ -1788,6 +1991,7 @@ mod topology_merge_tests {
             protocol: Some("TCP".to_string()),
             label: format!("{port}/TCP"),
             flows_per_sec: None,
+            bytes_per_sec: None,
             observed: false,
         }
     }

@@ -80,9 +80,13 @@ describe('totalFlowRate', () => {
     expect(
       totalFlowRate(totals({}, { internet: 2.85, lan: 3.43, cluster: 61.42, storage: 0 }))
     ).toBeCloseTo(67.7, 5)
+    // Storage is excluded on purpose. It is the same bytes one step later --
+    // a download arrives from the internet and is then written to NFS -- so
+    // adding it reports more traffic than actually moved. Measured on a live
+    // cluster, including it turned a ~330 Mbps download into 697 Mbps.
     expect(
       totalByteRate(totals({ internet: 100, lan: 200, cluster: 300, storage: 400 }))
-    ).toBe(1000)
+    ).toBe(600)
   })
 })
 
@@ -114,11 +118,16 @@ describe('FlowSplitBar', () => {
   })
 
   it('reports every class in its accessible label, including the silent one', () => {
-    render(<FlowSplitBar totals={totals({ internet: 10240, lan: 0, cluster: 10240 })} />)
+    render(
+      <FlowSplitBar
+        totals={totals({ internet: 10240, lan: 0, cluster: 10240, storage: 99999 })}
+      />
+    )
 
+    // Three destinations, and storage is not one of them however busy it is.
     expect(screen.getByRole('img')).toHaveAttribute(
       'aria-label',
-      'Internet 10 KB/s, LAN 0 B/s, In-cluster 10 KB/s, Storage 0 B/s'
+      'Internet 10 KB/s, LAN 0 B/s, In-cluster 10 KB/s'
     )
   })
 })
@@ -141,10 +150,13 @@ describe('FlowClassCards', () => {
     expect(screen.getByText('2 KB/s')).toBeInTheDocument()
     expect(screen.getByText('4 KB/s')).toBeInTheDocument()
     expect(screen.getByText('8 KB/s')).toBeInTheDocument()
-    // 4096 of 15360 is 27%.
-    expect(screen.getByText('27% of bytes')).toBeInTheDocument()
+    // 4096 of the 7168 that went somewhere is 57%. Storage's 8192 is not in
+    // the denominator: it is those same bytes being written down.
+    expect(screen.getByText('57% of traffic')).toBeInTheDocument()
     // Connection counts stay visible, but only where one exists.
     expect(screen.getByText('61.4/s conn')).toBeInTheDocument()
+    // Storage says what it is instead of claiming a share.
+    expect(screen.getByText('read + written')).toBeInTheDocument()
   })
 
   it('says there is no data rather than drawing a convincing zero', () => {

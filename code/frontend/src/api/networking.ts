@@ -20,6 +20,8 @@ export interface NetworkEdge {
   label: string
   /** Measured flow-event rate, present only when Hubble saw traffic here. */
   flows_per_sec?: number
+  /** Measured bytes per second, from the conntrack exporter. */
+  bytes_per_sec?: number
   /** False for a Service-derived edge with no traffic behind it. */
   observed: boolean
 }
@@ -177,7 +179,20 @@ export function totalFlowRate(totals: ClassTotals): number {
   )
 }
 
-/** Sum of measured bytes across every class, storage included. */
+/**
+ * Sum of the three destination classes. Storage is deliberately not in it.
+ *
+ * Storage is not a fourth destination, it is a second stage: a torrent byte
+ * arrives from the internet and is then written to NFS, so it appears in both
+ * `internet` and `storage`. Measured on a live cluster, 41 MB/s of downloads
+ * came with 42 MB/s of NFS writes -- adding them reported 697 Mbps for what
+ * was really a ~330 Mbps download being saved.
+ *
+ * So storage gets its own figure and never a share of this total.
+ */
 export function totalByteRate(totals: ClassTotals): number {
-  return FLOW_CLASS_NAMES.reduce((sum, name) => sum + totals[name].bytes_per_sec, 0)
+  return CLASSES_WITH_FLOW_COUNTS.reduce(
+    (sum, name) => sum + totals[name].bytes_per_sec,
+    0
+  )
 }

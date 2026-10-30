@@ -15,7 +15,6 @@ import { useFlowClasses } from '../hooks/useFlowClasses'
 import { ConnectionStatus } from '../components/networking/ConnectionStatus'
 import { FlowClassCards } from '../components/networking/FlowClassCards'
 import { FlowClassChart } from '../components/networking/FlowClassChart'
-import { FlowSplitBar } from '../components/networking/FlowSplitBar'
 import { FlowWindowSelector } from '../components/networking/FlowWindowSelector'
 import { NetworkFlowVisualization } from '../components/networking/NetworkFlowVisualization'
 import { NetworkStatsTable } from '../components/networking/NetworkStatsTable'
@@ -205,9 +204,6 @@ export default function NetworkingPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {/* Composition at a glance; the chart's own legend carries the
-                numbers, so repeating them here would just be noise. */}
-            <FlowSplitBar totals={totals} height={10} />
             {flowClasses && <FlowClassChart series={flowClasses.series} />}
             {flowClassesLoading && !flowClasses && (
               <div className="flex h-[220px] items-center justify-center rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">

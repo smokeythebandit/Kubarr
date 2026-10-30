@@ -24,10 +24,13 @@ const cardShell =
  * The page's headline row: how much traffic went where.
  *
  * Every figure here is measured, but not all by the same thing. The three
- * network classes are counted by Cilium's conntrack map, storage by the
+ * destination classes are counted by Cilium's conntrack map, storage by the
  * kernel's NFS client, and the two totals on the right by cAdvisor. Nothing is
- * apportioned from one source to another: where a class has no connection
- * count, it simply does not show one.
+ * apportioned from one source to another.
+ *
+ * Storage sits alongside the destinations rather than among them. It is the
+ * same bytes one step later -- a download arrives from the internet and is
+ * then written to NFS -- so it carries no share of the destination total.
  */
 export function FlowClassCards({ totals, stale, totalRx, totalTx }: FlowClassCardsProps) {
   const total = totalByteRate(totals)
@@ -62,10 +65,18 @@ export function FlowClassCards({ totals, stale, totalRx, totalTx }: FlowClassCar
                   {formatBandwidth(bytes)}
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-gray-500 dark:text-gray-400">
-                  <span>{share.toFixed(0)}% of bytes</span>
-                  {/* Storage has no connection count: the kernel reports bytes
-                      per mount, not per connection. */}
-                  {hasFlowCount && <span>{formatFlowRate(flows)} conn</span>}
+                  {/* Storage is a second stage, not a fourth destination: the
+                      same bytes arrive from the internet and are then written
+                      down. It gets no share of the destination total, and no
+                      connection count -- the kernel reports bytes per mount. */}
+                  {hasFlowCount ? (
+                    <>
+                      <span>{share.toFixed(0)}% of traffic</span>
+                      <span>{formatFlowRate(flows)} conn</span>
+                    </>
+                  ) : (
+                    <span>read + written</span>
+                  )}
                   {drops > 0 && (
                     <span
                       className="flex items-center gap-1 text-red-500"
