@@ -76,6 +76,12 @@ test.describe('real settings and VPN (configuration only)', () => {
     await page.goto('/settings?section=general');
     const registration = page.getByRole('switch', { name: 'Allow Open Registration', exact: true });
     const approval = page.getByRole('switch', { name: 'Require Admin Approval', exact: true });
+    // The switches report aria-checked="mixed" until /api/settings resolves.
+    // Sampling the baseline before that reads "not true" off a page that has
+    // loaded nothing, and the rest of the test then chases a value the server
+    // never held.
+    await expect(registration).not.toHaveAttribute('aria-checked', 'mixed');
+    await expect(approval).not.toHaveAttribute('aria-checked', 'mixed');
     const originalRegistration = await registration.getAttribute('aria-checked') === 'true';
     const originalApproval = await approval.getAttribute('aria-checked') === 'true';
 

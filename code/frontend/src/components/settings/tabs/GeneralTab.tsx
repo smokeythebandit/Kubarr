@@ -5,8 +5,13 @@ import { SettingsTabLayout } from './SettingsTabLayout';
 
 type OAuthProviderConfig = { client_id: string; client_secret: string };
 
+export type SettingsStatus = 'loading' | 'ready' | 'error';
+
 type GeneralTabProps = {
   systemSettings: Record<string, Setting>;
+  /** Whether `systemSettings` actually holds loaded values yet. Without this,
+   *  an empty map renders as a confident "everything off". */
+  settingsStatus: SettingsStatus;
   savingSettings: boolean;
   oauthProviders: OAuthProvider[];
   editingOAuthProvider: string | null;
@@ -22,6 +27,7 @@ type GeneralTabProps = {
 
 export function GeneralTab({
   systemSettings,
+  settingsStatus,
   savingSettings,
   oauthProviders,
   editingOAuthProvider,
@@ -44,63 +50,33 @@ export function GeneralTab({
         <div>
           <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-4">User Registration</h4>
 
-          <div className="flex items-center justify-between py-4 border-b border-gray-200 dark:border-gray-700">
-            <div className="flex-1">
-              <div className="font-medium text-gray-900 dark:text-white">Allow Open Registration</div>
-              <div className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                When disabled, users can only register using invite links.
-              </div>
+          {settingsStatus === 'error' && (
+            <div className="mb-4 rounded-md bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+              These settings could not be loaded, so their current values are unknown.
             </div>
-            <button
-              role="switch"
-              aria-label="Allow Open Registration"
-              aria-checked={systemSettings.registration_enabled?.value === 'true'}
-              onClick={() => onToggleSetting('registration_enabled')}
-              disabled={savingSettings}
-              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-800 ${
-                systemSettings.registration_enabled?.value === 'true'
-                  ? 'bg-blue-600'
-                  : 'bg-gray-300 dark:bg-gray-600'
-              } ${savingSettings ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  systemSettings.registration_enabled?.value === 'true'
-                    ? 'translate-x-6'
-                    : 'translate-x-1'
-                }`}
-              />
-            </button>
+          )}
+
+          <div className="border-b border-gray-200 dark:border-gray-700">
+            <SettingSwitch
+              label="Allow Open Registration"
+              description="When disabled, users can only register using invite links."
+              settingKey="registration_enabled"
+              systemSettings={systemSettings}
+              settingsStatus={settingsStatus}
+              savingSettings={savingSettings}
+              onToggleSetting={onToggleSetting}
+            />
           </div>
 
-          <div className="flex items-center justify-between py-4">
-            <div className="flex-1">
-              <div className="font-medium text-gray-900 dark:text-white">Require Admin Approval</div>
-              <div className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                New registrations require admin approval before users can log in. Users with invite links are auto-approved.
-              </div>
-            </div>
-            <button
-              role="switch"
-              aria-label="Require Admin Approval"
-              aria-checked={systemSettings.registration_require_approval?.value === 'true'}
-              onClick={() => onToggleSetting('registration_require_approval')}
-              disabled={savingSettings}
-              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-800 ${
-                systemSettings.registration_require_approval?.value === 'true'
-                  ? 'bg-blue-600'
-                  : 'bg-gray-300 dark:bg-gray-600'
-              } ${savingSettings ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  systemSettings.registration_require_approval?.value === 'true'
-                    ? 'translate-x-6'
-                    : 'translate-x-1'
-                }`}
-              />
-            </button>
-          </div>
+          <SettingSwitch
+            label="Require Admin Approval"
+            description="New registrations require admin approval before users can log in. Users with invite links are auto-approved."
+            settingKey="registration_require_approval"
+            systemSettings={systemSettings}
+            settingsStatus={settingsStatus}
+            savingSettings={savingSettings}
+            onToggleSetting={onToggleSetting}
+          />
         </div>
       </div>
 
@@ -223,5 +199,61 @@ export function GeneralTab({
         </div>
       </div>
     </SettingsTabLayout>
+  );
+}
+
+type SettingSwitchProps = {
+  label: string;
+  description: string;
+  settingKey: string;
+  systemSettings: Record<string, Setting>;
+  settingsStatus: SettingsStatus;
+  savingSettings: boolean;
+  onToggleSetting: (key: string) => void;
+};
+
+/** One registration toggle.
+ *
+ *  Both switches used to read `systemSettings[key]?.value === 'true'` directly,
+ *  which collapses "loaded and off" and "never loaded" into the same rendering.
+ *  Until the values are in, this reports aria-checked="mixed" and refuses
+ *  clicks, so a failed fetch can never be mistaken for a real "off".
+ */
+function SettingSwitch({
+  label,
+  description,
+  settingKey,
+  systemSettings,
+  settingsStatus,
+  savingSettings,
+  onToggleSetting,
+}: SettingSwitchProps) {
+  const known = settingsStatus === 'ready';
+  const checked = systemSettings[settingKey]?.value === 'true';
+  const disabled = savingSettings || !known;
+
+  return (
+    <div className="flex items-center justify-between py-4">
+      <div className="flex-1">
+        <div className="font-medium text-gray-900 dark:text-white">{label}</div>
+        <div className="text-sm text-gray-500 dark:text-gray-400 mt-1">{description}</div>
+      </div>
+      <button
+        role="switch"
+        aria-label={label}
+        aria-checked={known ? checked : 'mixed'}
+        onClick={() => onToggleSetting(settingKey)}
+        disabled={disabled}
+        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-800 ${
+          known && checked ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
+        } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+      >
+        <span
+          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+            known && checked ? 'translate-x-6' : 'translate-x-1'
+          }`}
+        />
+      </button>
+    </div>
   );
 }

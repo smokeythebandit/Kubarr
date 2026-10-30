@@ -37,6 +37,7 @@ import { DashboardTab } from '../components/settings/tabs/DashboardTab';
 import { DdnsTab } from '../components/settings/tabs/DdnsTab';
 import { DomainsTab } from '../components/settings/tabs/DomainsTab';
 import { GeneralTab } from '../components/settings/tabs/GeneralTab';
+import type { SettingsStatus } from '../components/settings/tabs/GeneralTab';
 import { InvitesTab } from '../components/settings/tabs/InvitesTab';
 import { LetsEncryptTab } from '../components/settings/tabs/LetsEncryptTab';
 import { NotificationsTab } from '../components/settings/tabs/NotificationsTab';
@@ -58,6 +59,9 @@ const SettingsPage: React.FC = () => {
   const [roles, setRoles] = useState<Role[]>([]);
   const [apps, setApps] = useState<App[]>([]);
   const [systemSettings, setSystemSettings] = useState<Record<string, Setting>>({});
+  // Distinct from an empty systemSettings: a failed load must not render as
+  // "every setting is off".
+  const [settingsStatus, setSettingsStatus] = useState<SettingsStatus>('loading');
   const [loading, setLoading] = useState(true);
   const [savingSettings, setSavingSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -225,8 +229,11 @@ const SettingsPage: React.FC = () => {
     try {
       const data = await getSettings();
       setSystemSettings(data);
+      setSettingsStatus('ready');
     } catch (err: unknown) {
       console.error('Failed to load settings:', err);
+      setSettingsStatus('error');
+      setError((err as ApiErr).response?.data?.detail || 'Failed to load system settings');
     }
   };
 
@@ -863,6 +870,7 @@ const SettingsPage: React.FC = () => {
             {isAdmin && activeSection === 'general' && (
               <GeneralTab
                 systemSettings={systemSettings}
+                settingsStatus={settingsStatus}
                 savingSettings={savingSettings}
                 oauthProviders={oauthProviders}
                 editingOAuthProvider={editingOAuthProvider}
