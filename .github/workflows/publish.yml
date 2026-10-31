@@ -74,6 +74,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   docs:
+    # The github-pages environment permits deploys from main only, so on a
+    # release tag this job is rejected before a single step runs -- a 3-second
+    # zero-step failure that made every release report as failed while the
+    # images published fine. Skip it off main instead of failing.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
