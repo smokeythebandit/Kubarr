@@ -248,6 +248,66 @@ fn lifecycle_for_component(component: &SystemComponent) -> AppLifecycleConfig {
     }
 }
 
+/// The chart value blocks a chart's own settings may live under: its name, a
+/// camelCased form of it (`kubeStateMetrics`), the name with separators
+/// dropped (`fluentbit`), and finally the document root.
+fn chart_blocks<'a>(
+    values: &'a serde_yaml::Value,
+    chart_name: &str,
+) -> Vec<&'a serde_yaml::Value> {
+    fn camel(name: &str) -> String {
+        let mut out = String::with_capacity(name.len());
+        let mut upper = false;
+        for ch in name.chars() {
+            if ch == '-' || ch == '_' {
+                upper = true;
+            } else if upper {
+                out.extend(ch.to_uppercase());
+                upper = false;
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+    let squashed = chart_name.replace(['-', '_'], "");
+    let mut keys = vec![chart_name.to_string(), camel(chart_name)];
+    if !keys.contains(&squashed) {
+        keys.push(squashed);
+    }
+    let mut blocks: Vec<&serde_yaml::Value> =
+        keys.iter().filter_map(|key| values.get(key)).collect();
+    blocks.push(values);
+    blocks
+}
+
+/// `repository:tag` for a chart, from wherever that chart keeps its image.
+///
+/// Charts in this repository nest it under their own name, under a camelCased
+/// form of it (`kubeStateMetrics`, `nodeExporter`), under the name with the
+/// hyphens dropped (`fluentbit`), or at the top level (`cert-manager`). The
+/// old code looked only under the chart's own name and fell back to
+/// `linuxserver/<chart>:latest`, which named an image that does not exist for
+/// every chart published anywhere else. An image that cannot be determined is
+/// reported as empty rather than invented.
+fn image_of(values: &serde_yaml::Value, chart_name: &str) -> Option<String> {
+    fn from(block: &serde_yaml::Value) -> Option<String> {
+        let image = block.get("image")?;
+        let repository = image.get("repository")?.as_str()?;
+        let tag = match image.get("tag") {
+            Some(serde_yaml::Value::String(value)) if !value.is_empty() => Some(value.clone()),
+            Some(serde_yaml::Value::Number(value)) => Some(value.to_string()),
+            _ => None,
+        };
+        Some(match tag {
+            Some(tag) => format!("{repository}:{tag}"),
+            None => repository.to_string(),
+        })
+    }
+
+    chart_blocks(values, chart_name).into_iter().find_map(from)
+}
+
 fn chart_version_from_dir(dir: &Path, app_name: &str) -> Option<String> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
@@ -353,6 +413,18 @@ impl AppCatalog {
                 continue;
             }
 
+            // The chart is the live answer when it is synced; the constant
+            // here is only a description for a component whose chart is not.
+            // Overwriting a chart-derived image with it showed stale versions
+            // for every component that had moved on -- cert-manager v1.16.3
+            // against a chart on 1.21.3, VictoriaMetrics v1.97.2 against
+            // 1.154.1, Fluent Bit pinned to :latest.
+            let charted_image = self
+                .apps
+                .get(component.name)
+                .map(|app| app.container_image.clone())
+                .filter(|image| !image.is_empty());
+
             self.apps.insert(
                 component.name.to_string(),
                 AppConfig {
@@ -360,7 +432,8 @@ impl AppCatalog {
                     display_name: component.display_name.to_string(),
                     description: component.description.to_string(),
                     icon: component.icon.to_string(),
-                    container_image: component.image.to_string(),
+                    container_image: charted_image
+                        .unwrap_or_else(|| component.image.to_string()),
                     default_port: component.port,
                     resource_requirements: ResourceRequirements {
                         cpu_request: "0m".to_string(),
@@ -449,30 +522,19 @@ impl AppCatalog {
             .cloned()
             .unwrap_or(serde_yaml::Value::Null);
 
-        // Extract image info
-        let image_config = app_values
-            .get("image")
-            .cloned()
-            .unwrap_or(serde_yaml::Value::Null);
-        let default_image_repo = format!("linuxserver/{}", chart_name);
-        let image_repo = image_config
-            .get("repository")
-            .and_then(|r| r.as_str())
-            .unwrap_or(&default_image_repo);
-        let image_tag = image_config
-            .get("tag")
-            .and_then(|t| t.as_str())
-            .unwrap_or("latest");
-        let container_image = format!("{}:{}", image_repo, image_tag);
+        // Extract image info. A chart keeps it under its own name, a camelCased
+        // form of it, or at the top level, so all three are tried before giving
+        // up. Guessing linuxserver/<chart>:latest, as this once did, named an
+        // image that does not exist for every chart that is published
+        // elsewhere: kube-state-metrics, node-exporter, cert-manager and the
+        // rest. An unknown image is reported as unknown.
+        let container_image = image_of(&values, chart_name).unwrap_or_default();
 
-        // Extract port
-        let service_config = app_values
-            .get("service")
-            .cloned()
-            .unwrap_or(serde_yaml::Value::Null);
-        let default_port = service_config
-            .get("port")
-            .and_then(|p| p.as_i64())
+        // Extract port. Charts that keep `service` at the document root, as
+        // the platform's own do, reported 8080 for everything.
+        let default_port = chart_blocks(&values, chart_name)
+            .into_iter()
+            .find_map(|block| block.get("service")?.get("port")?.as_i64())
             .unwrap_or(8080) as i32;
 
         // Extract resources
@@ -1187,4 +1249,59 @@ annotations:
         assert!(r2.is_some());
         assert_eq!(r1.unwrap().name, r2.unwrap().name);
     }
+
+    #[test]
+    fn image_is_found_wherever_a_chart_keeps_it() {
+        let cases = [
+            // The chart's own name, as the *arr charts do.
+            ("radarr", "radarr:\n  image:\n    repository: linuxserver/radarr\n    tag: \"6.4.4\"\n",
+             "linuxserver/radarr:6.4.4"),
+            // camelCase, as kube-state-metrics and node-exporter do.
+            ("kube-state-metrics",
+             "kubeStateMetrics:\n  image:\n    repository: registry.k8s.io/kube-state-metrics/kube-state-metrics\n    tag: v2.20.0\n",
+             "registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0"),
+            // Hyphens dropped, as fluent-bit does.
+            ("fluent-bit", "fluentbit:\n  image:\n    repository: fluent/fluent-bit\n    tag: 5.1.5\n",
+             "fluent/fluent-bit:5.1.5"),
+            // Top level, as cert-manager does.
+            ("cert-manager", "image:\n  repository: quay.io/jetstack/cert-manager-controller\n  tag: v1.21.3\n",
+             "quay.io/jetstack/cert-manager-controller:v1.21.3"),
+        ];
+        for (chart, yaml, expected) in cases {
+            let values: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(image_of(&values, chart).as_deref(), Some(expected), "{chart}");
+        }
+    }
+
+    #[test]
+    fn the_port_comes_from_wherever_the_chart_declares_its_service() {
+        // postgresql keeps `service` at the document root, and every such
+        // chart reported the 8080 fallback instead of its real port.
+        let values: serde_yaml::Value =
+            serde_yaml::from_str("service:\n  port: 5432\n").unwrap();
+        assert_eq!(
+            chart_blocks(&values, "postgresql")
+                .into_iter()
+                .find_map(|block| block.get("service")?.get("port")?.as_i64()),
+            Some(5432)
+        );
+        let nested: serde_yaml::Value =
+            serde_yaml::from_str("kubeStateMetrics:\n  service:\n    port: 8080\n").unwrap();
+        assert_eq!(
+            chart_blocks(&nested, "kube-state-metrics")
+                .into_iter()
+                .find_map(|block| block.get("service")?.get("port")?.as_i64()),
+            Some(8080)
+        );
+    }
+
+    #[test]
+    fn an_undeterminable_image_is_not_invented() {
+        // Guessing linuxserver/<chart>:latest pointed every non-linuxserver
+        // chart at an image that does not exist.
+        let values: serde_yaml::Value =
+            serde_yaml::from_str("replicaCount: 1\n").unwrap();
+        assert_eq!(image_of(&values, "kube-state-metrics"), None);
+    }
+
 }
