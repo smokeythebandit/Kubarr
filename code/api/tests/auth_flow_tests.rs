@@ -449,7 +449,7 @@ async fn test_revoke_current_session_returns_bad_request() {
     let response = create_router(state)
         .oneshot(
             Request::builder()
-                .uri(&format!("/auth/sessions/{}", current_id))
+                .uri(format!("/auth/sessions/{}", current_id))
                 .method("DELETE")
                 .header("Cookie", &cookie)
                 .body(Body::empty())
@@ -638,7 +638,7 @@ async fn test_revoke_own_non_current_session_succeeds() {
     let response = create_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri(&format!("/auth/sessions/{}", other_id))
+                .uri(format!("/auth/sessions/{}", other_id))
                 .method("DELETE")
                 .header("Cookie", &cookie_b)
                 .body(Body::empty())
@@ -717,7 +717,7 @@ async fn test_revoke_another_users_session_returns_403() {
     let response = create_router(state)
         .oneshot(
             Request::builder()
-                .uri(&format!("/auth/sessions/{}", victim_session_id))
+                .uri(format!("/auth/sessions/{}", victim_session_id))
                 .method("DELETE")
                 .header("Cookie", &attacker_cookie)
                 .body(Body::empty())

@@ -848,7 +848,7 @@ mod tests {
         let logs = Entity::find().all(&db).await.expect("find");
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].action, "login");
-        assert_eq!(logs[0].success, true);
+        assert!(logs[0].success);
         assert_eq!(logs[0].username.as_deref(), Some("alice"));
     }
 
@@ -875,7 +875,7 @@ mod tests {
         use sea_orm::EntityTrait;
         let logs = Entity::find().all(&db).await.expect("find");
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].success, true);
+        assert!(logs[0].success);
         assert!(logs[0].error_message.is_none());
     }
 
@@ -903,7 +903,7 @@ mod tests {
         use sea_orm::EntityTrait;
         let logs = Entity::find().all(&db).await.expect("find");
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].success, false);
+        assert!(!logs[0].success);
         assert_eq!(logs[0].error_message.as_deref(), Some("[REDACTED]"));
     }
 
@@ -1059,7 +1059,7 @@ mod tests {
         };
         let result = get_audit_logs(&db, query).await.expect("get_audit_logs");
         assert_eq!(result.total, 1);
-        assert_eq!(result.logs[0].success, false);
+        assert!(!result.logs[0].success);
     }
 
     #[tokio::test]

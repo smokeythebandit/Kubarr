@@ -9,7 +9,7 @@ use kubarr::services::{
 use sea_orm::{
     ActiveModelTrait, ConnectionTrait, Database, EntityTrait, Set, Statement, TransactionTrait,
 };
-use sea_orm_migration::{MigrationName, MigratorTrait};
+use sea_orm_migration::MigratorTrait;
 use std::collections::BTreeMap;
 
 fn mount(source: &str) -> Mount {

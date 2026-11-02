@@ -17,7 +17,6 @@ use common::{create_test_db, create_test_user};
 use kubarr::models::{audit_log::AuditAction, notification_event, user_notification};
 use kubarr::services::notification::NotificationService;
 use sea_orm::{ActiveModelTrait, Set};
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Helper: build a NotificationService backed by `db`
@@ -93,7 +92,7 @@ fn test_notification_service_new_and_default_are_equivalent() {
 
 #[test]
 fn test_notification_service_clone_shares_db_arc() {
-    use std::sync::Arc;
+    
     let svc = NotificationService::new();
     let cloned = svc.clone();
     // Both point to the same Arc — verified by constructing and comparing via

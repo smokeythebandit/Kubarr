@@ -5,6 +5,7 @@
 //! - `GET /api/roles/{id}/permissions`   — list permissions granted to a specific role
 //! - `PUT /api/roles/{id}/permissions`   — set/replace permissions for a role
 //! - `PUT /api/roles/{id}/apps`          — set app permissions for a role
+//!
 //! Also adds coverage for edge cases on already-tested endpoints:
 //! - Duplicate role name returns 400
 //! - Renaming a system role is blocked
@@ -1471,7 +1472,7 @@ async fn test_update_role_rename_to_duplicate_returns_400() {
 
     let (_, ca) =
         authenticated_post(create_router(state.clone()), "/api/roles", &cookie, &body_a).await;
-    let (_, cb) =
+    let (_, _cb) =
         authenticated_post(create_router(state.clone()), "/api/roles", &cookie, &body_b).await;
 
     let role_a: serde_json::Value = serde_json::from_str(&ca).unwrap();

@@ -10,7 +10,6 @@
 //! before any test runs via a once_cell::sync::Lazy static.
 
 use std::fs;
-use std::path::PathBuf;
 
 use once_cell::sync::Lazy;
 use tempfile::TempDir;
@@ -86,7 +85,7 @@ fn create_chart_in(
         "apiVersion: v2\nname: {name}\ndescription: A test app\nversion: 1.0.0\nannotations:\n  kubarr.io/category: {category}\n  kubarr.io/display-name: \"{display_name}\"\n  kubarr.io/icon: \"📦\"\n{extra}",
         name = name,
         category = category,
-        display_name = format!("{} App", name),
+        display_name = format_args!("{name} App"),
         extra = extra_annotations,
     );
     fs::write(chart_dir.join("Chart.yaml"), chart_yaml).expect("write Chart.yaml");

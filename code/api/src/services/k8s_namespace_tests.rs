@@ -9,10 +9,13 @@ use kube::client::Body;
 use serde_json::json;
 use tower::service_fn;
 
+/// A scripted request and the status to answer it with.
+type Step = (&'static str, u16);
+/// The steps a scripted client has not consumed yet.
+type Remaining = Arc<Mutex<VecDeque<Step>>>;
+
 // Each request consumes one step; extra requests fail and unconsumed steps are asserted below.
-fn scripted_client(
-    steps: Vec<(&'static str, u16)>,
-) -> (K8sClient, Arc<Mutex<VecDeque<(&'static str, u16)>>>) {
+fn scripted_client(steps: Vec<Step>) -> (K8sClient, Remaining) {
     let remaining = Arc::new(Mutex::new(VecDeque::from(steps)));
     let steps = remaining.clone();
     let service = service_fn(move |request: Request<Body>| {

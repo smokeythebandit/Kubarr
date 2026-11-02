@@ -8,7 +8,7 @@
 
 mod common;
 use common::{
-    create_test_db, create_test_db_with_seed, create_test_user, create_test_user_with_role,
+    create_test_db_with_seed, create_test_user, create_test_user_with_role,
 };
 
 use kubarr::endpoints::extractors::{get_user_app_access, get_user_permissions};

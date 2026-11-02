@@ -146,6 +146,45 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 /// Cleans up expired and revoked sessions
 struct SessionCleanupTask;
 
+#[async_trait]
+impl PeriodicTask for SessionCleanupTask {
+    fn name(&self) -> &'static str {
+        "session_cleanup"
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(60 * 60) // Every hour
+    }
+
+    async fn run(&self, db: &DatabaseConnection) -> anyhow::Result<()> {
+        let now = Utc::now();
+
+        // Delete expired sessions
+        let expired = Session::delete_many()
+            .filter(session::Column::ExpiresAt.lt(now))
+            .exec(db)
+            .await?;
+
+        // Delete revoked sessions older than 1 day (keep recent ones for audit)
+        let day_ago = now - chrono::Duration::days(1);
+        let revoked = Session::delete_many()
+            .filter(session::Column::IsRevoked.eq(true))
+            .filter(session::Column::CreatedAt.lt(day_ago))
+            .exec(db)
+            .await?;
+
+        if expired.rows_affected > 0 || revoked.rows_affected > 0 {
+            tracing::info!(
+                expired = expired.rows_affected,
+                revoked = revoked.rows_affected,
+                "Cleaned up sessions"
+            );
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,44 +404,5 @@ mod tests {
         // Verify session was deleted
         let remaining = Session::find().all(&db).await.expect("find sessions");
         assert!(remaining.is_empty(), "expired session should be deleted");
-    }
-}
-
-#[async_trait]
-impl PeriodicTask for SessionCleanupTask {
-    fn name(&self) -> &'static str {
-        "session_cleanup"
-    }
-
-    fn interval(&self) -> Duration {
-        Duration::from_secs(60 * 60) // Every hour
-    }
-
-    async fn run(&self, db: &DatabaseConnection) -> anyhow::Result<()> {
-        let now = Utc::now();
-
-        // Delete expired sessions
-        let expired = Session::delete_many()
-            .filter(session::Column::ExpiresAt.lt(now))
-            .exec(db)
-            .await?;
-
-        // Delete revoked sessions older than 1 day (keep recent ones for audit)
-        let day_ago = now - chrono::Duration::days(1);
-        let revoked = Session::delete_many()
-            .filter(session::Column::IsRevoked.eq(true))
-            .filter(session::Column::CreatedAt.lt(day_ago))
-            .exec(db)
-            .await?;
-
-        if expired.rows_affected > 0 || revoked.rows_affected > 0 {
-            tracing::info!(
-                expired = expired.rows_affected,
-                revoked = revoked.rows_affected,
-                "Cleaned up sessions"
-            );
-        }
-
-        Ok(())
     }
 }

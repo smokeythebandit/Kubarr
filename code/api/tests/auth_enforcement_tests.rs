@@ -619,5 +619,30 @@ async fn test_auth_architecture_summary() {
     //    - HttpOnly, SameSite=Lax, Secure (in production)
     //    - Multi-session support with session switching
 
-    assert!(true, "Auth architecture verified by test suite");
+    // `assert!(true)` asserted none of the above, so the summary could not
+    // notice the architecture changing under it. These are the claims it makes,
+    // checked: the health endpoint and the auth routes answer without a
+    // session, and anything under /api does not.
+    let state = create_test_state().await;
+    for public in ["/api/system/health", "/auth/sessions", "/auth/accounts"] {
+        let (status, _) = make_unauthenticated_request(state.clone(), public).await;
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{public} is documented as reachable but is not routed"
+        );
+    }
+    let (health, _) = make_unauthenticated_request(state.clone(), "/api/system/health").await;
+    assert_eq!(health, StatusCode::OK, "health must answer probes");
+
+    for protected in [
+        "/api/apps/installed",
+        "/api/networking/ws",
+        "/api/monitoring/overview",
+        "/api/settings",
+        "/api/oauth/providers",
+    ] {
+        let (status, _) = make_unauthenticated_request(state.clone(), protected).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{protected}");
+    }
 }

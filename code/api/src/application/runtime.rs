@@ -293,6 +293,24 @@ fn create_app(state: AppState) -> Router {
         .layer(cors)
 }
 
+/// Start the HTTP server
+async fn serve(app: Router) -> anyhow::Result<()> {
+    let addr = SocketAddr::from(([0, 0, 0, 0], CONFIG.server.port));
+    tracing::info!("Listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // Attach the actual socket peer to requests. Behind OpenResty this is the
+    // gateway's IP, not the original client; never infer a client IP from
+    // untrusted forwarded headers.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,22 +354,4 @@ mod tests {
         // Should not panic
         let _router = create_app(state);
     }
-}
-
-/// Start the HTTP server
-async fn serve(app: Router) -> anyhow::Result<()> {
-    let addr = SocketAddr::from(([0, 0, 0, 0], CONFIG.server.port));
-    tracing::info!("Listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    // Attach the actual socket peer to requests. Behind OpenResty this is the
-    // gateway's IP, not the original client; never infer a client IP from
-    // untrusted forwarded headers.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
-
-    Ok(())
 }

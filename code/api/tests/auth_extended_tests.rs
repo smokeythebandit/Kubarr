@@ -298,7 +298,7 @@ async fn test_login_sets_indexed_session_cookie() {
         c.starts_with("kubarr_session_")
             && c.chars()
                 .nth("kubarr_session_".len())
-                .map_or(false, |ch| ch.is_ascii_digit())
+                .is_some_and(|ch| ch.is_ascii_digit())
     });
     assert!(
         has_indexed,

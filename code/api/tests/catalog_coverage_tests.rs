@@ -266,10 +266,22 @@ fn reload_clears_in_memory_apps() {
 }
 
 #[test]
-fn reload_on_empty_catalog_does_not_panic() {
+fn reload_on_empty_catalog_keeps_the_platforms_own_components() {
+    // `len() == 0 || len() >= 0` is true of every possible value, so this
+    // asserted nothing and clippy rejects it outright. Reload does have a
+    // defined result: with no charts synced, the catalog still describes the
+    // components Kubarr installs itself, which is what the dashboard shows
+    // before the first sync.
     let mut catalog = AppCatalog::with_apps(HashMap::new());
     catalog.reload();
-    assert!(catalog.get_all_apps().len() == 0 || catalog.get_all_apps().len() >= 0);
+    let listed: std::collections::BTreeSet<&str> = catalog
+        .get_all_apps()
+        .iter()
+        .map(|app| app.name.as_str())
+        .collect();
+    for component in kubarr::services::catalog::kubarr_system_component_names() {
+        assert!(listed.contains(component), "{component} missing after reload");
+    }
 }
 
 // ============================================================================

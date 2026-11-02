@@ -2023,7 +2023,7 @@ mod tests {
         let notifications = svc.get_user_notifications(10, 10, 0).await.expect("get");
         assert_eq!(notifications.len(), 1);
         let notif_id = notifications[0].id;
-        assert_eq!(notifications[0].read, false);
+        assert!(!notifications[0].read);
 
         // mark_as_read
         svc.mark_as_read(notif_id, 10).await.expect("mark_as_read");

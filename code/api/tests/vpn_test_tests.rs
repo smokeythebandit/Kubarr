@@ -168,8 +168,8 @@ fn test_create_vpn_provider_request_defaults() {
     }"#;
 
     let req: CreateVpnProviderRequest = serde_json::from_str(json).unwrap();
-    assert_eq!(req.enabled, true); // Default
-    assert_eq!(req.kill_switch, true); // Default
+    assert!(req.enabled); // Default
+    assert!(req.kill_switch); // Default
     assert_eq!(req.firewall_outbound_subnets, ""); // No outbound bypass by default
 }
 
