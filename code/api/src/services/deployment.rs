@@ -372,7 +372,15 @@ impl<'a> DeploymentManager<'a> {
             helm_args.extend(["--version", version]);
         }
         if request.reuse_values {
-            helm_args.push("--reuse-values");
+            // Not --reuse-values: that replays the previous release's values
+            // and never merges the new chart's defaults, so a values key the
+            // chart gained in this revision is simply absent and a template
+            // that reads it dies with `nil pointer evaluating interface
+            // {}.storage`. Every chart that gained the kubarr.storage block
+            // failed its first upgrade that way. Resetting to the new chart's
+            // defaults and reapplying the user's own values keeps the
+            // overrides while letting new defaults through.
+            helm_args.push("--reset-then-reuse-values");
         }
         if request.wait {
             helm_args.extend(["--wait=legacy", "--rollback-on-failure", "--timeout", "10m"]);

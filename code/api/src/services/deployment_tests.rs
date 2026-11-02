@@ -335,7 +335,11 @@ async fn deploy_app_composes_helm4_flags_and_release_workload_namespaces() {
                             &["-n", release_namespace, "--create-namespace"]
                         );
                         assert!(args.windows(2).any(|pair| pair == ["--version", VERSION]));
-                        assert_eq!(args.contains(&"--reuse-values"), reuse_values);
+                        assert_eq!(args.contains(&"--reset-then-reuse-values"), reuse_values);
+                        // The plain form must never appear: it skips the new
+                        // chart's defaults and breaks the first upgrade after a
+                        // chart adds a values key.
+                        assert!(!args.contains(&"--reuse-values"));
                         assert_eq!(args.contains(&"--wait=legacy"), wait);
                         assert_eq!(args.contains(&"--rollback-on-failure"), wait);
                         assert_eq!(args.contains(&"--timeout"), wait);
@@ -593,7 +597,7 @@ async fn deploy_app_assigned_vpn_explicitly_resets_disabled_port_forwarding() {
 
     DeploymentManager::with_db(&k8s, &catalog, &db)
         .deploy_app_with_command(&request, None, |args| {
-            assert!(args.contains(&"--reuse-values"));
+            assert!(args.contains(&"--reset-then-reuse-values"));
             assert!(args
                 .windows(2)
                 .any(|pair| pair == ["--set", "vpn.portForwarding.enabled=false"]));
@@ -1065,7 +1069,7 @@ async fn deploy_app_without_database_explicitly_disables_reused_vpn_values() {
     .unwrap();
     DeploymentManager::new(&k8s, &catalog)
         .deploy_app_with_command(&request, None, |args| {
-            assert!(args.contains(&"--reuse-values"));
+            assert!(args.contains(&"--reset-then-reuse-values"));
             assert!(args
                 .windows(2)
                 .any(|pair| pair == ["--set", "vpn.enabled=false"]));
@@ -1098,7 +1102,7 @@ async fn gpu_disable_clears_reused_values_and_omission_preserves_them() {
         };
         DeploymentManager::new(&k8s, &catalog)
             .deploy_app_with_command(&request, None, |args| {
-                assert!(args.contains(&"--reuse-values"));
+                assert!(args.contains(&"--reset-then-reuse-values"));
                 for value in [
                     "gpu.enabled=false",
                     "gpu.provider=intel",
