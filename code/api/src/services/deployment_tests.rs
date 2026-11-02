@@ -1300,3 +1300,152 @@ fn custom_config_allows_values_without_injected_vpn_assignments() {
     ]);
     validate_custom_config(&custom_config).unwrap();
 }
+
+#[test]
+fn custom_config_cannot_set_the_managed_jellyfin_link() {
+    for (key, value) in [
+        ("jellyfinIntegration.secretName", "attacker"),
+        ("jellyfinIntegration", "{}"),
+        ("image.tag,jellyfinIntegration.secretName", "x"),
+        ("image.tag", "x,jellyfinIntegration.secretName=attacker"),
+    ] {
+        let error = validate_custom_config(&HashMap::from([(key.into(), value.into())]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Jellyfin link"), "{key}={value}: {error}");
+        assert!(
+            !error.contains("attacker"),
+            "error must not disclose value: {error}"
+        );
+    }
+    validate_custom_config(&HashMap::from([(
+        "jellyfinIntegrationNote".into(),
+        "unrelated".into(),
+    )]))
+    .unwrap();
+}
+
+#[tokio::test]
+async fn jellyfin_link_secret_precedes_helm_and_key_stays_out_of_args() {
+    for app_name in ["sonarr", "jellyfin"] {
+        let db = database(app_name).await;
+        db.execute(
+            &Schema::new(DbBackend::Sqlite)
+                .create_table_from_entity(crate::models::system_setting::Entity),
+        )
+        .await
+        .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::<(String, String, Value)>::new()));
+        let recorded = requests.clone();
+        let ns = app_name.to_owned();
+        let service = service_fn(move |request: Request<Body>| {
+            let recorded = recorded.clone();
+            let ns = ns.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_owned();
+                let bytes = request.into_body().collect().await.unwrap().to_bytes();
+                let body: Value = if bytes.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&bytes).unwrap()
+                };
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), path.clone(), body.clone()));
+                let (status, response) = if path == format!("/api/v1/namespaces/{ns}") {
+                    (
+                        200,
+                        json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns}}),
+                    )
+                } else if method == "PATCH" {
+                    (200, body)
+                } else {
+                    (
+                        404,
+                        json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
+                        "code": 404, "reason": "NotFound", "message": "not found"}),
+                    )
+                };
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                        .unwrap(),
+                )
+            }
+        });
+        let k8s = K8sClient::from_client(Client::new(service, "default"));
+        let catalog = catalog(app_name, false);
+        let request: DeploymentRequest =
+            serde_json::from_value(json!({"app_name": app_name, "wait": false})).unwrap();
+        let mut patched_before_helm = false;
+        let mut key_in_args = String::new();
+        DeploymentManager::with_db(&k8s, &catalog, &db)
+            .deploy_app_with_command(&request, None, |args| {
+                patched_before_helm = requests.lock().unwrap().iter().any(|(method, path, _)| {
+                    method == "PATCH"
+                        && path
+                            == &format!(
+                                "/api/v1/namespaces/{app_name}/secrets/kubarr-jellyfin-api-key"
+                            )
+                });
+                assert!(args.windows(2).any(|pair| pair
+                    == [
+                        "--set",
+                        "jellyfinIntegration.secretName=kubarr-jellyfin-api-key"
+                    ]));
+                key_in_args = args.join(" ");
+                Ok("deployed".into())
+            })
+            .await
+            .unwrap();
+        assert!(
+            patched_before_helm,
+            "{app_name}: Secret must exist before Helm runs"
+        );
+
+        let key = crate::services::jellyfin_link::api_key(&db).await.unwrap();
+        assert!(
+            !key_in_args.contains(&key),
+            "{app_name}: key leaked into Helm args"
+        );
+        let patches: Vec<Value> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _, _)| method == "PATCH")
+            .map(|(_, _, body)| body.clone())
+            .collect();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0]["stringData"]["api-key"], key.as_str());
+        // A second app reuses the same key rather than minting a new one.
+        assert_eq!(
+            crate::services::jellyfin_link::api_key(&db).await.unwrap(),
+            key
+        );
+    }
+}
+
+#[tokio::test]
+async fn apps_outside_the_jellyfin_link_get_no_secret_or_value() {
+    let app_name = "plex";
+    let db = database(app_name).await;
+    let (k8s, bodies) = kube_client(app_name, app_name, false);
+    let catalog = catalog(app_name, false);
+    let request: DeploymentRequest =
+        serde_json::from_value(json!({"app_name": app_name, "wait": false})).unwrap();
+    DeploymentManager::with_db(&k8s, &catalog, &db)
+        .deploy_app_with_command(&request, None, |args| {
+            assert!(!args.iter().any(|arg| arg.contains("jellyfinIntegration")));
+            Ok("deployed".into())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        2,
+        "no Secret request for Plex"
+    );
+}

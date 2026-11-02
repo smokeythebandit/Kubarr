@@ -9,6 +9,7 @@ pub mod domain_reconciler;
 pub mod flow_classes;
 pub mod gpu;
 pub mod install_options;
+pub mod jellyfin_link;
 pub mod k8s;
 pub mod network_broadcaster;
 pub mod notification;

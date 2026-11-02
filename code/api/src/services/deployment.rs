@@ -17,6 +17,7 @@ use crate::services::catalog::{kubarr_system_component, lifecycle_for_app_name, 
 use crate::services::gpu::{self, GpuSelection};
 use crate::services::helm_process;
 use crate::services::install_options::{self, InstallStorage};
+use crate::services::jellyfin_link;
 use crate::services::storage_config::{self, PersistedStorageConfig};
 use crate::services::vpn;
 use crate::services::K8sClient;
@@ -471,6 +472,20 @@ impl<'a> DeploymentManager<'a> {
             // previous assignment can leave the VPN sidecar enabled.
             set_args.push("vpn.enabled=false".to_string());
             set_args.push("vpn.secretName=".to_string());
+        }
+
+        // Jellyfin and the apps that refresh its library share one API key.
+        // The Secret must exist before Helm renders a Pod that mounts it.
+        if jellyfin_link::applies_to(&request.app_name) {
+            let secret_name = match self.db {
+                Some(db) => {
+                    let key = jellyfin_link::api_key(db).await?;
+                    jellyfin_link::ensure_secret(self.k8s, namespace, &key).await?;
+                    Some(jellyfin_link::SECRET_NAME)
+                }
+                None => None,
+            };
+            set_args.push(jellyfin_link::helm_values(secret_name));
         }
 
         // Add custom config
@@ -1132,28 +1147,47 @@ fn validate_custom_config(custom_config: &HashMap<String, String>) -> Result<()>
             "custom_config key '{key}' contains a managed VPN assignment; use VPN settings instead"
         )));
     }
+    let jellyfin = jellyfin_link::HELM_ROOT;
+    if let Some((key, _)) = custom_config.iter().find(|(key, value)| {
+        is_managed_helm_key(key, jellyfin) || value_injects_managed_helm_assignment(value, jellyfin)
+    }) {
+        return Err(AppError::BadRequest(format!(
+            "custom_config key '{key}' sets the Jellyfin link, which Kubarr manages"
+        )));
+    }
     Ok(())
 }
 
 fn is_vpn_helm_key(key: &str) -> bool {
+    is_managed_helm_key(key, "vpn")
+}
+
+fn is_managed_helm_key(key: &str, root: &str) -> bool {
     // Helm accepts both dotted paths and list-index paths. A comma can begin a
     // second assignment in --set, so inspect each unescaped assignment too.
     key.split(',').any(|part| {
         let part = part.trim_start();
-        part == "vpn" || part.starts_with("vpn.") || part.starts_with("vpn[")
+        part == root
+            || part
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('['))
     })
 }
 
 fn value_injects_vpn_helm_assignment(value: &str) -> bool {
+    value_injects_managed_helm_assignment(value, "vpn")
+}
+
+fn value_injects_managed_helm_assignment(value: &str, root: &str) -> bool {
     // Helm's --set parser treats commas as assignment separators, including in
     // list-like values. Be conservative around escaped commas too: accepting a
-    // literal is less important than allowing a managed VPN override.
+    // literal is less important than allowing a managed override.
     value.split(',').skip(1).any(|segment| {
         let segment = segment.trim_start().trim_start_matches('{').trim_start();
         let Some((key, _)) = segment.split_once('=') else {
             return false;
         };
-        is_vpn_helm_key(key.trim())
+        is_managed_helm_key(key.trim(), root)
     })
 }
 
