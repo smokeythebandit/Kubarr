@@ -280,7 +280,10 @@ fn reload_on_empty_catalog_keeps_the_platforms_own_components() {
         .map(|app| app.name.as_str())
         .collect();
     for component in kubarr::services::catalog::kubarr_system_component_names() {
-        assert!(listed.contains(component), "{component} missing after reload");
+        assert!(
+            listed.contains(component),
+            "{component} missing after reload"
+        );
     }
 }
 

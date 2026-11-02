@@ -488,10 +488,8 @@ mod tests {
 
     #[test]
     fn an_explicitly_empty_declaration_is_not_a_missing_one() {
-        let values: serde_yaml::Value = serde_yaml::from_str(
-            "kubarr:\n  storage:\n    reserved:\n      main: []\n",
-        )
-        .unwrap();
+        let values: serde_yaml::Value =
+            serde_yaml::from_str("kubarr:\n  storage:\n    reserved:\n      main: []\n").unwrap();
         // The chart says it occupies nothing, so nothing is withheld from the
         // user. Falling back to /config here would reserve a path the chart
         // does not own.
@@ -500,8 +498,7 @@ mod tests {
 
     #[test]
     fn capability_toggles_follow_the_chart_values() {
-        let vpn: serde_yaml::Value =
-            serde_yaml::from_str("vpn:\n  enabled: false\n").unwrap();
+        let vpn: serde_yaml::Value = serde_yaml::from_str("vpn:\n  enabled: false\n").unwrap();
         let gpu: serde_yaml::Value =
             serde_yaml::from_str("gpu:\n  enabled: false\n  provider: intel\n").unwrap();
         let neither: serde_yaml::Value = serde_yaml::from_str("storage:\n  mounts: []\n").unwrap();

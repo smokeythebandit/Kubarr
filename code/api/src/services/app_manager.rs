@@ -234,9 +234,9 @@ impl AppManager {
         {
             return Err(AppError::BadRequest("Reserved install key".into()));
         }
-        if gpu.is_some() && !matches!(app_name, "plex" | "jellyfin") {
+        if gpu.is_some() && !crate::services::gpu::chart_supports_gpu(app_name) {
             return Err(AppError::BadRequest(
-                "GPU is supported only for Plex and Jellyfin".into(),
+                "This application's chart offers no GPU selection".into(),
             ));
         }
         if gpu.is_some() {
@@ -292,8 +292,10 @@ impl AppManager {
         gpu: Option<Option<GpuSelection>>,
         actor: i64,
     ) -> Result<AppOperationResponse> {
-        if gpu.is_some() && !matches!(app_name, "plex" | "jellyfin") {
-            return Err(AppError::BadRequest("GPU is unsupported".into()));
+        if gpu.is_some() && !crate::services::gpu::chart_supports_gpu(app_name) {
+            return Err(AppError::BadRequest(
+                "This application's chart offers no GPU selection".into(),
+            ));
         }
         if let Some(selection) = gpu.as_ref().and_then(Option::as_ref) {
             let guard = self.k8s_client.read().await;
@@ -730,7 +732,7 @@ impl AppManager {
         gpu::validate_custom_gpu_keys(&public_config)?;
         install_options::validate_custom_storage_keys(&public_config)?;
         if let Some(gpu) = config.get(QUEUED_GPU_KEY) {
-            if !matches!(original.app_name.as_str(), "plex" | "jellyfin") {
+            if !crate::services::gpu::chart_supports_gpu(&original.app_name) {
                 return Err(AppError::BadRequest("Invalid stored GPU app".into()));
             }
             serde_json::from_str::<Option<GpuSelection>>(gpu)

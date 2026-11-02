@@ -294,8 +294,7 @@ async fn registration_approval_invitation_and_permissions() {
         // removes the conversion and makes the condition always false.
         #[allow(clippy::cmp_owned)]
         {
-            log["username"] == "invited_user"
-                && log["resource_id"] == invite["id"].to_string()
+            log["username"] == "invited_user" && log["resource_id"] == invite["id"].to_string()
         }
     }));
 

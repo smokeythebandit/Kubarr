@@ -4,6 +4,7 @@ use k8s_openapi::api::core::v1::Node;
 use kube::api::{Api, ListParams};
 use serde::{Deserialize, Serialize};
 
+use crate::config::CONFIG;
 use crate::error::{AppError, Result};
 use crate::services::k8s::K8sClient;
 
@@ -259,8 +260,57 @@ pub fn validate_gpu_scheduling_config(custom_config: &HashMap<String, String>) -
     Ok(())
 }
 
+/// Does this chart offer a GPU at all?
+///
+/// Read from the chart rather than from a list of names here. Tdarr ships the
+/// same `_gpu.tpl` wiring as Plex and Jellyfin, and a list in this file
+/// answered no for it: the install wizard offered the GPU (it derives support
+/// from the chart) and the deploy path then refused the request.
+pub fn chart_supports_gpu(app_name: &str) -> bool {
+    chart_values(app_name).is_some_and(|values| {
+        values
+            .get("gpu")
+            .and_then(|gpu| gpu.get("enabled"))
+            .is_some()
+    })
+}
+
+/// The values roots whose `resources` map a GPU request is merged into.
+///
+/// One per workload the chart defines, so `plex` for Plex but `tdarr` and
+/// `node` for Tdarr, whose transcoding Nodes take the GPU too. A root that
+/// never receives a GPU resource is harmless here: clearing a key that was
+/// never set is a no-op.
+pub fn resource_roots(app_name: &str) -> Vec<String> {
+    let Some(values) = chart_values(app_name) else {
+        return Vec::new();
+    };
+    let Some(map) = values.as_mapping() else {
+        return Vec::new();
+    };
+    let mut roots: Vec<String> = map
+        .iter()
+        .filter(|(_, value)| value.get("resources").is_some_and(|r| r.is_mapping()))
+        .filter_map(|(key, _)| key.as_str().map(str::to_string))
+        .collect();
+    roots.sort();
+    roots
+}
+
+fn chart_values(app_name: &str) -> Option<serde_yaml::Value> {
+    let path = CONFIG.charts.dir.join(app_name).join("values.yaml");
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_yaml::from_str(&text).ok()
+}
+
 /// None means preserve on upgrade; Some(None) explicitly disables and clears reused values.
-pub fn helm_values(selection: Option<(&GpuSelection, &str)>) -> Result<Vec<String>> {
+///
+/// `roots` comes from [`resource_roots`]; the split keeps this pure so the
+/// argument list it builds can be asserted without a chart on disk.
+pub fn helm_values(
+    selection: Option<(&GpuSelection, &str)>,
+    roots: &[String],
+) -> Result<Vec<String>> {
     let mut values = vec![
         "gpu.enabled=false".into(),
         "gpu.provider=intel".into(),
@@ -268,14 +318,15 @@ pub fn helm_values(selection: Option<(&GpuSelection, &str)>) -> Result<Vec<Strin
         "gpu.runtimeClassName=".into(),
         "nodeSelector.kubernetes\\.io/hostname=null".into(),
     ];
-    // Helm --reuse-values retains old app resources. The chart helper deep-copies
-    // these and merges GPU into the chart's default CPU/memory resource map.
-    // Null removes only managed GPU keys, for both disabling and switching GPUs.
+    // Reapplied user values retain old app resources. The chart helper
+    // deep-copies these and merges GPU into the chart's default CPU/memory
+    // resource map. Null removes only managed GPU keys, for both disabling and
+    // switching GPUs.
     for (resource, _) in GPU_RESOURCES {
         let escaped = resource.replace('.', "\\.");
-        for app in ["plex", "jellyfin"] {
+        for root in roots {
             for kind in ["requests", "limits"] {
-                values.push(format!("{app}.resources.{kind}.{escaped}=null"));
+                values.push(format!("{root}.resources.{kind}.{escaped}=null"));
             }
         }
     }
@@ -293,6 +344,36 @@ pub fn helm_values(selection: Option<(&GpuSelection, &str)>) -> Result<Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The values roots a chart like Plex reports. `helm_values` is pure, so
+    /// the tests pass these in rather than needing a chart on disk.
+    fn roots() -> Vec<String> {
+        vec!["plex".to_string()]
+    }
+
+    #[test]
+    fn a_chart_with_several_workloads_has_every_one_cleared() {
+        // Tdarr merges a GPU into its server and into its transcoding Nodes.
+        // Clearing only the first would leave the Nodes asking for a device
+        // that is no longer assigned.
+        let both = vec!["node".to_string(), "tdarr".to_string()];
+        let cleared = helm_values(None, &both).expect("clears");
+        for root in ["node", "tdarr"] {
+            for kind in ["requests", "limits"] {
+                assert!(
+                    cleared.iter().any(|value| value
+                        == &format!("{root}.resources.{kind}.gpu\\.intel\\.com/i915=null")),
+                    "{root}.{kind} was not cleared: {cleared:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_chart_that_offers_no_gpu_clears_nothing() {
+        let cleared = helm_values(None, &[]).expect("clears");
+        assert_eq!(cleared.len(), 5, "only the gpu.* keys: {cleared:?}");
+    }
     use http::{Request, Response};
     use k8s_openapi::api::core::v1::{NodeCondition, NodeSpec, NodeStatus};
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -445,7 +526,7 @@ mod tests {
                 validate_selection(&client, &selection).await.unwrap(),
                 "host-a"
             );
-            let values = helm_values(Some((&selection, "host-a"))).unwrap();
+            let values = helm_values(Some((&selection, "host-a")), &roots()).unwrap();
             assert!(values.contains(&format!("gpu.resourceName={resource}")));
         }
         for (vendor, resource) in [
@@ -490,15 +571,18 @@ mod tests {
             "stable,gpu.enabled=true".into()
         )]))
         .is_err());
-        let cleared = helm_values(None).unwrap();
-        assert!(helm_values(Some((
-            &GpuSelection {
-                vendor: GpuVendor::Amd,
-                node_name: "gpu-node".into(),
-                resource_name: None,
-            },
-            "host-a",
-        )))
+        let cleared = helm_values(None, &roots()).unwrap();
+        assert!(helm_values(
+            Some((
+                &GpuSelection {
+                    vendor: GpuVendor::Amd,
+                    node_name: "gpu-node".into(),
+                    resource_name: None,
+                },
+                "host-a",
+            )),
+            &roots(),
+        )
         .is_err());
         assert_eq!(
             &cleared[..5],
@@ -517,8 +601,12 @@ mod tests {
             "nvidia\\.com/gpu\\.shared",
             "amd\\.com/dri",
         ] {
-            assert!(cleared.contains(&format!("plex.resources.requests.{resource}=null")));
-            assert!(cleared.contains(&format!("jellyfin.resources.limits.{resource}=null")));
+            // Both sides of every root this chart reported, so a switch
+            // between vendors cannot leave the previous device requested.
+            for root in roots() {
+                assert!(cleared.contains(&format!("{root}.resources.requests.{resource}=null")));
+                assert!(cleared.contains(&format!("{root}.resources.limits.{resource}=null")));
+            }
         }
         assert!(!cleared
             .iter()
@@ -533,5 +621,36 @@ mod tests {
             "latest,affinity.nodeAffinity=other".into()
         )]))
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod chart_driven_support {
+    //! Reads the real charts when KUBARR_CHARTS_DIR points at a checkout, so
+    //! the answer comes from the charts rather than from a fixture.
+
+    #[test]
+    fn support_follows_the_chart_not_a_list_of_names() {
+        if std::env::var("KUBARR_CHARTS_DIR").is_err() {
+            eprintln!("skipped: set KUBARR_CHARTS_DIR to a flat charts directory");
+            return;
+        }
+        for app in ["plex", "jellyfin", "tdarr"] {
+            assert!(
+                super::chart_supports_gpu(app),
+                "{app} ships a gpu block and must be offered a GPU"
+            );
+            assert!(
+                !super::resource_roots(app).is_empty(),
+                "{app} must report the roots a GPU is merged into"
+            );
+        }
+        for app in ["sonarr", "qbittorrent", "bazarr", "recyclarr"] {
+            assert!(
+                !super::chart_supports_gpu(app),
+                "{app} ships no gpu block and must not be offered a GPU"
+            );
+        }
+        assert_eq!(super::resource_roots("tdarr"), vec!["node", "tdarr"]);
     }
 }

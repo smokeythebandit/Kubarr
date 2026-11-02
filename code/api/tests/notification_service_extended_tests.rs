@@ -92,7 +92,6 @@ fn test_notification_service_new_and_default_are_equivalent() {
 
 #[test]
 fn test_notification_service_clone_shares_db_arc() {
-    
     let svc = NotificationService::new();
     let cloned = svc.clone();
     // Both point to the same Arc — verified by constructing and comparing via

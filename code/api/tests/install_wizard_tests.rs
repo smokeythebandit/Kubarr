@@ -187,7 +187,10 @@ async fn options_permissions_install_validation_and_atomic_vpn_queue() {
     assert_eq!(status, StatusCode::OK);
     let redmine_options: serde_json::Value = serde_json::from_str(&redmine_options).unwrap();
     assert_eq!(redmine_options["vpn_supported"], false);
-    assert_eq!(redmine_options["required"]["postgres"][0], "/var/lib/postgresql/data");
+    assert_eq!(
+        redmine_options["required"]["postgres"][0],
+        "/var/lib/postgresql/data"
+    );
     assert_eq!(redmine_options["reserved"]["postgres"][0], "/dev/shm");
     // Undeclared for the main workload, so the generic private-claim answer.
     assert_eq!(redmine_options["reserved"]["main"][0], "/config");

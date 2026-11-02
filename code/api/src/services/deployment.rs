@@ -281,9 +281,9 @@ impl<'a> DeploymentManager<'a> {
                 "Cannot grant private config proof without a fresh private claim".into(),
             ));
         }
-        if request.gpu.is_some() && !matches!(request.app_name.as_str(), "plex" | "jellyfin") {
+        if request.gpu.is_some() && !gpu::chart_supports_gpu(&request.app_name) {
             return Err(AppError::BadRequest(
-                "GPU is supported only for Plex and Jellyfin".into(),
+                "This application's chart offers no GPU selection".into(),
             ));
         }
         if request.gpu.is_some() {
@@ -391,7 +391,7 @@ impl<'a> DeploymentManager<'a> {
         // an API-created namespace must never be adopted by the chart.
         let mut set_args: Vec<String> =
             namespace_helm_values(namespace, helm_owns_namespace).into();
-        if matches!(request.app_name.as_str(), "plex" | "jellyfin") {
+        if gpu::chart_supports_gpu(&request.app_name) {
             // An omitted GPU on update preserves the release; install and explicit null
             // both reset previously reused managed values.
             if !request.reuse_values || request.gpu.is_some() {
@@ -401,6 +401,7 @@ impl<'a> DeploymentManager<'a> {
                         .as_ref()
                         .and_then(Option::as_ref)
                         .zip(gpu_hostname.as_deref()),
+                    &gpu::resource_roots(&request.app_name),
                 )?);
             }
         }

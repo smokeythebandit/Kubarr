@@ -101,9 +101,7 @@ impl ManagedKey {
         let stored = system_setting::Entity::find_by_id(self.setting_key)
             .one(db)
             .await?
-            .ok_or_else(|| {
-                AppError::Internal(format!("{} was not stored", self.setting_key))
-            })?;
+            .ok_or_else(|| AppError::Internal(format!("{} was not stored", self.setting_key)))?;
         self.checked(stored.value)
     }
 
@@ -151,7 +149,11 @@ impl ManagedKey {
     /// `--set` value that switches the link on (Some) or off (None). Both are
     /// explicit so `--reuse-values` cannot keep a stale assignment.
     pub fn helm_values(&self, secret_name: Option<&str>) -> String {
-        format!("{}.secretName={}", self.helm_root, secret_name.unwrap_or(""))
+        format!(
+            "{}.secretName={}",
+            self.helm_root,
+            secret_name.unwrap_or("")
+        )
     }
 }
 
@@ -202,7 +204,13 @@ mod tests {
         }
         // The other download clients need no key: they are reached over their
         // own credentials or none at all.
-        for app in ["qbittorrent", "transmission", "deluge", "rutorrent", "jellyfin"] {
+        for app in [
+            "qbittorrent",
+            "transmission",
+            "deluge",
+            "rutorrent",
+            "jellyfin",
+        ] {
             assert!(!SABNZBD.applies_to(app), "{app}");
         }
     }
@@ -224,7 +232,10 @@ mod tests {
     #[test]
     fn secret_holds_only_the_key_under_the_chart_contract() {
         let secret = SABNZBD.secret("radarr", "0123456789abcdef0123456789abcdef");
-        assert_eq!(secret.metadata.name.as_deref(), Some("kubarr-sabnzbd-api-key"));
+        assert_eq!(
+            secret.metadata.name.as_deref(),
+            Some("kubarr-sabnzbd-api-key")
+        );
         assert_eq!(secret.metadata.namespace.as_deref(), Some("radarr"));
         let data = secret.string_data.unwrap();
         assert_eq!(data.len(), 1);

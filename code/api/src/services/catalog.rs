@@ -251,10 +251,7 @@ fn lifecycle_for_component(component: &SystemComponent) -> AppLifecycleConfig {
 /// The chart value blocks a chart's own settings may live under: its name, a
 /// camelCased form of it (`kubeStateMetrics`), the name with separators
 /// dropped (`fluentbit`), and finally the document root.
-fn chart_blocks<'a>(
-    values: &'a serde_yaml::Value,
-    chart_name: &str,
-) -> Vec<&'a serde_yaml::Value> {
+fn chart_blocks<'a>(values: &'a serde_yaml::Value, chart_name: &str) -> Vec<&'a serde_yaml::Value> {
     fn camel(name: &str) -> String {
         let mut out = String::with_capacity(name.len());
         let mut upper = false;
@@ -432,8 +429,7 @@ impl AppCatalog {
                     display_name: component.display_name.to_string(),
                     description: component.description.to_string(),
                     icon: component.icon.to_string(),
-                    container_image: charted_image
-                        .unwrap_or_else(|| component.image.to_string()),
+                    container_image: charted_image.unwrap_or_else(|| component.image.to_string()),
                     default_port: component.port,
                     resource_requirements: ResourceRequirements {
                         cpu_request: "0m".to_string(),
@@ -1269,7 +1265,11 @@ annotations:
         ];
         for (chart, yaml, expected) in cases {
             let values: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(image_of(&values, chart).as_deref(), Some(expected), "{chart}");
+            assert_eq!(
+                image_of(&values, chart).as_deref(),
+                Some(expected),
+                "{chart}"
+            );
         }
     }
 
@@ -1277,8 +1277,7 @@ annotations:
     fn the_port_comes_from_wherever_the_chart_declares_its_service() {
         // postgresql keeps `service` at the document root, and every such
         // chart reported the 8080 fallback instead of its real port.
-        let values: serde_yaml::Value =
-            serde_yaml::from_str("service:\n  port: 5432\n").unwrap();
+        let values: serde_yaml::Value = serde_yaml::from_str("service:\n  port: 5432\n").unwrap();
         assert_eq!(
             chart_blocks(&values, "postgresql")
                 .into_iter()
@@ -1299,9 +1298,7 @@ annotations:
     fn an_undeterminable_image_is_not_invented() {
         // Guessing linuxserver/<chart>:latest pointed every non-linuxserver
         // chart at an image that does not exist.
-        let values: serde_yaml::Value =
-            serde_yaml::from_str("replicaCount: 1\n").unwrap();
+        let values: serde_yaml::Value = serde_yaml::from_str("replicaCount: 1\n").unwrap();
         assert_eq!(image_of(&values, "kube-state-metrics"), None);
     }
-
 }

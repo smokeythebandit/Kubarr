@@ -7,9 +7,7 @@
 //! - `get_user_app_access()` — app access list and wildcard handling
 
 mod common;
-use common::{
-    create_test_db_with_seed, create_test_user, create_test_user_with_role,
-};
+use common::{create_test_db_with_seed, create_test_user, create_test_user_with_role};
 
 use kubarr::endpoints::extractors::{get_user_app_access, get_user_permissions};
 use kubarr::endpoints::settings::{get_setting_bool, get_setting_value};

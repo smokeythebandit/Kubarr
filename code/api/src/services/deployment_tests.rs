@@ -1315,7 +1315,10 @@ fn custom_config_cannot_set_a_managed_link() {
             (format!("{root}.secretName"), "attacker".to_string()),
             (root.to_string(), "{}".to_string()),
             (format!("image.tag,{root}.secretName"), "x".to_string()),
-            ("image.tag".to_string(), format!("x,{root}.secretName=attacker")),
+            (
+                "image.tag".to_string(),
+                format!("x,{root}.secretName=attacker"),
+            ),
         ] {
             let error = validate_custom_config(&HashMap::from([(key.clone(), value.clone())]))
                 .unwrap_err()
@@ -1408,11 +1411,10 @@ async fn managed_key_secrets_precede_helm_and_keys_stay_out_of_args() {
                                 )
                     });
                     patched_before_helm &= patched;
-                    assert!(args.windows(2).any(|pair| pair
-                        == [
-                            "--set",
-                            link.helm_values(Some(link.secret_name)).as_str()
-                        ]));
+                    assert!(args
+                        .windows(2)
+                        .any(|pair| pair
+                            == ["--set", link.helm_values(Some(link.secret_name)).as_str()]));
                 }
                 key_in_args = args.join(" ");
                 Ok("deployed".into())

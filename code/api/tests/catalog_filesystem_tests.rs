@@ -31,7 +31,6 @@ fn assert_only_system_components(catalog: &AppCatalog, context: &str) {
     assert_eq!(listed, system_component_names(), "{context}");
 }
 
-
 use kubarr::services::catalog::{AppCatalog, AppConfig, ResourceRequirements, VolumeConfig};
 
 // ============================================================================
