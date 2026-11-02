@@ -1302,32 +1302,42 @@ fn custom_config_allows_values_without_injected_vpn_assignments() {
 }
 
 #[test]
-fn custom_config_cannot_set_the_managed_jellyfin_link() {
-    for (key, value) in [
-        ("jellyfinIntegration.secretName", "attacker"),
-        ("jellyfinIntegration", "{}"),
-        ("image.tag,jellyfinIntegration.secretName", "x"),
-        ("image.tag", "x,jellyfinIntegration.secretName=attacker"),
-    ] {
-        let error = validate_custom_config(&HashMap::from([(key.into(), value.into())]))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("Jellyfin link"), "{key}={value}: {error}");
-        assert!(
-            !error.contains("attacker"),
-            "error must not disclose value: {error}"
-        );
+fn custom_config_cannot_set_a_managed_link() {
+    // Pointing a chart at an attacker's Secret would hand it the shared key,
+    // so every managed root is refused however the assignment is smuggled in.
+    for link in crate::services::managed_key::ALL {
+        let root = link.helm_root;
+        for (key, value) in [
+            (format!("{root}.secretName"), "attacker".to_string()),
+            (root.to_string(), "{}".to_string()),
+            (format!("image.tag,{root}.secretName"), "x".to_string()),
+            ("image.tag".to_string(), format!("x,{root}.secretName=attacker")),
+        ] {
+            let error = validate_custom_config(&HashMap::from([(key.clone(), value.clone())]))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(link.refusal), "{key}={value}: {error}");
+            assert!(
+                !error.contains("attacker"),
+                "error must not disclose value: {error}"
+            );
+        }
+        validate_custom_config(&HashMap::from([(
+            format!("{root}Note"),
+            "unrelated".into(),
+        )]))
+        .unwrap();
     }
-    validate_custom_config(&HashMap::from([(
-        "jellyfinIntegrationNote".into(),
-        "unrelated".into(),
-    )]))
-    .unwrap();
 }
 
 #[tokio::test]
-async fn jellyfin_link_secret_precedes_helm_and_key_stays_out_of_args() {
-    for app_name in ["sonarr", "jellyfin"] {
+async fn managed_key_secrets_precede_helm_and_keys_stay_out_of_args() {
+    for app_name in ["sonarr", "jellyfin", "sabnzbd", "lidarr"] {
+        let links: Vec<_> = crate::services::managed_key::ALL
+            .iter()
+            .filter(|link| link.applies_to(app_name))
+            .collect();
+        assert!(!links.is_empty(), "{app_name} takes part in no link");
         let db = database(app_name).await;
         db.execute(
             &Schema::new(DbBackend::Sqlite)
@@ -1380,22 +1390,26 @@ async fn jellyfin_link_secret_precedes_helm_and_key_stays_out_of_args() {
         let catalog = catalog(app_name, false);
         let request: DeploymentRequest =
             serde_json::from_value(json!({"app_name": app_name, "wait": false})).unwrap();
-        let mut patched_before_helm = false;
+        let mut patched_before_helm = true;
         let mut key_in_args = String::new();
         DeploymentManager::with_db(&k8s, &catalog, &db)
             .deploy_app_with_command(&request, None, |args| {
-                patched_before_helm = requests.lock().unwrap().iter().any(|(method, path, _)| {
-                    method == "PATCH"
-                        && path
-                            == &format!(
-                                "/api/v1/namespaces/{app_name}/secrets/kubarr-jellyfin-api-key"
-                            )
-                });
-                assert!(args.windows(2).any(|pair| pair
-                    == [
-                        "--set",
-                        "jellyfinIntegration.secretName=kubarr-jellyfin-api-key"
-                    ]));
+                for link in &links {
+                    let patched = requests.lock().unwrap().iter().any(|(method, path, _)| {
+                        method == "PATCH"
+                            && path
+                                == &format!(
+                                    "/api/v1/namespaces/{app_name}/secrets/{}",
+                                    link.secret_name
+                                )
+                    });
+                    patched_before_helm &= patched;
+                    assert!(args.windows(2).any(|pair| pair
+                        == [
+                            "--set",
+                            link.helm_values(Some(link.secret_name)).as_str()
+                        ]));
+                }
                 key_in_args = args.join(" ");
                 Ok("deployed".into())
             })
@@ -1403,14 +1417,9 @@ async fn jellyfin_link_secret_precedes_helm_and_key_stays_out_of_args() {
             .unwrap();
         assert!(
             patched_before_helm,
-            "{app_name}: Secret must exist before Helm runs"
+            "{app_name}: every Secret must exist before Helm runs"
         );
 
-        let key = crate::services::jellyfin_link::api_key(&db).await.unwrap();
-        assert!(
-            !key_in_args.contains(&key),
-            "{app_name}: key leaked into Helm args"
-        );
         let patches: Vec<Value> = requests
             .lock()
             .unwrap()
@@ -1418,18 +1427,35 @@ async fn jellyfin_link_secret_precedes_helm_and_key_stays_out_of_args() {
             .filter(|(method, _, _)| method == "PATCH")
             .map(|(_, _, body)| body.clone())
             .collect();
-        assert_eq!(patches.len(), 1);
-        assert_eq!(patches[0]["stringData"]["api-key"], key.as_str());
-        // A second app reuses the same key rather than minting a new one.
-        assert_eq!(
-            crate::services::jellyfin_link::api_key(&db).await.unwrap(),
-            key
-        );
+        assert_eq!(patches.len(), links.len(), "{app_name}");
+        for link in &links {
+            let key = link.api_key(&db).await.unwrap();
+            assert!(
+                !key_in_args.contains(&key),
+                "{app_name}: {} leaked into Helm args",
+                link.setting_key
+            );
+            let patch = patches
+                .iter()
+                .find(|patch| patch["metadata"]["name"] == link.secret_name)
+                .unwrap_or_else(|| panic!("{app_name}: no Secret for {}", link.setting_key));
+            assert_eq!(patch["stringData"]["api-key"], key.as_str());
+            // A second app reuses the same key rather than minting a new one.
+            assert_eq!(link.api_key(&db).await.unwrap(), key);
+        }
+        // Two links on one app must not be handed the same key.
+        if links.len() > 1 {
+            let keys: Vec<_> = patches
+                .iter()
+                .map(|patch| patch["stringData"]["api-key"].clone())
+                .collect();
+            assert_ne!(keys[0], keys[1], "{app_name}: links share a key");
+        }
     }
 }
 
 #[tokio::test]
-async fn apps_outside_the_jellyfin_link_get_no_secret_or_value() {
+async fn apps_outside_every_managed_link_get_no_secret_or_value() {
     let app_name = "plex";
     let db = database(app_name).await;
     let (k8s, bodies) = kube_client(app_name, app_name, false);
@@ -1438,7 +1464,9 @@ async fn apps_outside_the_jellyfin_link_get_no_secret_or_value() {
         serde_json::from_value(json!({"app_name": app_name, "wait": false})).unwrap();
     DeploymentManager::with_db(&k8s, &catalog, &db)
         .deploy_app_with_command(&request, None, |args| {
-            assert!(!args.iter().any(|arg| arg.contains("jellyfinIntegration")));
+            for link in crate::services::managed_key::ALL {
+                assert!(!args.iter().any(|arg| arg.contains(link.helm_root)));
+            }
             Ok("deployed".into())
         })
         .await

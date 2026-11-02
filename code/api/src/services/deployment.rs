@@ -17,7 +17,7 @@ use crate::services::catalog::{kubarr_system_component, lifecycle_for_app_name, 
 use crate::services::gpu::{self, GpuSelection};
 use crate::services::helm_process;
 use crate::services::install_options::{self, InstallStorage};
-use crate::services::jellyfin_link;
+use crate::services::managed_key;
 use crate::services::storage_config::{self, PersistedStorageConfig};
 use crate::services::vpn;
 use crate::services::K8sClient;
@@ -474,18 +474,23 @@ impl<'a> DeploymentManager<'a> {
             set_args.push("vpn.secretName=".to_string());
         }
 
-        // Jellyfin and the apps that refresh its library share one API key.
-        // The Secret must exist before Helm renders a Pod that mounts it.
-        if jellyfin_link::applies_to(&request.app_name) {
+        // Applications that must agree on a key before either has run get it
+        // from Kubarr: Jellyfin and the managers that refresh its library,
+        // SABnzbd and the managers that queue downloads with it. Each Secret
+        // must exist before Helm renders a Pod that mounts it.
+        for link in managed_key::ALL {
+            if !link.applies_to(&request.app_name) {
+                continue;
+            }
             let secret_name = match self.db {
                 Some(db) => {
-                    let key = jellyfin_link::api_key(db).await?;
-                    jellyfin_link::ensure_secret(self.k8s, namespace, &key).await?;
-                    Some(jellyfin_link::SECRET_NAME)
+                    let key = link.api_key(db).await?;
+                    link.ensure_secret(self.k8s, namespace, &key).await?;
+                    Some(link.secret_name)
                 }
                 None => None,
             };
-            set_args.push(jellyfin_link::helm_values(secret_name));
+            set_args.push(link.helm_values(secret_name));
         }
 
         // Add custom config
@@ -1147,13 +1152,16 @@ fn validate_custom_config(custom_config: &HashMap<String, String>) -> Result<()>
             "custom_config key '{key}' contains a managed VPN assignment; use VPN settings instead"
         )));
     }
-    let jellyfin = jellyfin_link::HELM_ROOT;
-    if let Some((key, _)) = custom_config.iter().find(|(key, value)| {
-        is_managed_helm_key(key, jellyfin) || value_injects_managed_helm_assignment(value, jellyfin)
-    }) {
-        return Err(AppError::BadRequest(format!(
-            "custom_config key '{key}' sets the Jellyfin link, which Kubarr manages"
-        )));
+    for link in managed_key::ALL {
+        let root = link.helm_root;
+        if let Some((key, _)) = custom_config.iter().find(|(key, value)| {
+            is_managed_helm_key(key, root) || value_injects_managed_helm_assignment(value, root)
+        }) {
+            return Err(AppError::BadRequest(format!(
+                "custom_config key '{key}' {}",
+                link.refusal
+            )));
+        }
     }
     Ok(())
 }

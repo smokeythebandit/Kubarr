@@ -11,6 +11,7 @@ pub mod gpu;
 pub mod install_options;
 pub mod jellyfin_link;
 pub mod k8s;
+pub mod managed_key;
 pub mod network_broadcaster;
 pub mod notification;
 pub mod pod_cache;
