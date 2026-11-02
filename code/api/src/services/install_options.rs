@@ -71,41 +71,36 @@ pub struct InstallOptions {
     pub saved_chart_version: Option<String>,
 }
 
-// This explicit chart-specific contract supplements the generic common-chart
-// validator. Missing writable persistent mounts must never silently fall back
-// to the container filesystem. The source of defaults remains values.yaml.
-fn required(app: &str, component: &str) -> &'static [&'static str] {
-    match (app, component) {
-        ("jenkins", "main") => &["/var/jenkins_home"],
-        ("scm-manager", "main") => &["/var/lib/scm"],
-        ("redmine", "main") => &["/usr/src/redmine/files"],
-        ("redmine", "postgres") => &["/var/lib/postgresql/data"],
-        ("immich", "main") => &["/data"],
-        ("immich", "machineLearning") => &["/cache"],
-        ("frigate", "main") => &["/media/frigate"],
-        ("victoriametrics", "main") => &["/victoria-metrics-data"],
-        ("victorialogs", "main") => &["/data"],
-        ("postgresql", "main") => &["/var/lib/postgresql/data"],
-        ("qbittorrent" | "transmission" | "deluge" | "rutorrent" | "sabnzbd", "main") => {
-            &["/downloads"]
-        }
-        _ => &[],
+/// Paths a chart declares for a component under `kubarr.storage.<kind>`.
+///
+/// `required` are writable persistent mounts the application cannot start
+/// without, which must never silently fall back to the container filesystem.
+/// `reserved` are paths the chart's own templates already occupy, so a user
+/// mount must not shadow them. The chart is the only source of both: its
+/// templates pass the same lists to the common validator, so the wizard and
+/// the rendered release cannot disagree. Naming apps here instead meant every
+/// new chart inherited a wrong answer by default.
+fn declared(values: &serde_yaml::Value, kind: &str, component: &str) -> Vec<String> {
+    let listed = values
+        .get("kubarr")
+        .and_then(|k| k.get("storage"))
+        .and_then(|s| s.get(kind))
+        .and_then(|k| k.get(component))
+        .and_then(serde_yaml::Value::as_sequence)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(|p| p.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        });
+    match (listed, kind) {
+        (Some(paths), _) => paths,
+        // Every chart keeps its private claim at /config unless it says
+        // otherwise, matching the common validator's own default.
+        (None, "reserved") => vec!["/config".into()],
+        (None, _) => Vec::new(),
     }
 }
-
-const VPN_APPS: &[&str] = &[
-    "radarr",
-    "sonarr",
-    "jellyseerr",
-    "jackett",
-    "plex",
-    "jellyfin",
-    "qbittorrent",
-    "transmission",
-    "deluge",
-    "rutorrent",
-    "sabnzbd",
-];
 
 pub fn load(catalog: &AppCatalog, name: &str) -> Result<InstallOptions> {
     let app = catalog
@@ -194,47 +189,12 @@ pub fn load(catalog: &AppCatalog, name: &str) -> Result<InstallOptions> {
     let mut required_paths = BTreeMap::new();
     let mut reserved = BTreeMap::new();
     if mounts.is_some() {
-        required_paths.insert(
-            "main".into(),
-            required(&app.name, "main")
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        );
-        let paths: &[&str] = match app.name.as_str() {
-            "jellyseerr" => &["/app/config"],
-            "radarr" | "sonarr" => &[
-                "/config",
-                "/custom-services.d/setup-downloadclients",
-                "/custom-services.d/setup-indexers",
-            ],
-            "qbittorrent" => &["/config", "/custom-cont-init.d", "/config-immutable"],
-            "deluge" => &["/config", "/custom-cont-init.d/enable-label-plugin.sh"],
-            "rutorrent" => &["/config", "/var/lib/nginx"],
-            "sabnzbd" => &["/config", "/custom-services.d/setup-apikey"],
-            "frigate" => &["/config", "/dev/shm", "/tmp/cache"],
-            "immich" | "victorialogs" => &["/tmp"],
-            "victoriametrics" => &["/etc/prometheus", "/tmp"],
-            _ => &["/config"],
-        };
-        reserved.insert("main".into(), paths.iter().map(|s| s.to_string()).collect());
+        required_paths.insert("main".into(), declared(&values, "required", "main"));
+        reserved.insert("main".into(), declared(&values, "reserved", "main"));
     }
     for component in workloads.keys() {
-        required_paths.insert(
-            component.clone(),
-            required(&app.name, component)
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        );
-        reserved.insert(
-            component.clone(),
-            match (app.name.as_str(), component.as_str()) {
-                ("redmine", "postgres") => vec!["/dev/shm".into(), "/config".into()],
-                ("immich", "machineLearning") => vec!["/nfs".into(), "/config".into()],
-                _ => vec!["/config".into()],
-            },
-        );
+        required_paths.insert(component.clone(), declared(&values, "required", component));
+        reserved.insert(component.clone(), declared(&values, "reserved", component));
     }
     let options = InstallOptions {
         app_name: app.name.clone(),
@@ -245,9 +205,11 @@ pub fn load(catalog: &AppCatalog, name: &str) -> Result<InstallOptions> {
         private_claim,
         required: required_paths,
         reserved,
-        vpn_supported: VPN_APPS.contains(&app.name.as_str())
-            && values.get("vpn").and_then(|v| v.get("enabled")).is_some(),
-        gpu_supported: matches!(app.name.as_str(), "plex" | "jellyfin"),
+        // A chart that ships the sidecar/device wiring says so in its values.
+        // Naming the apps here instead meant every new chart silently lost the
+        // toggle its own templates already supported.
+        vpn_supported: values.get("vpn").and_then(|v| v.get("enabled")).is_some(),
+        gpu_supported: values.get("gpu").and_then(|v| v.get("enabled")).is_some(),
         saved_storage: None,
         saved_chart_version: None,
     };
@@ -499,6 +461,58 @@ mod tests {
             saved_chart_version: None,
         }
     }
+    #[test]
+    fn declared_paths_come_from_the_chart_not_from_a_table_of_app_names() {
+        let values: serde_yaml::Value = serde_yaml::from_str(
+            "kubarr:\n  storage:\n    required:\n      main: [/downloads]\n\
+             \x20     node: [/temp]\n    reserved:\n      main: [/app/server, /temp]\n",
+        )
+        .unwrap();
+        assert_eq!(declared(&values, "required", "main"), vec!["/downloads"]);
+        assert_eq!(declared(&values, "required", "node"), vec!["/temp"]);
+        assert_eq!(
+            declared(&values, "reserved", "main"),
+            vec!["/app/server", "/temp"]
+        );
+        // A component the chart does not describe gets the generic answer, not
+        // another component's paths.
+        assert_eq!(declared(&values, "reserved", "node"), vec!["/config"]);
+    }
+
+    #[test]
+    fn a_chart_that_declares_nothing_still_protects_its_private_claim() {
+        let values: serde_yaml::Value = serde_yaml::from_str("storage:\n  mounts: []\n").unwrap();
+        assert_eq!(declared(&values, "reserved", "main"), vec!["/config"]);
+        assert!(declared(&values, "required", "main").is_empty());
+    }
+
+    #[test]
+    fn an_explicitly_empty_declaration_is_not_a_missing_one() {
+        let values: serde_yaml::Value = serde_yaml::from_str(
+            "kubarr:\n  storage:\n    reserved:\n      main: []\n",
+        )
+        .unwrap();
+        // The chart says it occupies nothing, so nothing is withheld from the
+        // user. Falling back to /config here would reserve a path the chart
+        // does not own.
+        assert!(declared(&values, "reserved", "main").is_empty());
+    }
+
+    #[test]
+    fn capability_toggles_follow_the_chart_values() {
+        let vpn: serde_yaml::Value =
+            serde_yaml::from_str("vpn:\n  enabled: false\n").unwrap();
+        let gpu: serde_yaml::Value =
+            serde_yaml::from_str("gpu:\n  enabled: false\n  provider: intel\n").unwrap();
+        let neither: serde_yaml::Value = serde_yaml::from_str("storage:\n  mounts: []\n").unwrap();
+        // Presence of the key, not its default, is what says the chart ships
+        // the wiring: enabled: false is the off position of a toggle that exists.
+        assert!(vpn.get("vpn").and_then(|v| v.get("enabled")).is_some());
+        assert!(gpu.get("gpu").and_then(|v| v.get("enabled")).is_some());
+        assert!(neither.get("vpn").and_then(|v| v.get("enabled")).is_none());
+        assert!(neither.get("gpu").and_then(|v| v.get("enabled")).is_none());
+    }
+
     #[test]
     fn required_mounts_and_explicit_empty_are_distinct_from_defaults() {
         assert!(validate(&options(), &InstallStorage::default()).is_ok());

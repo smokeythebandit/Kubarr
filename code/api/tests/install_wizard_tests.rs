@@ -121,12 +121,12 @@ async fn options_permissions_install_validation_and_atomic_vpn_queue() {
         )
         .unwrap();
         std::fs::write(dir.join("values.yaml"), match name {
-            "qbittorrent" => "storage:\n  mounts:\n    - {name: downloads, source: downloads/qbittorrent, target: /downloads, mode: read-write}\n  config:\n    create: true\n    existingClaim: ''\n    storageClassName: ''\n    size: 5Gi\nvpn:\n  enabled: false\n",
-            "plex" => "storage:\n  mounts: []\nvpn:\n  enabled: false\n",
+            "qbittorrent" => "storage:\n  mounts:\n    - {name: downloads, source: downloads/qbittorrent, target: /downloads, mode: read-write}\n  config:\n    create: true\n    existingClaim: ''\n    storageClassName: ''\n    size: 5Gi\nvpn:\n  enabled: false\nkubarr:\n  storage:\n    required:\n      main: [/downloads]\n    reserved:\n      main: [/config, /custom-cont-init.d, /config-immutable]\n",
+            "plex" => "storage:\n  mounts: []\nvpn:\n  enabled: false\ngpu:\n  enabled: false\n",
             "jackett" => "storage:\n  mounts: []\n",
             "sonarr" => "storage:\n  mounts: []\nvpn:\n  enabled: false\n",
             "jellyfin" => "storage:\n  mounts: []\n  config:\n    create: true\n    existingClaim: ''\n    storageClassName: ''\n    size: 5Gi\nvpn:\n  enabled: false\n",
-            _ => "storage:\n  mounts:\n    - {name: attachments, source: redmine/files, target: /usr/src/redmine/files, mode: read-write}\n  workloads:\n    postgres:\n      mounts:\n        - {name: database, source: redmine/postgres, target: /var/lib/postgresql/data, mode: read-write}\n",
+            _ => "storage:\n  mounts:\n    - {name: attachments, source: redmine/files, target: /usr/src/redmine/files, mode: read-write}\n  workloads:\n    postgres:\n      mounts:\n        - {name: database, source: redmine/postgres, target: /var/lib/postgresql/data, mode: read-write}\nkubarr:\n  storage:\n    required:\n      main: [/usr/src/redmine/files]\n      postgres: [/var/lib/postgresql/data]\n    reserved:\n      postgres: [/dev/shm, /config]\n",
         }).unwrap();
     }
     std::env::set_var("KUBARR_CHARTS_DIR", charts.path());
@@ -172,6 +172,10 @@ async fn options_permissions_install_validation_and_atomic_vpn_queue() {
     assert_eq!(options["mounts"][0]["source"], "downloads/qbittorrent");
     assert_eq!(options["private_claim"], "qbittorrent-config");
     assert_eq!(options["vpn_supported"], true);
+    assert_eq!(options["gpu_supported"], false);
+    // Both lists come out of the chart's own values, not a table keyed by app name.
+    assert_eq!(options["required"]["main"][0], "/downloads");
+    assert_eq!(options["reserved"]["main"][2], "/config-immutable");
     let (status, redmine_options) = call(
         router.clone(),
         "GET",
@@ -183,6 +187,10 @@ async fn options_permissions_install_validation_and_atomic_vpn_queue() {
     assert_eq!(status, StatusCode::OK);
     let redmine_options: serde_json::Value = serde_json::from_str(&redmine_options).unwrap();
     assert_eq!(redmine_options["vpn_supported"], false);
+    assert_eq!(redmine_options["required"]["postgres"][0], "/var/lib/postgresql/data");
+    assert_eq!(redmine_options["reserved"]["postgres"][0], "/dev/shm");
+    // Undeclared for the main workload, so the generic private-claim answer.
+    assert_eq!(redmine_options["reserved"]["main"][0], "/config");
     assert_eq!(
         redmine_options["workloads"]["postgres"][0]["target"],
         "/var/lib/postgresql/data"
