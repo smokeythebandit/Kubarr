@@ -56,14 +56,14 @@ test.describe('Dashboard', () => {
     });
 
     test('can navigate to resources page via status menu', async ({ page }) => {
-      // Click Status dropdown to open it (click-based, not hover)
-      await page.locator('nav').locator('button:has-text("Status")').click();
+      // Hover Status dropdown to open it
+      await page.locator('nav').locator('button:has-text("Status")').hover();
       await page.locator('a:has-text("Resources")').click();
       await expect(page).toHaveURL('/resources');
     });
 
     test('can navigate to storage page via status menu', async ({ page }) => {
-      await page.locator('nav').locator('button:has-text("Status")').click();
+      await page.locator('nav').locator('button:has-text("Status")').hover();
       // Click the nav link, not the dashboard card
       await page.locator('nav a:has-text("Storage"), [role="menu"] a:has-text("Storage")').first().click();
       await expect(page).toHaveURL('/storage');

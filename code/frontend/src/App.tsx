@@ -574,6 +574,7 @@ function Navigation() {
               <div
                 ref={(el) => { systemDropdownRef.current = el; setNavRef('__system')(el) }}
                 className="relative"
+                onPointerEnter={(e) => { if (e.pointerType === 'mouse') setSystemDropdownOpen(true) }}
               >
                 <button
                   onClick={() => setSystemDropdownOpen(!systemDropdownOpen)}
@@ -592,7 +593,10 @@ function Navigation() {
                     ? 'opacity-100 scale-100 translate-y-0 pointer-events-auto'
                     : 'opacity-0 scale-95 -translate-y-1 pointer-events-none'
                 }`}>
-                    <div className="bg-white dark:bg-gray-800 border border-gray-200/60 dark:border-gray-700/60 rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.1)] dark:shadow-[0_8px_24px_rgba(0,0,0,0.4)]">
+                    <div
+                      className="bg-white dark:bg-gray-800 border border-gray-200/60 dark:border-gray-700/60 rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.1)] dark:shadow-[0_8px_24px_rgba(0,0,0,0.4)]"
+                      onClick={() => setSystemDropdownOpen(false)}
+                    >
                     {canViewResources && (
                       <Link
                         to="/resources"

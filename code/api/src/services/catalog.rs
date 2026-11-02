@@ -133,6 +133,33 @@ const KUBARR_SYSTEM_COMPONENTS: &[SystemComponent] = &[
         service_name: None,
     },
     SystemComponent {
+        name: "node-exporter",
+        display_name: "Node Exporter",
+        description: "Host metrics agent, and the only source of NFS client byte counters.",
+        icon: "node-exporter",
+        image: "quay.io/prometheus/node-exporter:v1.10.2",
+        port: 9100,
+        category: "monitoring",
+        namespace: "node-exporter",
+        workload_kind: SystemComponentWorkloadKind::DaemonSet,
+        workload_name: Some("node-exporter"),
+        // Scraped per Pod; neither exporter chart renders a Service.
+        service_name: None,
+    },
+    SystemComponent {
+        name: "kubarr-flow-exporter",
+        display_name: "Flow Exporter",
+        description: "Per-class network byte counters read from Cilium's conntrack map.",
+        icon: "network",
+        image: "ghcr.io/smokeythebandit/kubarr-worker:0.3.10",
+        port: 9970,
+        category: "monitoring",
+        namespace: "kubarr-flow-exporter",
+        workload_kind: SystemComponentWorkloadKind::DaemonSet,
+        workload_name: Some("kubarr-flow-exporter"),
+        service_name: None,
+    },
+    SystemComponent {
         name: "victoriametrics",
         display_name: "VictoriaMetrics",
         description: "Metrics store used by Kubarr observability.",
@@ -815,6 +842,29 @@ mod tests {
         assert!(json.contains("\"is_hidden\":true"));
         assert!(json.contains("\"is_browseable\":false"));
         assert!(json.contains("\"default_port\":8096"));
+    }
+
+    #[test]
+    fn the_bootstrap_exporters_have_a_workload_to_read_state_from() {
+        // Both charts are annotated kubarr.io/system, which bars them from the
+        // install wizard, and the installer owns them instead. Without an entry
+        // here lifecycle_for_app_name guesses a release with no workload, so the
+        // dashboard can show neither health nor an install button -- an app that
+        // exists and can never leave the idle state.
+        for name in ["node-exporter", "kubarr-flow-exporter"] {
+            let lifecycle = lifecycle_for_app_name(name);
+            assert_eq!(
+                lifecycle.workload_kind.as_deref(),
+                Some("daemonset"),
+                "{name}"
+            );
+            assert_eq!(lifecycle.workload_name.as_deref(), Some(name), "{name}");
+            assert_eq!(lifecycle.namespace, name, "{name}");
+            // The installer runs every bootstrap release out of `default`.
+            assert_eq!(lifecycle.release_namespace, "default", "{name}");
+            // Neither chart renders a Service; they are scraped per Pod.
+            assert_eq!(lifecycle.service_name, None, "{name}");
+        }
     }
 
     // -------------------------------------------------------------------------

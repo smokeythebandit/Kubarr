@@ -18,6 +18,7 @@ import type { ServiceEndpoint } from '../types/monitoring'
 
 type FilterType = 'all' | 'installed' | 'healthy' | 'unhealthy' | 'available' | 'updates'
 type AppsTab = 'catalog' | 'operations'
+type CardView = 'cards' | 'compact'
 
 type OperationState = 'installing' | 'updating' | 'deleting' | 'restarting' | 'error'
 
@@ -137,6 +138,7 @@ interface AppCardComponentProps {
   updateAvailable: boolean
   isOperationPending: boolean
   canInstall: boolean
+  compact?: boolean
 }
 
 function AppCardComponent({
@@ -152,7 +154,8 @@ function AppCardComponent({
   onClick,
   updateAvailable,
   isOperationPending,
-  canInstall
+  canInstall,
+  compact = false
 }: AppCardComponentProps) {
   const colors = useIconColors(app.name)
   const displayColors = colors.length > 0
@@ -194,43 +197,121 @@ function AppCardComponent({
     ? `0 8px 24px ${toRgba(primaryColor, colors.length > 0 ? 0.25 : 0.16)}, 0 0 0 2px ${toRgba(primaryColor, colors.length > 0 ? 0.3 : 0.16)}`
     : '0 8px 24px rgba(59,130,246,0.15), 0 0 0 2px rgba(59,130,246,0.2)'
 
+  const cardClassName = `group relative bg-white dark:bg-gray-800/90 rounded-xl border backdrop-blur-sm transition-all duration-200 overflow-hidden cursor-pointer ${
+    compact ? 'hover:-translate-y-0.5' : 'hover:-translate-y-1'
+  } ${
+    isSelected
+      ? `border-blue-400/60 dark:border-blue-500/40 ${compact ? '-translate-y-0.5' : '-translate-y-1'}`
+      : 'border-gray-200/60 dark:border-gray-700/60'
+  }`
+  const cardStyle: React.CSSProperties = {
+    ...glassStyle,
+    boxShadow: isSelected ? selectedShadow : baseShadow,
+  }
+  const handleMouseEnter = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isSelected && hoverShadow) {
+      e.currentTarget.style.boxShadow = hoverShadow
+    }
+  }
+  const handleMouseLeave = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isSelected) {
+      e.currentTarget.style.boxShadow = baseShadow || ''
+    }
+  }
+  const statusBar = (isInstalled || app.is_system) && (
+    <div
+      className={`h-1 w-full ${
+        effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting' || effectiveState === 'restarting'
+          ? 'bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 animate-pulse'
+          : effectiveState === 'error'
+          ? 'bg-red-500'
+          : isHealthy
+          ? 'bg-green-500'
+          : 'bg-yellow-500'
+      }`}
+    />
+  )
+
+  // Compact view: same glass card, one row high. Open or Install stays on the
+  // card; everything else is in the detail panel.
+  if (compact) {
+    const busy = effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting' || effectiveState === 'restarting' || effectiveState === 'loading'
+    const busyText = effectiveState === 'updating' ? 'Updating' : effectiveState === 'installing' ? 'Installing' : effectiveState === 'restarting' ? 'Restarting' : effectiveState === 'deleting' ? 'Removing' : 'Loading'
+    const iconButton = 'w-9 h-9 flex items-center justify-center rounded-lg transition-colors shadow-sm'
+
+    let status: JSX.Element
+    if (busy) {
+      status = <><span className="w-1.5 h-1.5 flex-shrink-0 rounded-full bg-blue-500 animate-pulse" />{busyText}…</>
+    } else if (effectiveState === 'error') {
+      status = <><span className="w-1.5 h-1.5 flex-shrink-0 rounded-full bg-red-500" /><span className="text-red-500 dark:text-red-400">Error</span></>
+    } else if (effectiveState === 'installed') {
+      status = <><span className={`w-1.5 h-1.5 flex-shrink-0 rounded-full ${isHealthy ? 'bg-green-500' : 'bg-yellow-500'}`} />{isHealthy ? 'Healthy' : 'Unhealthy'}{app.is_system && ' · System'}</>
+    } else if (app.is_system) {
+      status = <>System</>
+    } else {
+      status = <span className="truncate">{app.description}</span>
+    }
+
+    let action: JSX.Element | null = null
+    if (busy) {
+      action = (
+        <button disabled aria-label={`${busyText} ${app.display_name}`} className={`${iconButton} bg-gray-100 dark:bg-gray-700/50 text-gray-400 cursor-not-allowed`}>
+          <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+        </button>
+      )
+    } else if (effectiveState === 'installed' && app.is_browseable) {
+      action = (
+        <button onClick={onOpen} aria-label={`Open ${app.display_name}`} title="Open" className={`${iconButton} bg-blue-600 hover:bg-blue-500 text-white`}>
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+          </svg>
+        </button>
+      )
+    } else if (!app.is_system && canInstall && (effectiveState === 'idle' || effectiveState === 'error')) {
+      action = (
+        <button onClick={onInstall} aria-label={`${effectiveState === 'error' ? 'Retry install' : 'Install'} ${app.display_name}`} title={effectiveState === 'error' ? 'Retry install' : 'Install'}
+          className={`${iconButton} bg-white/80 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 text-blue-600 dark:text-blue-400 hover:bg-blue-600 hover:text-white hover:border-blue-600`}>
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+        </button>
+      )
+    }
+
+    return (
+      <div className={cardClassName} style={cardStyle} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave} onClick={onClick}>
+        {statusBar}
+        <div className="p-3 flex items-center gap-3">
+          <div className="relative flex-shrink-0 drop-shadow-[0_1px_2px_rgba(0,0,0,0.45)] dark:drop-shadow-[0_1px_2px_rgba(0,0,0,0.65)]">
+            <AppIcon appName={app.name} size={44} className="rounded-xl shadow-lg" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="font-semibold text-gray-900 dark:text-white truncate">{app.display_name}</h3>
+              {updateAvailable && effectiveState === 'installed' && (
+                <span className="flex-shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">Update</span>
+              )}
+            </div>
+            <p className="mt-0.5 flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 truncate">{status}</p>
+          </div>
+          {action && <div className="flex-shrink-0" onClick={(e) => e.stopPropagation()}>{action}</div>}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
-      className={`group relative bg-white dark:bg-gray-800/90 rounded-xl border backdrop-blur-sm hover:-translate-y-1 transition-all duration-200 overflow-hidden cursor-pointer ${
-        isSelected
-          ? 'border-blue-400/60 dark:border-blue-500/40 -translate-y-1'
-          : 'border-gray-200/60 dark:border-gray-700/60'
-      }`}
-      style={{
-        ...glassStyle,
-        boxShadow: isSelected ? selectedShadow : baseShadow,
-      }}
-      onMouseEnter={(e) => {
-        if (!isSelected && hoverShadow) {
-          e.currentTarget.style.boxShadow = hoverShadow
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!isSelected) {
-          e.currentTarget.style.boxShadow = baseShadow || ''
-        }
-      }}
+      className={cardClassName}
+      style={cardStyle}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
       onClick={onClick}
     >
       {/* Status indicator bar at top */}
-      {(isInstalled || app.is_system) && (
-        <div
-          className={`h-1 w-full ${
-            effectiveState === 'installing' || effectiveState === 'updating' || effectiveState === 'deleting' || effectiveState === 'restarting'
-              ? 'bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 animate-pulse'
-              : effectiveState === 'error'
-              ? 'bg-red-500'
-              : isHealthy
-              ? 'bg-green-500'
-              : 'bg-yellow-500'
-          }`}
-        />
-      )}
+      {statusBar}
 
       <div className="p-5">
         <div className="flex items-start gap-4">
@@ -362,6 +443,13 @@ function AppCardComponent({
                 </button>
               )}
             </>
+          ) : app.is_system && (effectiveState === 'idle' || effectiveState === 'error') ? (
+            /* install-options refuses every kubarr.io/system chart, so an
+               Install button here can only open a wizard that fails to load.
+               The installer owns these releases. */
+            <button disabled className="w-full cursor-not-allowed rounded-lg bg-gray-100 px-4 py-2.5 text-sm text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+              Installed by the Kubarr installer
+            </button>
           ) : canInstall && (effectiveState === 'idle' || effectiveState === 'error') ? (
             <button
               onClick={onInstall}
@@ -707,7 +795,12 @@ function AppDetailPanel({
                       Uninstall
                     </button>
                   )}
-                   {canInstall && !isInstalled && (effectiveState === 'idle' || effectiveState === 'error') && (
+                  {app.is_system && !isInstalled && (effectiveState === 'idle' || effectiveState === 'error') && (
+                    <span className="text-sm text-gray-500 dark:text-gray-400">
+                      Installed by the Kubarr installer
+                    </span>
+                  )}
+                   {canInstall && !app.is_system && !isInstalled && (effectiveState === 'idle' || effectiveState === 'error') && (
                     <button
                       onClick={onInstall}
                       className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-2 px-4 rounded-xl transition-colors flex items-center gap-1.5"
@@ -1088,6 +1181,21 @@ export default function AppsPage() {
       setToast({ message: 'Catalog sync failed', type: 'error' })
     },
   })
+  const [cardView, setCardView] = useState<CardView>(() => {
+    try {
+      return localStorage.getItem('kubarr.apps.cardView') === 'compact' ? 'compact' : 'cards'
+    } catch {
+      return 'cards'
+    }
+  })
+  const changeCardView = (view: CardView) => {
+    setCardView(view)
+    try {
+      localStorage.setItem('kubarr.apps.cardView', view)
+    } catch {
+      // Storage can be unavailable (private mode); the choice then lasts for this visit only.
+    }
+  }
   const [operationStatuses, setOperationStatuses] = useState<Record<string, OperationStatus>>({})
   const [selectedApp, setSelectedApp] = useState<AppConfig | null>(null)
   const [installDialogApp, setInstallDialogApp] = useState<string | null>(null)
@@ -1504,6 +1612,30 @@ export default function AppsPage() {
             </p>
           </div>
           {activeTab === 'catalog' && <div className="flex flex-wrap items-center gap-3">
+            <div role="group" aria-label="Card size" className="flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+              {([
+                { view: 'cards', label: 'Cards', path: 'M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zm10 0a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z' },
+                { view: 'compact', label: 'Compact', path: 'M4 6h16M4 10h16M4 14h16M4 18h16' },
+              ] as const).map(option => (
+                <button
+                  key={option.view}
+                  type="button"
+                  onClick={() => changeCardView(option.view)}
+                  aria-pressed={cardView === option.view}
+                  title={`${option.label} view`}
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                    cardView === option.view
+                      ? 'bg-blue-600 text-white'
+                      : 'text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700'
+                  }`}
+                >
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={option.path} />
+                  </svg>
+                  {option.label}
+                </button>
+              ))}
+            </div>
             <select
               value={filter}
               onChange={(e) => setFilter(e.target.value as FilterType)}
@@ -1629,7 +1761,9 @@ export default function AppsPage() {
                 </div>
 
                 {/* Apps Grid */}
-                <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                <div className={cardView === 'compact'
+                  ? 'grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4'
+                  : 'grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4'}>
                   {apps.map(app => {
                     const { isInstalled, isHealthy, effectiveState } = getAppState(app)
                     const updateAvailable = appStates[app.name]?.update_available === true
@@ -1654,6 +1788,7 @@ export default function AppsPage() {
                           (deleteMutation.isPending && deleteMutation.variables === app.name) ||
                            (restartMutation.isPending && restartMutation.variables === app.name)}
                         canInstall={hasPermission('apps.install')}
+                        compact={cardView === 'compact'}
                       />
                     )
                   })}

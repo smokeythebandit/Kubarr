@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   canDelete: false,
   showPlex: false,
   showDevelopment: false,
+  showSystemExporter: false,
   plexInstalled: false,
   canViewVpn: false,
   canManageVpn: false,
@@ -145,7 +146,8 @@ const queuedRestart: AppOperation = {
 vi.mock('../contexts/MonitoringContext', () => ({
   useMonitoring: () => ({
     catalog: [app, ...(mocks.showPlex ? [{ ...app, name: 'plex', display_name: 'Plex' }] : []),
-      ...(mocks.showDevelopment ? [{ ...app, name: 'redmine', display_name: 'Redmine', category: 'development' }] : [])],
+      ...(mocks.showDevelopment ? [{ ...app, name: 'redmine', display_name: 'Redmine', category: 'development' }] : []),
+      ...(mocks.showSystemExporter ? [{ ...app, name: 'node-exporter', display_name: 'Node Exporter', category: 'monitoring', is_system: true, is_browseable: false }] : [])],
     installedApps: mocks.plexInstalled ? ['sonarr', 'plex'] : ['sonarr'],
     appStates: mocks.plexInstalled ? { sonarr: appState, plex: { ...appState, app_name: 'plex' } } : { sonarr: appState },
     appStatuses: { sonarr: { healthy: true, loading: false, pods: [] } },
@@ -183,6 +185,30 @@ describe('AppsPage development category', () => {
       expect(screen.getByText('Redmine')).toBeInTheDocument()
     } finally {
       mocks.showDevelopment = false
+    }
+  })
+})
+
+describe('AppsPage system apps', () => {
+  beforeEach(() => {
+    mocks.getOperations.mockResolvedValue([])
+  })
+
+  it('never offers an install the API refuses for a system app', async () => {
+    // install-options rejects every kubarr.io/system chart, so the wizard this
+    // button opens can only ever report that it could not load them. The
+    // installer owns these releases; the card has to say so instead.
+    mocks.showSystemExporter = true
+    try {
+      renderPage()
+      const card = (await screen.findByText('Node Exporter')).closest('div.group') as HTMLElement
+      expect(card).not.toBeNull()
+      expect(within(card).queryByRole('button', { name: 'Install' })).not.toBeInTheDocument()
+      expect(within(card).queryByRole('button', { name: 'Retry Install' })).not.toBeInTheDocument()
+      const note = within(card).getByRole('button', { name: 'Installed by the Kubarr installer' })
+      expect(note).toBeDisabled()
+    } finally {
+      mocks.showSystemExporter = false
     }
   })
 })
@@ -606,5 +632,35 @@ describe('AppsPage VPN assignment', () => {
     mocks.getForwardedPort.mockResolvedValue({ port: 0 })
     await queryClient.invalidateQueries({ queryKey: ['vpn-forwarded-port', 'sonarr'] })
     expect(await screen.findByText('Port forwarding: negotiating...')).toBeVisible()
+  })
+})
+
+
+describe('AppsPage compact view', () => {
+  beforeEach(() => {
+    mocks.showPlex = true
+    mocks.plexInstalled = false
+    mocks.canInstall = true
+    mocks.getOperations.mockResolvedValue([])
+    localStorage.clear()
+  })
+
+  it('switches to compact cards, keeps Open and Install on the card, and remembers the choice', async () => {
+    const { unmount } = renderPage()
+    await screen.findByRole('heading', { name: 'Sonarr', level: 3 })
+    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Compact' }))
+    expect(screen.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Open Sonarr' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Install Plex' }))
+    expect(await screen.findByRole('dialog', { name: 'Install plex' })).toBeInTheDocument()
+
+    unmount()
+    renderPage()
+    await screen.findByRole('heading', { name: 'Sonarr', level: 3 })
+    expect(screen.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true')
   })
 })
