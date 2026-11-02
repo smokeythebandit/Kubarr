@@ -290,6 +290,51 @@ async fn test_get_unknown_setting_returns_404() {
     );
 }
 
+#[tokio::test]
+async fn test_get_setting_never_returns_internal_secrets() {
+    use kubarr::models::system_setting;
+    use sea_orm::{ActiveModelTrait, Set};
+
+    ensure_jwt_keys().await;
+
+    let db = create_test_db_with_seed().await;
+    // system_settings also stores secrets; a settings.view user must not read them.
+    for key in ["jwt_private_key", "jellyfin_api_key"] {
+        system_setting::ActiveModel {
+            key: Set(key.to_string()),
+            value: Set("top-secret-value".to_string()),
+            description: Set(None),
+            updated_at: Set(chrono::Utc::now()),
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+    }
+    create_test_user_with_role(
+        &db,
+        "secretsetting",
+        "secretsetting@example.com",
+        "password123",
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db).await;
+
+    let (_, cookie) = do_login(create_router(state.clone()), "secretsetting", "password123").await;
+    let cookie = cookie.expect("Login must set a session cookie");
+
+    for key in ["jwt_private_key", "jellyfin_api_key"] {
+        let (status, body) = authenticated_get(
+            create_router(state.clone()),
+            &format!("/api/settings/{key}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{key} must not be readable");
+        assert!(!body.contains("top-secret-value"), "{key} leaked: {body}");
+    }
+}
+
 // ============================================================================
 // PUT /api/settings/{key} — update a setting
 // ============================================================================

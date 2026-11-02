@@ -129,6 +129,11 @@ async fn get_setting(
     Path(key): Path<String>,
     _auth: Authorized<SettingsView>,
 ) -> Result<Json<SettingResponse>> {
+    // system_settings also holds secrets (JWT signing key, the Jellyfin API
+    // key); only the user-facing settings listed in DEFAULT_SETTINGS are readable.
+    if !DEFAULT_SETTINGS.contains_key(key.as_str()) {
+        return Err(AppError::NotFound(format!("Setting '{}' not found", key)));
+    }
     let db = state.get_db().await?;
     let db_setting = SystemSetting::find_by_id(&key).one(&db).await?;
 
