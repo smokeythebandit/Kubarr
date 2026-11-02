@@ -13,6 +13,25 @@
 
 use std::collections::HashMap;
 
+/// What the catalog holds with no charts synced: the platform's own
+/// components and nothing else. These tests were written when that was
+/// empty, and `load_kubarr_system_components` changed it deliberately.
+fn system_component_names() -> std::collections::BTreeSet<String> {
+    kubarr::services::catalog::kubarr_system_component_names()
+        .map(str::to_string)
+        .collect()
+}
+
+fn assert_only_system_components(catalog: &AppCatalog, context: &str) {
+    let listed: std::collections::BTreeSet<String> = catalog
+        .get_all_apps()
+        .iter()
+        .map(|app| app.name.clone())
+        .collect();
+    assert_eq!(listed, system_component_names(), "{context}");
+}
+
+
 use kubarr::services::catalog::{AppCatalog, AppConfig, ResourceRequirements, VolumeConfig};
 
 // ============================================================================
@@ -70,18 +89,18 @@ fn test_default_does_not_panic_without_charts_dir() {
 fn test_new_returns_empty_catalog_when_charts_dir_missing() {
     // Without a charts directory the catalog should contain no apps.
     let catalog = AppCatalog::new();
-    assert!(
-        catalog.get_all_apps().is_empty(),
-        "Catalog must be empty when the charts directory does not exist"
+    assert_only_system_components(
+        &catalog,
+        "with no charts directory the catalog lists the platform's own components",
     );
 }
 
 #[test]
 fn test_default_returns_empty_catalog_when_charts_dir_missing() {
     let catalog = AppCatalog::default();
-    assert!(
-        catalog.get_all_apps().is_empty(),
-        "Default catalog must be empty when the charts directory does not exist"
+    assert_only_system_components(
+        &catalog,
+        "the default catalog lists the platform's own components",
     );
 }
 
@@ -144,9 +163,9 @@ fn test_reload_clears_with_apps_catalog() {
 
     catalog.reload();
 
-    assert!(
-        catalog.get_all_apps().is_empty(),
-        "After reload() with no charts dir, catalog must be empty"
+    assert_only_system_components(
+        &catalog,
+        "after reload() with no charts dir only the platform's own components remain",
     );
 }
 
@@ -164,9 +183,10 @@ fn test_reload_clears_categories() {
 
     catalog.reload();
 
-    assert!(
-        catalog.get_categories().is_empty(),
-        "After reload(), categories must also be empty"
+    assert_eq!(
+        catalog.get_categories(),
+        vec!["monitoring".to_string(), "system".to_string()],
+        "after reload() only the platform components' categories remain"
     );
 }
 
@@ -212,10 +232,7 @@ fn test_reload_multiple_times_stays_empty() {
     catalog.reload();
     catalog.reload();
 
-    assert!(
-        catalog.get_all_apps().is_empty(),
-        "Repeated reload() calls must leave the catalog empty without charts dir"
-    );
+    assert_only_system_components(&catalog, "repeated reload() is idempotent");
 }
 
 #[test]
@@ -223,14 +240,11 @@ fn test_reload_on_new_catalog_stays_empty() {
     // new() + reload() — both operations should produce an empty catalog when
     // the charts directory does not exist.
     let mut catalog = AppCatalog::new();
-    assert!(catalog.get_all_apps().is_empty());
+    assert_only_system_components(&catalog, "new()");
 
     catalog.reload();
 
-    assert!(
-        catalog.get_all_apps().is_empty(),
-        "reload() on a catalog already empty must remain empty"
-    );
+    assert_only_system_components(&catalog, "reload() on an unchanged catalog");
 }
 
 // ============================================================================
@@ -632,12 +646,10 @@ fn test_large_catalog_reload_clears_everything() {
 
     catalog.reload();
 
-    assert!(
-        catalog.get_all_apps().is_empty(),
-        "reload() must clear all {} apps",
-        n
+    assert_only_system_components(
+        &catalog,
+        &format!("reload() must clear all {n} injected apps"),
     );
-    assert!(catalog.get_categories().is_empty());
     for i in 0..n {
         let name = format!("app_{:02}", i);
         assert!(!catalog.get_app(&name).is_some());

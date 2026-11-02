@@ -131,10 +131,13 @@ async fn test_log_failure() {
     let row = &logs[0];
     assert_eq!(row.action, "login_failed");
     assert!(!row.success, "log_failure must set success=false");
+    // error_message is an allowlist of known labels, so free text is redacted:
+    // an error string carries whatever a caller put in it, including a
+    // credential.
     assert_eq!(
         row.error_message.as_deref(),
-        Some("invalid password"),
-        "error_message must be stored"
+        Some("[REDACTED]"),
+        "free-text error detail must not reach the audit log"
     );
     assert_eq!(row.ip_address.as_deref(), Some("127.0.0.1"));
 }
@@ -506,4 +509,31 @@ async fn test_clear_old_logs() {
             "Surviving rows must be within the retention window"
         );
     }
+}
+#[tokio::test]
+async fn log_failure_keeps_a_known_label() {
+    // Redaction must not swallow the labels the UI reads back.
+    let db = create_test_db().await;
+    let (svc, db) = make_service(db).await;
+
+    svc.log_failure(
+        AuditAction::LoginFailed,
+        ResourceType::User,
+        Some("bob".to_string()),
+        Some(2),
+        Some("bob".to_string()),
+        None,
+        Some("127.0.0.1".to_string()),
+        None,
+        "invalid_credentials",
+    )
+    .await
+    .expect("log_failure should not fail");
+
+    let logs = audit_log::Entity::find().all(&db).await.unwrap();
+    assert_eq!(
+        logs[0].error_message.as_deref(),
+        Some("invalid_credentials"),
+        "an allowlisted label is stored as it is"
+    );
 }

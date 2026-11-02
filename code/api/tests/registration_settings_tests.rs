@@ -289,7 +289,14 @@ async fn registration_approval_invitation_and_permissions() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(audit["logs"].as_array().unwrap().iter().any(|log| {
-        log["username"] == "invited_user" && log["resource_id"] == invite["id"]
+        // resource_id is stored as a string, invite["id"] is a JSON number, so
+        // the comparison has to convert. Clippy's cmp_owned suggestion here
+        // removes the conversion and makes the condition always false.
+        #[allow(clippy::cmp_owned)]
+        {
+            log["username"] == "invited_user"
+                && log["resource_id"] == invite["id"].to_string()
+        }
     }));
 
     let (status, response, _) = send(

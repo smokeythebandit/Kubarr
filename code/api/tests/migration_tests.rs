@@ -344,6 +344,9 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
         "users",
         "vpn_providers",
         "two_factor_recovery_codes",
+        // The pod watch caches status and its own liveness.
+        "pod_status_cache",
+        "pod_watch_heartbeat",
     ];
 
     for table in expected_tables {

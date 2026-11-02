@@ -933,12 +933,16 @@ async fn test_get_vpn_deployment_config_disabled_provider() {
     };
     config.insert(&db).await.unwrap();
 
-    // Get deployment config - should be None because provider is disabled
-    let deploy_config = kubarr::services::vpn::get_vpn_deployment_config(&db, "testapp2")
+    // A disabled provider is refused, not silently ignored: deploying a
+    // download client with its VPN quietly dropped would leak the traffic the
+    // VPN was assigned to hide.
+    let error = kubarr::services::vpn::get_vpn_deployment_config(&db, "testapp2")
         .await
-        .unwrap();
-
-    assert!(deploy_config.is_none());
+        .expect_err("a disabled provider must not deploy without VPN");
+    assert!(
+        error.to_string().contains("disabled"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]
