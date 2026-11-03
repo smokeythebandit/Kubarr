@@ -128,6 +128,11 @@ async fn run_as_leader(
             }
         }
     });
+    scheduler::start_scheduler(
+        Arc::new(conn.clone()),
+        chart_sync.clone(),
+        cancellation.clone(),
+    );
     let domain_reconciler = Arc::new(DomainReconciler::new(conn.clone(), k8s_client.clone()));
 
     // One watch feeds the pod status cache for every dashboard viewer, so the
@@ -251,8 +256,6 @@ async fn init_services() -> anyhow::Result<AppState> {
     } else {
         tracing::info!("JWT signing keys initialized");
     }
-
-    scheduler::start_scheduler(Arc::new(conn.clone()), chart_sync.clone());
 
     Ok(AppState::new(
         Some(conn),

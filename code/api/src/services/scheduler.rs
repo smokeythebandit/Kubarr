@@ -8,6 +8,7 @@ use sea_orm::{DatabaseConnection, TransactionTrait};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 
 use super::audit::{clear_old_logs_with, log_on_transaction};
 use super::chart_sync::{ChartSyncService, ChartSyncTask};
@@ -84,7 +85,11 @@ pub trait PeriodicTask: Send + Sync {
 }
 
 /// Start all periodic tasks
-pub fn start_scheduler(db: Arc<DatabaseConnection>, chart_sync: Arc<ChartSyncService>) {
+pub fn start_scheduler(
+    db: Arc<DatabaseConnection>,
+    chart_sync: Arc<ChartSyncService>,
+    cancel: CancellationToken,
+) {
     let days = match std::env::var("KUBARR_AUDIT_RETENTION_DAYS") {
         Ok(value) => parse_audit_retention_days(Some(&value)),
         Err(std::env::VarError::NotPresent) => parse_audit_retention_days(None),
@@ -103,8 +108,12 @@ pub fn start_scheduler(db: Arc<DatabaseConnection>, chart_sync: Arc<ChartSyncSer
 
     for task in tasks {
         let db = db.clone();
+        let cancel = cancel.clone();
         tokio::spawn(async move {
-            run_task(task, db).await;
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = run_task(task, db) => {}
+            }
         });
     }
 
@@ -267,7 +276,11 @@ mod tests {
         let chart_sync = Arc::new(crate::services::chart_sync::ChartSyncService::new(catalog));
 
         // Just verify start_scheduler doesn't panic; tasks are spawned in background
-        start_scheduler(db_arc, chart_sync);
+        start_scheduler(
+            db_arc,
+            chart_sync,
+            tokio_util::sync::CancellationToken::new(),
+        );
         // Yield so spawned tasks get a chance to start (but not to tick)
         tokio::task::yield_now().await;
     }
