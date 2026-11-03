@@ -298,3 +298,67 @@ async fn test_get_user_notifications_pagination() {
         "Page 1 and page 2 must not contain overlapping notifications"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Provider freshness across replicas
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn second_instance_sees_channel_change() {
+    use kubarr::migrations::Migrator;
+    use kubarr::models::notification_channel;
+    use sea_orm::{ActiveModelTrait, Database, EntityTrait, IntoActiveModel};
+    use sea_orm_migration::MigratorTrait;
+
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("shared.db").display()
+    );
+    let db_a = Database::connect(&url).await.unwrap();
+    Migrator::up(&db_a, None).await.unwrap();
+    let db_b = Database::connect(&url).await.unwrap();
+
+    let (_svc_a, _) = make_service(db_a.clone()).await;
+    let (svc_b, _) = make_service(db_b).await;
+    svc_b.init_providers().await.unwrap();
+
+    async fn telegram_configured(svc: &NotificationService) -> bool {
+        !svc.test_channel("telegram", "1")
+            .await
+            .error
+            .unwrap_or_default()
+            .contains("not configured")
+    }
+    assert!(!telegram_configured(&svc_b).await);
+
+    // Another replica enables telegram.
+    let now = chrono::Utc::now();
+    let channel = notification_channel::ActiveModel {
+        channel_type: Set("telegram".to_string()),
+        enabled: Set(true),
+        config: Set(r#"{"bot_token":"1:FAKE","chat_id":"1"}"#.to_string()),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&db_a)
+    .await
+    .unwrap();
+
+    svc_b.refresh_if_changed().await.unwrap();
+    assert!(telegram_configured(&svc_b).await);
+
+    // ...and then disables it.
+    let mut active = channel.into_active_model();
+    active.enabled = Set(false);
+    active.updated_at = Set(now + chrono::Duration::seconds(5));
+    active.update(&db_a).await.unwrap();
+    let _ = notification_channel::Entity::find()
+        .all(&db_a)
+        .await
+        .unwrap();
+
+    svc_b.refresh_if_changed().await.unwrap();
+    assert!(!telegram_configured(&svc_b).await);
+}

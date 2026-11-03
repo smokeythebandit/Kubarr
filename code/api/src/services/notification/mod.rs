@@ -134,7 +134,11 @@ pub struct NotificationService {
     email: Arc<RwLock<Option<EmailProvider>>>,
     telegram: Arc<RwLock<Option<TelegramProvider>>>,
     messagebird: Arc<RwLock<Option<MessageBirdProvider>>>,
+    /// `(count, max(updated_at))` of the channel table when providers were last loaded.
+    fingerprint: Arc<RwLock<Option<ChannelFingerprint>>>,
 }
+
+type ChannelFingerprint = (i64, Option<chrono::DateTime<chrono::Utc>>);
 
 impl NotificationService {
     pub fn new() -> Self {
@@ -143,6 +147,7 @@ impl NotificationService {
             email: Arc::new(RwLock::new(None)),
             telegram: Arc::new(RwLock::new(None)),
             messagebird: Arc::new(RwLock::new(None)),
+            fingerprint: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -157,6 +162,14 @@ impl NotificationService {
         let db = db_lock
             .as_ref()
             .ok_or_else(|| AppError::Internal("Database not initialized".to_string()))?;
+
+        // Taken before loading so a concurrent change is picked up by the next refresh.
+        let fingerprint = Self::channel_fingerprint(db).await?;
+
+        // Drop every provider first so channels that were disabled or removed do not linger.
+        *self.email.write().await = None;
+        *self.telegram.write().await = None;
+        *self.messagebird.write().await = None;
 
         // Load channel configurations
         let channels = notification_channel::Entity::find()
@@ -194,7 +207,39 @@ impl NotificationService {
             }
         }
 
+        *self.fingerprint.write().await = Some(fingerprint);
         Ok(())
+    }
+
+    async fn channel_fingerprint(db: &DatabaseConnection) -> Result<ChannelFingerprint> {
+        let count = notification_channel::Entity::find().count(db).await? as i64;
+        let latest = notification_channel::Entity::find()
+            .order_by_desc(notification_channel::Column::UpdatedAt)
+            .one(db)
+            .await?
+            .map(|channel| channel.updated_at);
+        Ok((count, latest))
+    }
+
+    /// Reload providers if another replica changed the channel configuration.
+    pub async fn refresh_if_changed(&self) -> Result<()> {
+        let current = {
+            let db_lock = self.db.read().await;
+            match db_lock.as_ref() {
+                Some(db) => Self::channel_fingerprint(db).await?,
+                None => return Ok(()),
+            }
+        };
+        if self.fingerprint.read().await.as_ref() == Some(&current) {
+            return Ok(());
+        }
+        self.init_providers().await
+    }
+
+    async fn refresh_or_warn(&self) {
+        if let Err(e) = self.refresh_if_changed().await {
+            tracing::warn!("Failed to refresh notification providers: {}", e);
+        }
     }
 
     /// Send a notification for an audit event
@@ -205,6 +250,7 @@ impl NotificationService {
         username: Option<&str>,
         details: Option<&str>,
     ) -> Result<()> {
+        self.refresh_or_warn().await;
         let db_lock = self.db.read().await;
         let db = match db_lock.as_ref() {
             Some(db) => db,
@@ -385,6 +431,7 @@ impl NotificationService {
 
     /// Test a notification channel
     pub async fn test_channel(&self, channel_type: &str, destination: &str) -> SendResult {
+        self.refresh_or_warn().await;
         match channel_type {
             "email" => {
                 let email_lock = self.email.read().await;
@@ -526,6 +573,7 @@ impl Clone for NotificationService {
             email: Arc::clone(&self.email),
             telegram: Arc::clone(&self.telegram),
             messagebird: Arc::clone(&self.messagebird),
+            fingerprint: Arc::clone(&self.fingerprint),
         }
     }
 }
