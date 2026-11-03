@@ -11,16 +11,17 @@ use std::collections::HashMap;
 use crate::config::CONFIG;
 use crate::error::{AppError, Result};
 use crate::middleware::permissions::{
-    AppsDelete, AppsInstall, AppsRestart, AppsView, Authenticated, Authorized,
+    AppsDelete, AppsInstall, AppsRestart, AppsView, Authenticated, Authorized, SettingsManage,
 };
 use crate::models::audit_log::AuditAction;
 use crate::services::app_storage;
+use crate::services::auto_update::{self, AutoUpdateConfig};
 use crate::services::gpu::{self, GpuNode, GpuSelection};
 use crate::services::install_options::{self, InstallStorage};
 use crate::services::vpn::AssignVpnRequest;
 use crate::services::{
-    AppConfig, AppManager, AppOperationResponse, AppStateResponse, DeploymentManager, OP_DELETE,
-    OP_INSTALL, OP_RESTART, OP_UPDATE,
+    AppConfig, AppManager, AppOperationResponse, AppStateResponse, DeploymentManager,
+    UpdateAllResult, OP_DELETE, OP_INSTALL, OP_RESTART, OP_UPDATE,
 };
 use crate::state::AppState;
 use sea_orm::TransactionTrait;
@@ -47,6 +48,8 @@ pub fn apps_routes(state: AppState) -> Router {
         .route("/operations/{operation_id}/cancel", post(cancel_operation))
         .route("/operations/{operation_id}/retry", post(retry_operation))
         .route("/states", get(list_app_states))
+        .route("/update-all", post(update_all_apps))
+        .route("/auto-update", get(get_auto_update).put(put_auto_update))
         .route("/sync", post(sync_charts))
         .route("/sync/status", get(sync_status))
         .route("/categories", get(list_categories))
@@ -516,6 +519,96 @@ async fn update_app(
         .await?;
     state.endpoint_cache.invalidate(&app_name).await;
     Ok(Json(operation))
+}
+
+/// Queue an update for every installed app that has one
+///
+/// Manual, so it ignores the auto-update window and takes major versions too.
+/// The worker runs the queued updates one after another.
+#[utoipa::path(
+    post,
+    path = "/api/apps/update-all",
+    tag = "Apps",
+    responses((status = 200, body = UpdateAllResult))
+)]
+async fn update_all_apps(
+    State(state): State<AppState>,
+    auth: Authorized<AppsInstall>,
+) -> Result<Json<UpdateAllResult>> {
+    let db = state.get_db().await?;
+    let manager = AppManager::new(db, state.k8s_client.clone(), state.catalog.clone());
+    let result = manager.update_all(Some(auth.user_id())).await?;
+    for operation in &result.queued {
+        state.endpoint_cache.invalidate(&operation.app_name).await;
+    }
+    Ok(Json(result))
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct AutoUpdateStatus {
+    pub config: AutoUpdateConfig,
+    /// Whether the clock is inside the window right now.
+    pub in_window: bool,
+    /// When the window next opens, if it ever does.
+    pub next_window_start: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn auto_update_status(config: AutoUpdateConfig) -> AutoUpdateStatus {
+    let now = chrono::Utc::now();
+    AutoUpdateStatus {
+        in_window: config.in_window(now),
+        next_window_start: config.next_window_start(now),
+        config,
+    }
+}
+
+/// Get the automatic update settings
+#[utoipa::path(
+    get,
+    path = "/api/apps/auto-update",
+    tag = "Apps",
+    responses((status = 200, body = AutoUpdateStatus))
+)]
+async fn get_auto_update(
+    State(state): State<AppState>,
+    _auth: Authorized<AppsView>,
+) -> Result<Json<AutoUpdateStatus>> {
+    let db = state.get_db().await?;
+    Ok(Json(auto_update_status(auto_update::load(&db).await?)))
+}
+
+/// Change the automatic update settings
+#[utoipa::path(
+    put,
+    path = "/api/apps/auto-update",
+    tag = "Apps",
+    request_body = AutoUpdateConfig,
+    responses((status = 200, body = AutoUpdateStatus))
+)]
+async fn put_auto_update(
+    State(state): State<AppState>,
+    auth: Authorized<SettingsManage>,
+    Json(config): Json<AutoUpdateConfig>,
+) -> Result<Json<AutoUpdateStatus>> {
+    let db = state.get_db().await?;
+    auto_update::save(&db, &config).await?;
+    if let Err(error) = state
+        .audit
+        .log_success(
+            AuditAction::SystemSettingChanged,
+            crate::models::audit_log::ResourceType::System,
+            Some(auto_update::AUTO_UPDATE_SETTING_KEY.to_string()),
+            Some(auth.user_id()),
+            Some(auth.user().username.clone()),
+            Some(serde_json::to_value(&config)?),
+            None,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(%error, "Failed to audit auto-update settings change");
+    }
+    Ok(Json(auto_update_status(config)))
 }
 
 /// List app operations

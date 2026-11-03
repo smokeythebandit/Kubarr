@@ -151,6 +151,10 @@ async fn run_as_leader(
     // draining predecessor during deployment. Recovery never invokes Helm again.
     manager.recover_stale_operations().await?;
 
+    // Runs only here, in the elected worker, so two workers never queue
+    // competing automatic updates.
+    crate::services::auto_update::start(manager.clone(), cancellation.clone());
+
     let poll_interval = env_duration("KUBARR_WORKER_POLL_INTERVAL_SECONDS", 5);
     let reconcile_interval = env_duration("KUBARR_WORKER_RECONCILE_INTERVAL_SECONDS", 30);
     let domain_reconcile_interval = env_duration("KUBARR_DOMAIN_RECONCILE_INTERVAL_SECONDS", 60);

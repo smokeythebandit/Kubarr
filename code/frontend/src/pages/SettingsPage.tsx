@@ -27,7 +27,7 @@ import {
 } from '../api/roles';
 import { getCatalog, App } from '../api/apps';
 import { getSettings, updateSetting, Setting } from '../api/settings';
-import { Users, Link, UserPlus, Settings, Sliders, Lock, Menu, X, FileText, CheckCircle, XCircle, LayoutDashboard, Shield, Bell, Mail, Send, MessageSquare, Globe, Network } from 'lucide-react';
+import { Users, Link, UserPlus, Settings, Sliders, Lock, Menu, X, FileText, CheckCircle, XCircle, LayoutDashboard, Shield, Bell, Mail, Send, MessageSquare, Globe, Network, RefreshCw } from 'lucide-react';
 import { auditApi, AuditLog, AuditStats, AuditLogQuery } from '../api/audit';
 import { notificationsApi, NotificationChannel, NotificationEvent, NotificationLog } from '../api/notifications';
 import { oauthApi, OAuthProvider } from '../api/oauth';
@@ -44,10 +44,11 @@ import { NotificationsTab } from '../components/settings/tabs/NotificationsTab';
 import { PendingUsersTab } from '../components/settings/tabs/PendingUsersTab';
 import { PermissionsTab } from '../components/settings/tabs/PermissionsTab';
 import { UsersTab } from '../components/settings/tabs/UsersTab';
+import { UpdatesTab } from '../components/settings/tabs/UpdatesTab';
 
 type ViewMode = 'list' | 'create' | 'edit';
 type ApiErr = { response?: { data?: { detail?: string; error?: string } } };
-type SettingsSection = 'dashboard' | 'general' | 'users' | 'pending' | 'invites' | 'permissions' | 'audit' | 'notifications' | 'vpn' | 'domains' | 'ddns' | 'letsencrypt';
+type SettingsSection = 'dashboard' | 'general' | 'users' | 'pending' | 'invites' | 'permissions' | 'audit' | 'notifications' | 'vpn' | 'domains' | 'ddns' | 'letsencrypt' | 'updates';
 
 const SettingsPage: React.FC = () => {
   const { isAdmin, hasPermission } = useAuth();
@@ -670,6 +671,7 @@ const SettingsPage: React.FC = () => {
   const systemItems = isAdmin ? [
     { id: 'dashboard' as SettingsSection, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'notifications' as SettingsSection, label: 'Notifications', icon: Bell },
+    { id: 'updates' as SettingsSection, label: 'Updates', icon: RefreshCw },
     { id: 'audit' as SettingsSection, label: 'Audit Logs', icon: FileText },
   ] : [{ id: 'audit' as SettingsSection, label: 'Audit Logs', icon: FileText }];
 
@@ -866,6 +868,8 @@ const SettingsPage: React.FC = () => {
                 onSelectSection={setActiveSection}
               />
             )}
+
+            {isAdmin && activeSection === 'updates' && <UpdatesTab />}
 
             {isAdmin && activeSection === 'general' && (
               <GeneralTab
