@@ -64,29 +64,45 @@ pub async fn run_worker() -> anyhow::Result<()> {
 
     // Only the Lease holder may run any loop; standbys block here. Without a
     // cluster (local dev) there is nothing to elect against, so run unguarded.
-    let leader_guard = match k8s_client.read().await.as_ref().map(|c| c.client().clone()) {
-        Some(client) => {
-            match LeaderElector::new(client).acquire(&cancellation).await {
-                Ok(guard) => {
-                    let lost = guard.lost.clone();
-                    let cancellation = cancellation.clone();
-                    tokio::spawn(async move {
-                        lost.cancelled().await;
-                        cancellation.cancel();
-                    });
-                    Some(guard)
-                }
-                Err(e) => {
-                    // Cancelled by a shutdown signal while on standby.
-                    tracing::info!("Worker stopped before acquiring leadership: {}", e);
-                    signal_task.await?;
-                    return Ok(());
-                }
+    let client = k8s_client.read().await.as_ref().map(|c| c.client().clone());
+    let leader_guard = match client {
+        Some(client) => match LeaderElector::new(client).acquire(&cancellation).await {
+            Ok(guard) => {
+                let lost = guard.lost.clone();
+                tokio::spawn(async move {
+                    lost.cancelled().await;
+                    // Do not drain: another worker may already be leader. Stale
+                    // operation recovery covers any orphaned in-flight work.
+                    tracing::error!("Worker leadership lost; exiting immediately");
+                    std::process::exit(1);
+                });
+                Some(guard)
             }
-        }
+            Err(e) => {
+                // Cancelled by a shutdown signal while on standby.
+                tracing::info!("Worker stopped before acquiring leadership: {}", e);
+                signal_task.await?;
+                return Ok(());
+            }
+        },
         None => None,
     };
 
+    let result = run_as_leader(k8s_client, &cancellation).await;
+    if let Some(guard) = leader_guard {
+        guard.release().await;
+    }
+    result?;
+    signal_task.await?;
+    tracing::info!("Kubarr worker shutdown complete");
+    Ok(())
+}
+
+/// Everything the worker does once it is the active leader.
+async fn run_as_leader(
+    k8s_client: Arc<RwLock<Option<K8sClient>>>,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<()> {
     let catalog = init_catalog();
     let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
     let conn = init_database(&k8s_client).await?;
@@ -152,18 +168,6 @@ pub async fn run_worker() -> anyhow::Result<()> {
     cancellation.cancelled().await;
     tracing::info!("Kubarr worker draining in-flight work");
     worker_tasks.wait().await;
-    let leadership_lost = leader_guard
-        .as_ref()
-        .is_some_and(|guard| guard.lost.is_cancelled());
-    if let Some(guard) = leader_guard {
-        guard.release().await;
-    }
-    signal_task.abort();
-    if leadership_lost {
-        // Exit non-zero so the pod restarts as a standby.
-        anyhow::bail!("worker leadership lost");
-    }
-    tracing::info!("Kubarr worker shutdown complete");
     Ok(())
 }
 
