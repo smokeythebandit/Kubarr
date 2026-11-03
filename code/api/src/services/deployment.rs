@@ -3,8 +3,8 @@ use std::fs;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
-use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Secret, Service};
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment};
+use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Pod, Secret, Service};
 use kube::api::{Api, DeleteParams, ListParams};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
@@ -757,10 +757,10 @@ impl<'a> DeploymentManager<'a> {
                         None => false,
                     }
                 }
-                crate::services::catalog::SystemComponentWorkloadKind::StatefulSet => {
+                crate::services::catalog::SystemComponentWorkloadKind::CnpgCluster => {
                     match component.workload_name {
                         Some(workload_name) => self
-                            .check_statefulset_ready(component.namespace, workload_name)
+                            .check_cnpg_cluster_ready(component.namespace, workload_name)
                             .await
                             .unwrap_or(false),
                         None => false,
@@ -819,9 +819,9 @@ impl<'a> DeploymentManager<'a> {
                 let healthy = self.check_daemonset_ready(namespace, name).await?;
                 Ok(single_workload_health("DaemonSet", name, healthy))
             }
-            (Some("statefulset"), Some(name)) => {
-                let healthy = self.check_statefulset_ready(namespace, name).await?;
-                Ok(single_workload_health("StatefulSet", name, healthy))
+            (Some("cnpgcluster"), Some(name)) => {
+                let healthy = self.check_cnpg_cluster_ready(namespace, name).await?;
+                Ok(single_workload_health("Cluster", name, healthy))
             }
             (Some("static"), _) => Ok(serde_json::json!({
                 "status": "healthy",
@@ -857,24 +857,14 @@ impl<'a> DeploymentManager<'a> {
         Ok(available >= desired && desired > 0)
     }
 
-    pub async fn check_statefulset_ready(
-        &self,
-        namespace: &str,
-        statefulset_name: &str,
-    ) -> Result<bool> {
-        let statefulsets: Api<StatefulSet> = Api::namespaced(self.k8s.client().clone(), namespace);
-        let statefulset = statefulsets.get(statefulset_name).await?;
-        let desired = statefulset
-            .spec
-            .as_ref()
-            .and_then(|s| s.replicas)
-            .unwrap_or(1);
-        let ready = statefulset
-            .status
-            .as_ref()
-            .and_then(|s| s.ready_replicas)
-            .unwrap_or(0);
-        Ok(ready >= desired && desired > 0)
+    /// A CloudNativePG cluster is ready when it has instance Pods and every
+    /// one of them is Ready. CNPG creates the Pods directly (no StatefulSet),
+    /// and reading Pods needs no RBAC on the `postgresql.cnpg.io` API.
+    pub async fn check_cnpg_cluster_ready(&self, namespace: &str, cluster: &str) -> Result<bool> {
+        let pods: Api<Pod> = Api::namespaced(self.k8s.client().clone(), namespace);
+        let selector = format!("cnpg.io/cluster={cluster},cnpg.io/podRole=instance");
+        let instances = pods.list(&ListParams::default().labels(&selector)).await?;
+        Ok(cnpg_instances_ready(&instances.items))
     }
 
     pub async fn check_daemonset_ready(
@@ -1074,6 +1064,22 @@ pub fn media_storage_helm_values(storage: &PersistedStorageConfig) -> Result<Vec
     Ok(values)
 }
 
+/// At least one instance, and every instance Pod Ready. A Pending instance
+/// (for example one pinned to a lost node's volume) keeps the cluster unready.
+fn cnpg_instances_ready(pods: &[Pod]) -> bool {
+    !pods.is_empty()
+        && pods.iter().all(|pod| {
+            pod.status
+                .as_ref()
+                .and_then(|status| status.conditions.as_ref())
+                .is_some_and(|conditions| {
+                    conditions
+                        .iter()
+                        .any(|condition| condition.type_ == "Ready" && condition.status == "True")
+                })
+        })
+}
+
 fn single_workload_health(kind: &str, name: &str, healthy: bool) -> serde_json::Value {
     serde_json::json!({
         "status": if healthy { "healthy" } else { "unhealthy" },
@@ -1237,6 +1243,35 @@ mod deployment_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn instance(ready: Option<&str>) -> Pod {
+        serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "kubarr-db-1"},
+            "status": {"conditions": ready.map(|status| vec![
+                serde_json::json!({"type": "Ready", "status": status})
+            ])}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn cnpg_cluster_is_ready_only_when_every_instance_is() {
+        assert!(!cnpg_instances_ready(&[]), "no instances is not ready");
+        assert!(cnpg_instances_ready(&[instance(Some("True"))]));
+        assert!(cnpg_instances_ready(&[
+            instance(Some("True")),
+            instance(Some("True"))
+        ]));
+        // A Pending instance has no Ready condition at all.
+        assert!(!cnpg_instances_ready(&[
+            instance(Some("True")),
+            instance(None)
+        ]));
+        assert!(!cnpg_instances_ready(&[
+            instance(Some("True")),
+            instance(Some("False"))
+        ]));
+    }
 
     // -------------------------------------------------------------------------
     // DeploymentRequest deserialization

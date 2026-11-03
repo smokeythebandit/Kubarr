@@ -151,13 +151,24 @@ fn ready_postgresql_client() -> K8sClient {
             "/api/v1/namespaces/kubarr-database" => {
                 json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "kubarr-database"}})
             }
-            "/apis/apps/v1/namespaces/kubarr-database/statefulsets/kubarr-db" => json!({
-                "apiVersion": "apps/v1",
-                "kind": "StatefulSet",
-                "metadata": {"name": "kubarr-db", "namespace": "kubarr-database"},
-                "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "kubarr-db"}}, "serviceName": "kubarr-db"},
-                "status": {"readyReplicas": 1}
-            }),
+            // CloudNativePG runs the database as bare instance Pods.
+            "/api/v1/namespaces/kubarr-database/pods" => {
+                assert_eq!(
+                    request.uri().query(),
+                    Some("&labelSelector=cnpg.io%2Fcluster%3Dkubarr-db%2Ccnpg.io%2FpodRole%3Dinstance")
+                );
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "PodList",
+                    "metadata": {},
+                    "items": [{
+                        "apiVersion": "v1",
+                        "kind": "Pod",
+                        "metadata": {"name": "kubarr-db-1", "namespace": "kubarr-database"},
+                        "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}
+                    }]
+                })
+            }
             path => panic!("unexpected kube request: {path}"),
         };
         Ok::<_, std::convert::Infallible>(

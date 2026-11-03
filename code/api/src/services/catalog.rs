@@ -11,7 +11,8 @@ pub enum SystemComponentWorkloadKind {
     Static,
     Deployment,
     DaemonSet,
-    StatefulSet,
+    /// A CloudNativePG `Cluster`, read through its instance Pods.
+    CnpgCluster,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -190,13 +191,39 @@ const KUBARR_SYSTEM_COMPONENTS: &[SystemComponent] = &[
         display_name: "PostgreSQL",
         description: "Internal PostgreSQL database used by Kubarr.",
         icon: "🐘",
-        image: "postgres:16",
+        image: "ghcr.io/cloudnative-pg/postgresql:16.15-standard-trixie",
         port: 5432,
         category: "system",
         namespace: "kubarr-database",
-        workload_kind: SystemComponentWorkloadKind::StatefulSet,
+        workload_kind: SystemComponentWorkloadKind::CnpgCluster,
         workload_name: Some("kubarr-db"),
         service_name: Some("kubarr-db-rw"),
+    },
+    SystemComponent {
+        name: "cloudnative-pg",
+        display_name: "CloudNativePG",
+        description: "Operator that runs and fails over the Kubarr PostgreSQL cluster.",
+        icon: "🐘",
+        image: "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1",
+        port: 9443,
+        category: "system",
+        namespace: "cnpg-system",
+        workload_kind: SystemComponentWorkloadKind::Deployment,
+        workload_name: Some("cloudnative-pg"),
+        service_name: None,
+    },
+    SystemComponent {
+        name: "local-path-provisioner",
+        display_name: "Local Path Provisioner",
+        description: "Node-local volumes for the database when the cluster has no local default StorageClass.",
+        icon: "💾",
+        image: "docker.io/rancher/local-path-provisioner:v0.0.37",
+        port: 0,
+        category: "system",
+        namespace: "local-path-storage",
+        workload_kind: SystemComponentWorkloadKind::Deployment,
+        workload_name: Some("local-path-provisioner"),
+        service_name: None,
     },
 ];
 
@@ -239,7 +266,7 @@ fn lifecycle_for_component(component: &SystemComponent) -> AppLifecycleConfig {
                 SystemComponentWorkloadKind::Static => "static",
                 SystemComponentWorkloadKind::Deployment => "deployment",
                 SystemComponentWorkloadKind::DaemonSet => "daemonset",
-                SystemComponentWorkloadKind::StatefulSet => "statefulset",
+                SystemComponentWorkloadKind::CnpgCluster => "cnpgcluster",
             }
             .to_string(),
         ),
@@ -922,6 +949,47 @@ mod tests {
             assert_eq!(lifecycle.release_namespace, "default", "{name}");
             // Neither chart renders a Service; they are scraped per Pod.
             assert_eq!(lifecycle.service_name, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn postgresql_health_reads_cloudnative_pg_instances() {
+        // CloudNativePG creates instance Pods directly; there is no
+        // StatefulSet to read, so health comes from the Cluster's Pods.
+        let lifecycle = lifecycle_for_app_name("postgresql");
+        assert_eq!(lifecycle.workload_kind.as_deref(), Some("cnpgcluster"));
+        assert_eq!(lifecycle.workload_name.as_deref(), Some("kubarr-db"));
+        assert_eq!(lifecycle.namespace, "kubarr-database");
+        assert_eq!(lifecycle.release_namespace, "default");
+        assert_eq!(lifecycle.service_name.as_deref(), Some("kubarr-db-rw"));
+    }
+
+    #[test]
+    fn the_database_prerequisites_are_system_components() {
+        // The installer runs both charts out of `default`; without an entry
+        // lifecycle_for_app_name guesses release namespace = name and the
+        // dashboard shows them as never installed.
+        for (name, namespace, deployment) in [
+            ("cloudnative-pg", "cnpg-system", "cloudnative-pg"),
+            (
+                "local-path-provisioner",
+                "local-path-storage",
+                "local-path-provisioner",
+            ),
+        ] {
+            let lifecycle = lifecycle_for_app_name(name);
+            assert_eq!(lifecycle.release_namespace, "default", "{name}");
+            assert_eq!(lifecycle.namespace, namespace, "{name}");
+            assert_eq!(
+                lifecycle.workload_kind.as_deref(),
+                Some("deployment"),
+                "{name}"
+            );
+            assert_eq!(
+                lifecycle.workload_name.as_deref(),
+                Some(deployment),
+                "{name}"
+            );
         }
     }
 
