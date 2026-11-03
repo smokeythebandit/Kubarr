@@ -19,6 +19,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::config::CONFIG;
 use crate::db;
 use crate::endpoints;
+use crate::services::leader::LeaderElector;
 use crate::services::{
     init_jwt_keys, scheduler, start_network_broadcaster, AppCatalog, AppManager, AuditService,
     ChartSyncService, DomainReconciler, K8sClient, NotificationService,
@@ -60,6 +61,32 @@ pub async fn run_worker() -> anyhow::Result<()> {
     tracing::info!("Starting Kubarr worker v{}", env!("CARGO_PKG_VERSION"));
 
     let k8s_client = init_kubernetes().await;
+
+    // Only the Lease holder may run any loop; standbys block here. Without a
+    // cluster (local dev) there is nothing to elect against, so run unguarded.
+    let leader_guard = match k8s_client.read().await.as_ref().map(|c| c.client().clone()) {
+        Some(client) => {
+            match LeaderElector::new(client).acquire(&cancellation).await {
+                Ok(guard) => {
+                    let lost = guard.lost.clone();
+                    let cancellation = cancellation.clone();
+                    tokio::spawn(async move {
+                        lost.cancelled().await;
+                        cancellation.cancel();
+                    });
+                    Some(guard)
+                }
+                Err(e) => {
+                    // Cancelled by a shutdown signal while on standby.
+                    tracing::info!("Worker stopped before acquiring leadership: {}", e);
+                    signal_task.await?;
+                    return Ok(());
+                }
+            }
+        }
+        None => None,
+    };
+
     let catalog = init_catalog();
     let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
     let conn = init_database(&k8s_client).await?;
@@ -125,7 +152,17 @@ pub async fn run_worker() -> anyhow::Result<()> {
     cancellation.cancelled().await;
     tracing::info!("Kubarr worker draining in-flight work");
     worker_tasks.wait().await;
-    signal_task.await?;
+    let leadership_lost = leader_guard
+        .as_ref()
+        .is_some_and(|guard| guard.lost.is_cancelled());
+    if let Some(guard) = leader_guard {
+        guard.release().await;
+    }
+    signal_task.abort();
+    if leadership_lost {
+        // Exit non-zero so the pod restarts as a standby.
+        anyhow::bail!("worker leadership lost");
+    }
     tracing::info!("Kubarr worker shutdown complete");
     Ok(())
 }
