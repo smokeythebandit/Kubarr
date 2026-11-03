@@ -128,9 +128,9 @@
 **Interfaces (templates):**
 - `kubarr-common.ha.nodeCount` (root) → int from `.Values.kubarr.ha.nodeCount`, default 1.
 - `kubarr-common.ha.replicas` (dict "root" . "max" N) → int per Global Constraints.
-- `kubarr-common.ha.spread` (dict "root" . "replicas" R "selector" <labels dict>) → `topologySpreadConstraints:` block or empty.
+- `kubarr-common.ha.spread` `(dict "root" . "replicas" R "selector" <labels dict>)` → `topologySpreadConstraints:` block or empty.
 - `kubarr-common.ha.pdb` (dict "root" . "replicas" R "name" … "namespace" … "selector" …) → PDB or empty.
-- Charts replace `replicas: {{ .Values.replicaCount }}` with the helper; keep `replicaCount` as an explicit override only if a chart already documents it (openresty/backend/frontend: helper wins unless `replicaCount` explicitly > 1 — builder may simply drop `replicaCount`).
+- Charts replace <code v-pre>replicas: {{ .Values.replicaCount }}</code> with the helper; keep `replicaCount` as an explicit override only if a chart already documents it (openresty/backend/frontend: helper wins unless `replicaCount` explicitly > 1 — builder may simply drop `replicaCount`).
 - kubarr-worker: `strategy: RollingUpdate` (maxSurge 1, maxUnavailable 0), env `POD_NAME`/`POD_NAMESPACE` from downward API, Role for `leases` (get, create, update) in its namespace, ClusterRole add `nodes` (list, watch, get). Update the `app_manager.rs:964-965` comment in Task 5's PR, not here.
 - cert-manager: upstream subchart values cannot call helpers; set `replicaCount`/`webhook.replicaCount`/`cainjector.replicaCount` via the reconciler instead: Task 5's `reconcile_ha` additionally passes `--set cert-manager.replicaCount=R,cert-manager.webhook.replicaCount=R,cert-manager.cainjector.replicaCount=R` and `podDisruptionBudget.enabled=true` when R>1 for release `cert-manager` (record this in Task 5 when implementing — the helper call there is `fn extra_ha_values(release, n) -> Vec<String>`). Add topology spread via upstream `topologySpreadConstraints` values in the same way.
 - Check `kubarr-common.storage.validateConfig` replicas guard: none of the HA charts may pass `replicas` > 1 into it; if any does, fail the chart test rather than loosen the guard.
