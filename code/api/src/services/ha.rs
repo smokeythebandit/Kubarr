@@ -5,9 +5,11 @@
 //! any installed HA release whose applied value differs from the desired one.
 //!
 //! Scale-up waits until a node has been Ready for [`READY_DEBOUNCE`]; scale-down
-//! only happens once a node is deleted, cordoned or tainted away — never
-//! merely because it went NotReady.
+//! only happens once a node is deleted, or has stayed cordoned or tainted away
+//! for [`WITHHELD_GRACE`] — never merely because it went NotReady or is being
+//! drained for maintenance.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -15,6 +17,7 @@ use k8s_openapi::api::core::v1::Node;
 use kube::api::{Api, ListParams};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::CONFIG;
 use crate::error::{AppError, Result};
@@ -40,6 +43,10 @@ pub const HA_RELEASES: &[&str] = &[
 /// A node counts toward scale-up only after being Ready this long.
 pub const READY_DEBOUNCE: chrono::Duration = chrono::Duration::seconds(120);
 
+/// A cordoned or tainted node leaves the pool only after staying so this long;
+/// a drain for maintenance is shorter and must not resize anything.
+pub const WITHHELD_GRACE: chrono::Duration = chrono::Duration::minutes(30);
+
 const HA_VALUE: &str = "kubarr.ha.nodeCount";
 const CERT_MANAGER_MAX_REPLICAS: u32 = 2;
 
@@ -59,7 +66,8 @@ const CONDITION_TAINTS: &[&str] = &[
 pub fn schedulable_node_count(nodes: &[Node], now: DateTime<Utc>) -> u32 {
     let ready_before = (now - READY_DEBOUNCE).timestamp();
     count(nodes, |node| {
-        accepts_kubarr_pods(node, false)
+        !deleting(node)
+            && !withheld(node, false)
             && ready_condition(node).is_some_and(|condition| {
                 condition.status == "True"
                     && condition
@@ -70,10 +78,43 @@ pub fn schedulable_node_count(nodes: &[Node], now: DateTime<Utc>) -> u32 {
     })
 }
 
-/// Nodes that still belong to the pool whatever their health: a NotReady node
-/// is retained, a deleted, cordoned or permanently tainted one is not.
-pub fn retained_node_count(nodes: &[Node]) -> u32 {
-    count(nodes, |node| accepts_kubarr_pods(node, true))
+/// Nodes that still belong to the pool whatever their health. A NotReady node
+/// is retained; a deleted node is not, nor is one in `removed` (cordoned or
+/// tainted for at least [`WITHHELD_GRACE`], see [`WithheldTracker`]).
+pub fn retained_node_count(nodes: &[Node], removed: &HashSet<String>) -> u32 {
+    count(nodes, |node| {
+        !deleting(node) && !(withheld(node, true) && removed.contains(node_name(node)))
+    })
+}
+
+/// Remembers since when each node has been cordoned or carried a repelling
+/// taint. Kept in the leader's memory only: a new leader starts over, which
+/// delays a scale-down rather than causing one.
+#[derive(Debug, Default)]
+pub struct WithheldTracker {
+    since: HashMap<String, DateTime<Utc>>,
+}
+
+impl WithheldTracker {
+    /// Record the current node list and return the nodes withheld for at
+    /// least [`WITHHELD_GRACE`] without interruption.
+    pub fn observe(&mut self, nodes: &[Node], now: DateTime<Utc>) -> HashSet<String> {
+        let withheld: HashSet<&str> = nodes
+            .iter()
+            .filter(|node| withheld(node, true))
+            .map(node_name)
+            .collect();
+        self.since
+            .retain(|name, _| withheld.contains(name.as_str()));
+        for name in withheld {
+            self.since.entry(name.to_string()).or_insert(now);
+        }
+        self.since
+            .iter()
+            .filter(|(_, since)| now - **since >= WITHHELD_GRACE)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }
 
 /// The node count HA releases should be sized for, given the last applied one.
@@ -199,23 +240,29 @@ fn applied_node_count_from_values(json: &[u8]) -> Result<u32> {
 /// converges. The setting is the memory of the last fully applied count and
 /// is only advanced once every release matches. Returns the desired count
 /// when anything was changed.
-pub async fn reconcile_ha(manager: &AppManager) -> Result<Option<u32>> {
-    let k8s_guard = manager.k8s_client.read().await;
-    let Some(client) = k8s_guard.as_ref() else {
-        return Ok(None);
+pub async fn reconcile_ha(
+    manager: &AppManager,
+    tracker: &mut WithheldTracker,
+    cancellation: &CancellationToken,
+) -> Result<Option<u32>> {
+    let client = match manager.k8s_client.read().await.as_ref() {
+        Some(client) => client.client().clone(),
+        None => return Ok(None),
     };
-    let nodes: Api<Node> = Api::all(client.client().clone());
-    let nodes = nodes.list(&ListParams::default()).await?.items;
+    let nodes = Api::<Node>::all(client)
+        .list(&ListParams::default())
+        .await?
+        .items;
 
+    let now = Utc::now();
+    let removed = tracker.observe(&nodes, now);
     let applied = read_applied_count(&manager.db).await?;
     let desired = desired_node_count(
         applied,
-        schedulable_node_count(&nodes, Utc::now()),
-        retained_node_count(&nodes),
+        schedulable_node_count(&nodes, now),
+        retained_node_count(&nodes, &removed),
     );
 
-    let catalog = manager.catalog.read().await;
-    let deployment = DeploymentManager::new(client, &catalog);
     // The worker upgrading its own release goes last so a restart cannot cut
     // the others short.
     let ordered = HA_RELEASES
@@ -226,31 +273,10 @@ pub async fn reconcile_ha(manager: &AppManager) -> Result<Option<u32>> {
     let mut changed = false;
     let mut failures = Vec::new();
     for &release in ordered {
-        let Some(version) = deployment.installed_chart_version(release) else {
-            continue;
-        };
-        let lifecycle = lifecycle_for_app_name(release);
-        let outcome = async {
-            let current =
-                release_node_count(&lifecycle.release_name, &lifecycle.release_namespace)?;
-            if current == desired {
-                return Ok(false);
-            }
-            let args = ha_upgrade_args(
-                &lifecycle.release_name,
-                &lifecycle.release_namespace,
-                &deployment.chart_ref(release),
-                &version,
-                desired,
-                CONFIG.charts.plain_http,
-            );
-            let _helm = manager.helm_lock.lock().await;
-            run_helm(&args, Duration::from_secs(5 * 60))?;
-            tracing::info!(release, from = current, to = desired, "Rescaled HA release");
-            Ok::<_, AppError>(true)
+        if cancellation.is_cancelled() {
+            return Ok(changed.then_some(desired));
         }
-        .await;
-        match outcome {
+        match rescale_release(manager, release, desired).await {
             Ok(upgraded) => changed |= upgraded,
             Err(error) => {
                 tracing::warn!(release, %error, "Failed to rescale HA release");
@@ -273,27 +299,67 @@ pub async fn reconcile_ha(manager: &AppManager) -> Result<Option<u32>> {
     Ok(changed.then_some(desired))
 }
 
+/// Bring one release to `desired`; true when it was upgraded.
+///
+/// The Helm lock covers reading the installed revision and values as well as
+/// the upgrade, so a queued update cannot change the release in between (an
+/// upgrade pinned to a stale revision would silently downgrade it). The read
+/// guards are taken before the lock, matching `execute_operation`, and all of
+/// it is released before the next release so queued operations interleave.
+async fn rescale_release(manager: &AppManager, release: &str, desired: u32) -> Result<bool> {
+    let k8s_guard = manager.k8s_client.read().await;
+    let client = k8s_guard
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Kubernetes client not available".into()))?;
+    let catalog = manager.catalog.read().await;
+    let _helm = manager.helm_lock.lock().await;
+
+    let deployment = DeploymentManager::new(client, &catalog);
+    let Some(version) = deployment.installed_chart_version(release) else {
+        return Ok(false);
+    };
+    let lifecycle = lifecycle_for_app_name(release);
+    let current = release_node_count(&lifecycle.release_name, &lifecycle.release_namespace)?;
+    if current == desired {
+        return Ok(false);
+    }
+    let args = ha_upgrade_args(
+        &lifecycle.release_name,
+        &lifecycle.release_namespace,
+        &deployment.chart_ref(release),
+        &version,
+        desired,
+        CONFIG.charts.plain_http,
+    );
+    run_helm(&args, Duration::from_secs(5 * 60))?;
+    tracing::info!(release, from = current, to = desired, "Rescaled HA release");
+    Ok(true)
+}
+
 fn count(nodes: &[Node], keep: impl Fn(&Node) -> bool) -> u32 {
     u32::try_from(nodes.iter().filter(|node| keep(node)).count()).unwrap_or(u32::MAX)
 }
 
-/// Not being deleted, not cordoned, and no NoSchedule/NoExecute taint (Kubarr
-/// pods tolerate none). `allow_condition_taints` ignores the taints Kubernetes
-/// adds to an unhealthy node, which would otherwise turn NotReady into removal.
-fn accepts_kubarr_pods(node: &Node, allow_condition_taints: bool) -> bool {
-    if node.metadata.deletion_timestamp.is_some() {
-        return false;
-    }
+fn deleting(node: &Node) -> bool {
+    node.metadata.deletion_timestamp.is_some()
+}
+
+fn node_name(node: &Node) -> &str {
+    node.metadata.name.as_deref().unwrap_or_default()
+}
+
+/// Cordoned, or carrying a NoSchedule/NoExecute taint (Kubarr pods tolerate
+/// none). `ignore_condition_taints` skips the taints Kubernetes adds to an
+/// unhealthy node, which would otherwise turn NotReady into removal.
+fn withheld(node: &Node, ignore_condition_taints: bool) -> bool {
     let Some(spec) = node.spec.as_ref() else {
-        return true;
-    };
-    if spec.unschedulable == Some(true) {
         return false;
-    }
-    !spec.taints.iter().flatten().any(|taint| {
-        matches!(taint.effect.as_str(), "NoSchedule" | "NoExecute")
-            && !(allow_condition_taints && CONDITION_TAINTS.contains(&taint.key.as_str()))
-    })
+    };
+    spec.unschedulable == Some(true)
+        || spec.taints.iter().flatten().any(|taint| {
+            matches!(taint.effect.as_str(), "NoSchedule" | "NoExecute")
+                && !(ignore_condition_taints && CONDITION_TAINTS.contains(&taint.key.as_str()))
+        })
 }
 
 fn ready_condition(node: &Node) -> Option<&k8s_openapi::api::core::v1::NodeCondition> {
@@ -391,6 +457,15 @@ mod tests {
         }
     }
 
+    fn named(mut node: Node, name: &str) -> Node {
+        node.metadata.name = Some(name.to_string());
+        node
+    }
+
+    fn none() -> HashSet<String> {
+        HashSet::new()
+    }
+
     fn ready() -> Node {
         node("True", 600)
     }
@@ -408,7 +483,7 @@ mod tests {
     fn counts_ready_untainted_nodes() {
         let nodes = [ready(), ready(), ready()];
         assert_eq!(schedulable_node_count(&nodes, now()), 3);
-        assert_eq!(retained_node_count(&nodes), 3);
+        assert_eq!(retained_node_count(&nodes, &none()), 3);
     }
 
     #[test]
@@ -417,13 +492,18 @@ mod tests {
         cordoned.spec.as_mut().unwrap().unschedulable = Some(true);
         let nodes = [
             ready(),
-            cordoned,
-            tainted(ready(), "dedicated", "NoSchedule"),
-            tainted(ready(), "dedicated", "NoExecute"),
-            tainted(ready(), "soft", "PreferNoSchedule"),
+            named(cordoned, "cordoned"),
+            named(tainted(ready(), "dedicated", "NoSchedule"), "no-schedule"),
+            named(tainted(ready(), "dedicated", "NoExecute"), "no-execute"),
+            named(tainted(ready(), "soft", "PreferNoSchedule"), "soft"),
         ];
         assert_eq!(schedulable_node_count(&nodes, now()), 2);
-        assert_eq!(retained_node_count(&nodes), 2);
+        // Withheld nodes stay in the pool until the tracker reports them.
+        assert_eq!(retained_node_count(&nodes, &none()), 5);
+        let all: HashSet<String> = ["cordoned", "no-schedule", "no-execute", "soft"]
+            .map(str::to_string)
+            .into();
+        assert_eq!(retained_node_count(&nodes, &all), 2);
     }
 
     #[test]
@@ -437,7 +517,7 @@ mod tests {
     fn notready_node_is_retained() {
         let nodes = [ready(), node("False", 600), node("Unknown", 600)];
         assert_eq!(schedulable_node_count(&nodes, now()), 1);
-        assert_eq!(retained_node_count(&nodes), 3);
+        assert_eq!(retained_node_count(&nodes, &none()), 3);
     }
 
     #[test]
@@ -452,16 +532,91 @@ mod tests {
             "node.kubernetes.io/not-ready",
             "NoSchedule",
         );
-        let nodes = [ready(), unreachable, not_ready];
+        let nodes = [
+            ready(),
+            named(unreachable, "unreachable"),
+            named(not_ready, "not-ready"),
+        ];
         assert_eq!(schedulable_node_count(&nodes, now()), 1);
-        assert_eq!(retained_node_count(&nodes), 3);
+        assert_eq!(retained_node_count(&nodes, &none()), 3);
+        // Lifecycle taints are not tracked, however long they last.
+        let mut tracker = WithheldTracker::default();
+        tracker.observe(&nodes, now());
+        let removed = tracker.observe(&nodes, now() + chrono::Duration::hours(5));
+        assert!(removed.is_empty());
+        assert_eq!(retained_node_count(&nodes, &removed), 3);
     }
 
     #[test]
     fn deleting_node_is_not_retained() {
         let mut leaving = ready();
         leaving.metadata.deletion_timestamp = Some(Time(jiff::Timestamp::now()));
-        assert_eq!(retained_node_count(&[ready(), leaving]), 1);
+        assert_eq!(retained_node_count(&[ready(), leaving], &none()), 1);
+    }
+
+    fn cordoned(name: &str) -> Node {
+        let mut node = named(ready(), name);
+        node.spec.as_mut().unwrap().unschedulable = Some(true);
+        node
+    }
+
+    fn minutes(n: i64) -> DateTime<Utc> {
+        now() + chrono::Duration::minutes(n)
+    }
+
+    #[test]
+    fn freshly_cordoned_node_is_retained() {
+        let nodes = [named(ready(), "a"), cordoned("b")];
+        let mut tracker = WithheldTracker::default();
+        let removed = tracker.observe(&nodes, now());
+        assert_eq!(retained_node_count(&nodes, &removed), 2);
+        let removed = tracker.observe(&nodes, minutes(29));
+        assert_eq!(retained_node_count(&nodes, &removed), 2);
+    }
+
+    #[test]
+    fn node_cordoned_past_grace_is_not_retained() {
+        let nodes = [named(ready(), "a"), cordoned("b")];
+        let mut tracker = WithheldTracker::default();
+        tracker.observe(&nodes, now());
+        let removed = tracker.observe(&nodes, minutes(31));
+        assert_eq!(removed, HashSet::from(["b".to_string()]));
+        assert_eq!(retained_node_count(&nodes, &removed), 1);
+    }
+
+    #[test]
+    fn uncordon_resets_the_grace_period() {
+        let mut tracker = WithheldTracker::default();
+        tracker.observe(&[cordoned("b")], now());
+        tracker.observe(&[named(ready(), "b")], minutes(20));
+        let removed = tracker.observe(&[cordoned("b")], minutes(31));
+        assert!(removed.is_empty());
+        let removed = tracker.observe(&[cordoned("b")], minutes(61));
+        assert!(removed.contains("b"));
+    }
+
+    #[test]
+    fn deleted_node_is_forgotten_by_the_tracker() {
+        let mut tracker = WithheldTracker::default();
+        tracker.observe(&[cordoned("b")], now());
+        tracker.observe(&[], minutes(10));
+        assert!(tracker.observe(&[cordoned("b")], minutes(31)).is_empty());
+    }
+
+    #[test]
+    fn draining_one_of_three_nodes_keeps_desired() {
+        let mut tracker = WithheldTracker::default();
+        let mut desired = 3;
+        for minute in 0..=10 {
+            let nodes = [named(ready(), "a"), named(ready(), "b"), cordoned("c")];
+            let removed = tracker.observe(&nodes, minutes(minute));
+            desired = desired_node_count(
+                desired,
+                schedulable_node_count(&nodes, minutes(minute)),
+                retained_node_count(&nodes, &removed),
+            );
+            assert_eq!(desired, 3, "minute {minute}");
+        }
     }
 
     #[test]

@@ -192,13 +192,16 @@ async fn run_ha_loop(
     cancellation: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(interval);
+    // A rescale can wait on a long queued operation; never fire a burst after.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut tracker = ha::WithheldTracker::default();
     loop {
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => break,
             _ = ticker.tick() => {}
         }
-        match ha::reconcile_ha(&manager).await {
+        match ha::reconcile_ha(&manager, &mut tracker, &cancellation).await {
             Ok(Some(nodes)) => tracing::info!(nodes, "HA system releases resized"),
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "HA rescale failed; will retry"),
