@@ -185,7 +185,8 @@ async fn run_as_leader(
     Ok(())
 }
 
-/// Resize the HA system releases whenever the usable node count changes.
+/// Resize the HA system releases whenever the usable node count changes, and
+/// release database instances stranded on deleted nodes.
 async fn run_ha_loop(
     manager: Arc<AppManager>,
     interval: Duration,

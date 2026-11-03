@@ -8,13 +8,16 @@
 //! only happens once a node is deleted, or has stayed cordoned or tainted away
 //! for [`WITHHELD_GRACE`] — never merely because it went NotReady or is being
 //! drained for maintenance.
+//!
+//! The same loop releases a database instance whose node-local volume
+//! belonged to a deleted node, so CloudNativePG re-creates it on a live one.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use k8s_openapi::api::core::v1::Node;
-use kube::api::{Api, ListParams};
+use k8s_openapi::api::core::v1::{Node, PersistentVolume, PersistentVolumeClaim, Pod};
+use kube::api::{Api, DeleteParams, ListParams};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use tokio_util::sync::CancellationToken;
@@ -127,6 +130,177 @@ pub fn desired_node_count(applied: u32, schedulable: u32, retained: u32) -> u32 
         applied
     };
     desired.max(1)
+}
+
+/// Namespace and CloudNativePG cluster of the Kubarr database.
+const DB_NAMESPACE: &str = "kubarr-database";
+const DB_CLUSTER: &str = "kubarr-db";
+const HOSTNAME_LABEL: &str = "kubernetes.io/hostname";
+
+/// Database instance PVCs, and the Pods mounting them, to delete because
+/// their volume is pinned to a node that no longer exists.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LostInstances {
+    pub claims: Vec<String>,
+    pub pods: Vec<String>,
+}
+
+impl LostInstances {
+    pub fn is_empty(&self) -> bool {
+        self.claims.is_empty() && self.pods.is_empty()
+    }
+}
+
+/// Instance PVCs whose bound volume is node-local (required node affinity on
+/// a hostname) and names only nodes absent from `nodes`, plus the Pods that
+/// mount them. CloudNativePG re-creates such an instance on a live node once
+/// both are gone; left alone it stays Pending forever.
+///
+/// Only deletion counts: a node that still exists, however unhealthy, keeps
+/// its volume. Nothing is released when the node list is empty or when no
+/// instance would survive, since then there is no replica to re-clone from
+/// and the claims hold the only copies of the data.
+pub fn lost_database_instances(
+    claims: &[PersistentVolumeClaim],
+    volumes: &[PersistentVolume],
+    pods: &[Pod],
+    nodes: &[Node],
+) -> LostInstances {
+    let live: HashSet<&str> = nodes
+        .iter()
+        .flat_map(|node| {
+            let label = node
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(HOSTNAME_LABEL))
+                .map(String::as_str);
+            std::iter::once(node_name(node)).chain(label)
+        })
+        .filter(|name| !name.is_empty())
+        .collect();
+    if live.is_empty() {
+        return LostInstances::default();
+    }
+    let volumes: HashMap<&str, &PersistentVolume> = volumes
+        .iter()
+        .filter_map(|volume| Some((volume.metadata.name.as_deref()?, volume)))
+        .collect();
+
+    let mut lost = Vec::new();
+    let mut surviving = 0;
+    for claim in claims {
+        let Some(name) = claim.metadata.name.as_deref() else {
+            continue;
+        };
+        // An unbound claim, or one whose volume is gone, holds no data and
+        // proves nothing either way.
+        let Some(volume) = claim
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.volume_name.as_deref())
+            .and_then(|volume| volumes.get(volume))
+        else {
+            continue;
+        };
+        let hosts = pinned_hosts(volume);
+        if !hosts.is_empty() && hosts.iter().all(|host| !live.contains(host)) {
+            lost.push(name.to_string());
+        } else {
+            surviving += 1;
+        }
+    }
+    if surviving == 0 {
+        return LostInstances::default();
+    }
+
+    let pods = pods
+        .iter()
+        .filter(|pod| {
+            pod.spec
+                .iter()
+                .flat_map(|spec| spec.volumes.iter().flatten())
+                .filter_map(|volume| volume.persistent_volume_claim.as_ref())
+                .any(|source| lost.contains(&source.claim_name))
+        })
+        .filter_map(|pod| pod.metadata.name.clone())
+        .collect();
+    LostInstances { claims: lost, pods }
+}
+
+/// Hostnames a volume's required node affinity pins it to; empty when the
+/// volume is not node-local.
+fn pinned_hosts(volume: &PersistentVolume) -> Vec<&str> {
+    let terms = volume
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.node_affinity.as_ref())
+        .and_then(|affinity| affinity.required.as_ref())
+        .map(|required| required.node_selector_terms.as_slice())
+        .unwrap_or_default();
+    terms
+        .iter()
+        .flat_map(|term| {
+            let expressions = term
+                .match_expressions
+                .iter()
+                .flatten()
+                .filter(|req| req.key == HOSTNAME_LABEL);
+            let fields = term
+                .match_fields
+                .iter()
+                .flatten()
+                .filter(|req| req.key == "metadata.name");
+            expressions.chain(fields)
+        })
+        .filter(|req| req.operator == "In")
+        .flat_map(|req| req.values.iter().flatten().map(String::as_str))
+        .collect()
+}
+
+/// Delete the database instances [`lost_database_instances`] finds: Pods
+/// first, so the PVC protection finalizer lets the claims go.
+async fn release_lost_database_instances(client: kube::Client, nodes: &[Node]) -> Result<()> {
+    let selector = ListParams::default().labels(&format!("cnpg.io/cluster={DB_CLUSTER}"));
+    let claims_api = Api::<PersistentVolumeClaim>::namespaced(client.clone(), DB_NAMESPACE);
+    let claims = claims_api.list(&selector).await?.items;
+    if claims.is_empty() {
+        return Ok(());
+    }
+    let volumes_api = Api::<PersistentVolume>::all(client.clone());
+    let mut volumes = Vec::new();
+    for name in claims
+        .iter()
+        .filter_map(|claim| claim.spec.as_ref()?.volume_name.as_deref())
+    {
+        if let Some(volume) = volumes_api.get_opt(name).await? {
+            volumes.push(volume);
+        }
+    }
+    let pods_api = Api::<Pod>::namespaced(client, DB_NAMESPACE);
+    let pods = pods_api.list(&selector).await?.items;
+
+    let lost = lost_database_instances(&claims, &volumes, &pods, nodes);
+    for pod in &lost.pods {
+        tracing::warn!(pod, "Deleting database instance Pod whose node was deleted");
+        delete_ignoring_absent(pods_api.delete(pod, &DeleteParams::default()).await)?;
+    }
+    for claim in &lost.claims {
+        tracing::warn!(
+            claim,
+            "Deleting database PVC pinned to a deleted node; CloudNativePG re-creates the instance"
+        );
+        delete_ignoring_absent(claims_api.delete(claim, &DeleteParams::default()).await)?;
+    }
+    Ok(())
+}
+
+fn delete_ignoring_absent<T>(result: kube::Result<T>) -> Result<()> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Values a release needs beyond `kubarr.ha.nodeCount` because its chart
@@ -252,10 +426,13 @@ pub async fn reconcile_ha(
         Some(client) => client.client().clone(),
         None => return Ok(None),
     };
-    let nodes = Api::<Node>::all(client)
+    let nodes = Api::<Node>::all(client.clone())
         .list(&ListParams::default())
         .await?
         .items;
+    if let Err(error) = release_lost_database_instances(client, &nodes).await {
+        tracing::warn!(%error, "Failed to release database instances of deleted nodes");
+    }
 
     let now = Utc::now();
     let removed = tracker.observe(&nodes, now);
@@ -435,6 +612,7 @@ async fn write_applied_count(db: &DatabaseConnection, n: u32) -> Result<()> {
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::{NodeCondition, NodeSpec, NodeStatus, Taint};
+    use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim, Pod};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 
     fn now() -> DateTime<Utc> {
@@ -732,6 +910,156 @@ mod tests {
         for release in HA_RELEASES.iter().filter(|r| **r != "cert-manager") {
             assert!(extra_ha_values(release, 3).is_empty(), "{release}");
         }
+    }
+
+    fn live(name: &str) -> Node {
+        let mut node = named(ready(), name);
+        node.metadata.labels =
+            Some([("kubernetes.io/hostname".to_string(), name.to_string())].into());
+        node
+    }
+
+    fn claim(name: &str, volume: Option<&str>) -> PersistentVolumeClaim {
+        serde_json::from_value(serde_json::json!({
+            "metadata": {"name": name, "labels": {"cnpg.io/cluster": DB_CLUSTER}},
+            "spec": {"volumeName": volume}
+        }))
+        .unwrap()
+    }
+
+    fn volume_on(name: &str, host: &str) -> PersistentVolume {
+        serde_json::from_value(serde_json::json!({
+            "metadata": {"name": name},
+            "spec": {"nodeAffinity": {"required": {"nodeSelectorTerms": [{
+                "matchExpressions": [{
+                    "key": "kubernetes.io/hostname", "operator": "In", "values": [host]
+                }]
+            }]}}}
+        }))
+        .unwrap()
+    }
+
+    fn instance_pod(name: &str, claim: &str) -> Pod {
+        serde_json::from_value(serde_json::json!({
+            "metadata": {"name": name},
+            "spec": {"containers": [], "volumes": [
+                {"name": "pgdata", "persistentVolumeClaim": {"claimName": claim}},
+                {"name": "scratch", "emptyDir": {}}
+            ]}
+        }))
+        .unwrap()
+    }
+
+    fn three_instances() -> (Vec<PersistentVolumeClaim>, Vec<PersistentVolume>, Vec<Pod>) {
+        (
+            vec![
+                claim("kubarr-db-1", Some("pv-a")),
+                claim("kubarr-db-2", Some("pv-b")),
+                claim("kubarr-db-3", Some("pv-c")),
+            ],
+            vec![
+                volume_on("pv-a", "a"),
+                volume_on("pv-b", "b"),
+                volume_on("pv-c", "c"),
+            ],
+            vec![
+                instance_pod("kubarr-db-1", "kubarr-db-1"),
+                instance_pod("kubarr-db-2", "kubarr-db-2"),
+                instance_pod("kubarr-db-3", "kubarr-db-3"),
+            ],
+        )
+    }
+
+    #[test]
+    fn instance_on_a_deleted_node_is_released() {
+        let (claims, volumes, pods) = three_instances();
+        let lost = lost_database_instances(&claims, &volumes, &pods, &[live("a"), live("b")]);
+        assert_eq!(lost.claims, ["kubarr-db-3"]);
+        assert_eq!(lost.pods, ["kubarr-db-3"]);
+    }
+
+    #[test]
+    fn instance_on_an_existing_node_is_kept_whatever_its_health() {
+        let (claims, volumes, pods) = three_instances();
+        let nodes = [
+            live("a"),
+            live("b"),
+            tainted(
+                named(node("Unknown", 600), "c"),
+                "node.kubernetes.io/unreachable",
+                "NoExecute",
+            ),
+        ];
+        // The tainted node keeps its hostname label in real clusters; drop it
+        // here to prove the node name alone keeps the volume.
+        let lost = lost_database_instances(&claims, &volumes, &pods, &nodes);
+        assert!(lost.is_empty(), "{lost:?}");
+        let mut leaving = live("c");
+        leaving.metadata.deletion_timestamp = Some(Time(jiff::Timestamp::now()));
+        let lost =
+            lost_database_instances(&claims, &volumes, &pods, &[live("a"), live("b"), leaving]);
+        assert!(
+            lost.is_empty(),
+            "a node still being deleted exists: {lost:?}"
+        );
+    }
+
+    #[test]
+    fn hostname_label_also_identifies_a_node() {
+        let (claims, volumes, pods) = three_instances();
+        let mut renamed = named(ready(), "node-c.example");
+        renamed.metadata.labels =
+            Some([("kubernetes.io/hostname".to_string(), "c".to_string())].into());
+        let lost =
+            lost_database_instances(&claims, &volumes, &pods, &[live("a"), live("b"), renamed]);
+        assert!(lost.is_empty(), "{lost:?}");
+    }
+
+    #[test]
+    fn nothing_is_released_without_a_surviving_instance() {
+        let (claims, volumes, pods) = three_instances();
+        // Every instance's node is gone: deleting all PVCs would destroy the
+        // only copies of the data, so wait for a human instead.
+        assert!(lost_database_instances(&claims, &volumes, &pods, &[live("z")]).is_empty());
+        // A fresh, still unbound claim holds no data and is no survivor.
+        let mut with_new = claims.clone();
+        with_new.push(claim("kubarr-db-4", None));
+        assert!(lost_database_instances(&with_new, &volumes, &pods, &[live("z")]).is_empty());
+        // An empty node list is never evidence of deletion.
+        assert!(lost_database_instances(&claims, &volumes, &pods, &[]).is_empty());
+    }
+
+    #[test]
+    fn claims_without_a_node_pinned_volume_are_left_alone() {
+        let claims = vec![
+            claim("kubarr-db-1", Some("pv-a")),
+            claim("kubarr-db-2", None),
+            claim("kubarr-db-3", Some("pv-missing")),
+            claim("kubarr-db-4", Some("pv-nfs")),
+        ];
+        let nfs: PersistentVolume =
+            serde_json::from_value(serde_json::json!({"metadata": {"name": "pv-nfs"}})).unwrap();
+        let volumes = vec![volume_on("pv-a", "a"), nfs];
+        let lost = lost_database_instances(&claims, &volumes, &[], &[live("a")]);
+        assert!(lost.is_empty(), "{lost:?}");
+    }
+
+    #[test]
+    fn wal_claim_and_its_pod_go_together() {
+        let (mut claims, mut volumes, mut pods) = three_instances();
+        claims.push(claim("kubarr-db-3-wal", Some("pv-c-wal")));
+        volumes.push(volume_on("pv-c-wal", "c"));
+        pods[2] = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "kubarr-db-3"},
+            "spec": {"containers": [], "volumes": [
+                {"name": "pgdata", "persistentVolumeClaim": {"claimName": "kubarr-db-3"}},
+                {"name": "pg-wal", "persistentVolumeClaim": {"claimName": "kubarr-db-3-wal"}}
+            ]}
+        }))
+        .unwrap();
+        let lost = lost_database_instances(&claims, &volumes, &pods, &[live("a"), live("b")]);
+        assert_eq!(lost.claims, ["kubarr-db-3", "kubarr-db-3-wal"]);
+        assert_eq!(lost.pods, ["kubarr-db-3"]);
     }
 
     #[test]
