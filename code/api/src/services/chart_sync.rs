@@ -10,7 +10,6 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 
@@ -604,26 +603,6 @@ fn helm_pull_args(
     args
 }
 
-/// Periodic task wrapper that runs chart sync on an interval.
-pub struct ChartSyncTask {
-    pub service: Arc<ChartSyncService>,
-}
-
-#[async_trait]
-impl super::scheduler::PeriodicTask for ChartSyncTask {
-    fn name(&self) -> &'static str {
-        "chart_sync"
-    }
-
-    fn interval(&self) -> Duration {
-        Duration::from_secs(CONFIG.charts.sync_interval)
-    }
-
-    async fn run(&self, _db: &DatabaseConnection) -> anyhow::Result<()> {
-        self.service.sync_and_refresh(_db).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,30 +661,6 @@ mod tests {
         use tokio::sync::RwLock;
         let catalog = Arc::new(RwLock::new(AppCatalog::new()));
         let _svc = ChartSyncService::new(catalog);
-    }
-
-    #[test]
-    fn chart_sync_task_name() {
-        use crate::services::catalog::AppCatalog;
-        use crate::services::scheduler::PeriodicTask;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
-        let catalog = Arc::new(RwLock::new(AppCatalog::new()));
-        let service = Arc::new(ChartSyncService::new(catalog));
-        let task = ChartSyncTask { service };
-        assert_eq!(task.name(), "chart_sync");
-    }
-
-    #[test]
-    fn chart_sync_task_interval_is_positive() {
-        use crate::services::catalog::AppCatalog;
-        use crate::services::scheduler::PeriodicTask;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
-        let catalog = Arc::new(RwLock::new(AppCatalog::new()));
-        let service = Arc::new(ChartSyncService::new(catalog));
-        let task = ChartSyncTask { service };
-        assert!(task.interval().as_secs() > 0);
     }
 
     #[test]

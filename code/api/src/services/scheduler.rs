@@ -11,7 +11,6 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
 use super::audit::{clear_old_logs_with, log_on_transaction};
-use super::chart_sync::{ChartSyncService, ChartSyncTask};
 use crate::models::audit_log::{AuditAction, ResourceType};
 
 const DEFAULT_AUDIT_RETENTION_DAYS: i64 = 90;
@@ -84,12 +83,9 @@ pub trait PeriodicTask: Send + Sync {
     async fn run(&self, db: &DatabaseConnection) -> anyhow::Result<()>;
 }
 
-/// Start all periodic tasks
-pub fn start_scheduler(
-    db: Arc<DatabaseConnection>,
-    chart_sync: Arc<ChartSyncService>,
-    cancel: CancellationToken,
-) {
+/// Start the leader-only periodic tasks (session cleanup, audit retention).
+/// Chart sync is not here: each process refreshes its own catalog.
+pub fn start_scheduler(db: Arc<DatabaseConnection>, cancel: CancellationToken) {
     let days = match std::env::var("KUBARR_AUDIT_RETENTION_DAYS") {
         Ok(value) => parse_audit_retention_days(Some(&value)),
         Err(std::env::VarError::NotPresent) => parse_audit_retention_days(None),
@@ -101,9 +97,6 @@ pub fn start_scheduler(
     let tasks: Vec<Box<dyn PeriodicTask>> = vec![
         Box::new(SessionCleanupTask),
         Box::new(AuditRetentionTask { days }),
-        Box::new(ChartSyncTask {
-            service: chart_sync,
-        }),
     ];
 
     for task in tasks {
@@ -264,23 +257,15 @@ mod tests {
     /// Verify start_scheduler spawns tasks without panicking
     #[tokio::test]
     async fn start_scheduler_spawns_tasks_without_panic() {
-        use crate::services::catalog::AppCatalog;
         use std::sync::Arc;
-        use tokio::sync::RwLock;
 
         let db = crate::application::database::connect_with_url("sqlite::memory:")
             .await
             .expect("in-memory SQLite");
         let db_arc = Arc::new(db);
-        let catalog = Arc::new(RwLock::new(AppCatalog::new()));
-        let chart_sync = Arc::new(crate::services::chart_sync::ChartSyncService::new(catalog));
 
         // Just verify start_scheduler doesn't panic; tasks are spawned in background
-        start_scheduler(
-            db_arc,
-            chart_sync,
-            tokio_util::sync::CancellationToken::new(),
-        );
+        start_scheduler(db_arc, tokio_util::sync::CancellationToken::new());
         // Yield so spawned tasks get a chance to start (but not to tick)
         tokio::task::yield_now().await;
     }

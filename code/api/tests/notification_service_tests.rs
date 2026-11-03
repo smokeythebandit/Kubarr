@@ -307,7 +307,7 @@ async fn test_get_user_notifications_pagination() {
 async fn second_instance_sees_channel_change() {
     use kubarr::migrations::Migrator;
     use kubarr::models::notification_channel;
-    use sea_orm::{ActiveModelTrait, Database, EntityTrait, IntoActiveModel};
+    use sea_orm::{ActiveModelTrait, Database, IntoActiveModel};
     use sea_orm_migration::MigratorTrait;
 
     let dir = tempfile::tempdir().unwrap();
@@ -324,11 +324,9 @@ async fn second_instance_sees_channel_change() {
     svc_b.init_providers().await.unwrap();
 
     async fn telegram_configured(svc: &NotificationService) -> bool {
-        !svc.test_channel("telegram", "1")
+        svc.configured_channels()
             .await
-            .error
-            .unwrap_or_default()
-            .contains("not configured")
+            .contains(&kubarr::services::notification::ChannelType::Telegram)
     }
     assert!(!telegram_configured(&svc_b).await);
 
@@ -354,10 +352,6 @@ async fn second_instance_sees_channel_change() {
     active.enabled = Set(false);
     active.updated_at = Set(now + chrono::Duration::seconds(5));
     active.update(&db_a).await.unwrap();
-    let _ = notification_channel::Entity::find()
-        .all(&db_a)
-        .await
-        .unwrap();
 
     svc_b.refresh_if_changed().await.unwrap();
     assert!(!telegram_configured(&svc_b).await);

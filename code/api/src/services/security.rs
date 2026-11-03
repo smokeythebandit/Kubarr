@@ -66,9 +66,8 @@ pub struct SessionClaims {
 /// Initialize JWT keys from database (call once during startup)
 /// Generates new keys if not present and stores them in the database
 pub async fn init_jwt_keys(db: &sea_orm::DatabaseConnection) -> Result<()> {
-    // Generate a candidate pair; it is only used if no other backend stored one first.
-    let generated = generate_jwt_key_pair_for_init()?;
-    let (private_pem, public_pem) = persist_or_load_jwt_keys(db, generated).await?;
+    let (private_pem, public_pem) =
+        persist_or_load_jwt_keys(db, generate_jwt_key_pair_for_init).await?;
 
     // Cache in memory
     {
@@ -83,11 +82,13 @@ pub async fn init_jwt_keys(db: &sea_orm::DatabaseConnection) -> Result<()> {
     Ok(())
 }
 
-/// Store the generated key pair unless a non-empty pair already exists, then
-/// return whatever is stored, so concurrent backends converge on one pair.
+/// Load the stored key pair, generating and storing one only if it is missing,
+/// so concurrent backends converge on one pair. `generate` is called only when
+/// needed. If exactly one of the two rows is non-empty the pair is unusable and
+/// both rows are replaced together.
 async fn persist_or_load_jwt_keys(
     db: &sea_orm::DatabaseConnection,
-    generated: (String, String),
+    generate: impl FnOnce() -> Result<(String, String)>,
 ) -> Result<(String, String)> {
     use crate::models::prelude::*;
     use crate::models::system_setting;
@@ -95,7 +96,32 @@ async fn persist_or_load_jwt_keys(
     use sea_orm::TransactionTrait;
 
     let txn = db.begin().await?;
+
+    let mut existing = Vec::with_capacity(2);
+    for key in [JWT_PRIVATE_KEY_SETTING, JWT_PUBLIC_KEY_SETTING] {
+        let value = SystemSetting::find()
+            .filter(system_setting::Column::Key.eq(key))
+            .one(&txn)
+            .await?
+            .map(|row| row.value)
+            .unwrap_or_default();
+        existing.push(value);
+    }
+    let non_empty = existing.iter().filter(|v| !v.is_empty()).count();
+    if non_empty == 2 {
+        txn.commit().await?;
+        tracing::info!("JWT keys loaded from database");
+        let public = existing.pop().unwrap_or_default();
+        let private = existing.pop().unwrap_or_default();
+        return Ok((private, public));
+    }
+
+    tracing::info!("Generating new JWT key pair");
+    let generated = generate()?;
     let now = chrono::Utc::now();
+    // With neither row set, only empty rows are filled so a concurrent backend's
+    // pair wins. A half-set pair is replaced unconditionally.
+    let replace_both = non_empty == 1;
 
     for (key, value, description) in [
         (
@@ -115,20 +141,18 @@ async fn persist_or_load_jwt_keys(
             description: Set(Some(description.to_string())),
             updated_at: Set(now),
         };
-        // Existing non-empty rows win; only empty rows are filled.
+        let mut conflict = OnConflict::column(system_setting::Column::Key);
+        conflict.update_columns([
+            system_setting::Column::Value,
+            system_setting::Column::Description,
+            system_setting::Column::UpdatedAt,
+        ]);
+        if !replace_both {
+            conflict
+                .action_and_where(Expr::col((SystemSetting, system_setting::Column::Value)).eq(""));
+        }
         SystemSetting::insert(row)
-            .on_conflict(
-                OnConflict::column(system_setting::Column::Key)
-                    .update_columns([
-                        system_setting::Column::Value,
-                        system_setting::Column::Description,
-                        system_setting::Column::UpdatedAt,
-                    ])
-                    .action_and_where(
-                        Expr::col((SystemSetting, system_setting::Column::Value)).eq(""),
-                    )
-                    .to_owned(),
-            )
+            .on_conflict(conflict)
             .exec_without_returning(&txn)
             .await?;
     }
@@ -143,6 +167,7 @@ async fn persist_or_load_jwt_keys(
         stored.push(row.value);
     }
     txn.commit().await?;
+    tracing::info!("JWT keys saved to database");
 
     let public = stored.pop().unwrap_or_default();
     let private = stored.pop().unwrap_or_default();
@@ -780,7 +805,7 @@ mod tests {
             .expect("insert");
         }
 
-        let stored = persist_or_load_jwt_keys(&db, ("P2".to_string(), "Q2".to_string()))
+        let stored = persist_or_load_jwt_keys(&db, || Ok(("P2".to_string(), "Q2".to_string())))
             .await
             .expect("persist");
         assert_eq!(stored, ("P1".to_string(), "Q1".to_string()));
@@ -794,5 +819,43 @@ mod tests {
             };
             assert_eq!(row.value, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn persist_replaces_both_when_only_one_row_is_set() {
+        use crate::models::system_setting;
+        use sea_orm::ActiveModelTrait;
+
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("db");
+        system_setting::ActiveModel {
+            key: sea_orm::Set("jwt_private_key".to_string()),
+            value: sea_orm::Set("P1".to_string()),
+            description: sea_orm::Set(None),
+            updated_at: sea_orm::Set(chrono::Utc::now()),
+        }
+        .insert(&db)
+        .await
+        .expect("insert");
+
+        let stored = persist_or_load_jwt_keys(&db, || Ok(("P2".to_string(), "Q2".to_string())))
+            .await
+            .expect("persist");
+        assert_eq!(stored, ("P2".to_string(), "Q2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn persist_does_not_generate_when_pair_exists() {
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("db");
+        persist_or_load_jwt_keys(&db, || Ok(("P1".to_string(), "Q1".to_string())))
+            .await
+            .expect("first");
+        let stored = persist_or_load_jwt_keys(&db, || panic!("must not generate"))
+            .await
+            .expect("second");
+        assert_eq!(stored, ("P1".to_string(), "Q1".to_string()));
     }
 }

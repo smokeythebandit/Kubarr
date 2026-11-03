@@ -166,12 +166,12 @@ impl NotificationService {
         // Taken before loading so a concurrent change is picked up by the next refresh.
         let fingerprint = Self::channel_fingerprint(db).await?;
 
-        // Drop every provider first so channels that were disabled or removed do not linger.
-        *self.email.write().await = None;
-        *self.telegram.write().await = None;
-        *self.messagebird.write().await = None;
+        // Build into locals and swap afterwards, so concurrent sends never see a
+        // transient all-None state. Channels that are disabled or removed end up None.
+        let mut email = None;
+        let mut telegram = None;
+        let mut messagebird = None;
 
-        // Load channel configurations
         let channels = notification_channel::Entity::find()
             .filter(notification_channel::Column::Enabled.eq(true))
             .all(db)
@@ -184,22 +184,19 @@ impl NotificationService {
             match channel.channel_type.as_str() {
                 "email" => {
                     if let Ok(provider) = EmailProvider::from_config(&config) {
-                        let mut email_lock = self.email.write().await;
-                        *email_lock = Some(provider);
+                        email = Some(provider);
                         tracing::info!("Email notification provider initialized");
                     }
                 }
                 "telegram" => {
                     if let Ok(provider) = TelegramProvider::from_config(&config) {
-                        let mut telegram_lock = self.telegram.write().await;
-                        *telegram_lock = Some(provider);
+                        telegram = Some(provider);
                         tracing::info!("Telegram notification provider initialized");
                     }
                 }
                 "messagebird" => {
                     if let Ok(provider) = MessageBirdProvider::from_config(&config) {
-                        let mut messagebird_lock = self.messagebird.write().await;
-                        *messagebird_lock = Some(provider);
+                        messagebird = Some(provider);
                         tracing::info!("MessageBird notification provider initialized");
                     }
                 }
@@ -207,8 +204,27 @@ impl NotificationService {
             }
         }
 
+        *self.email.write().await = email;
+        *self.telegram.write().await = telegram;
+        *self.messagebird.write().await = messagebird;
         *self.fingerprint.write().await = Some(fingerprint);
         Ok(())
+    }
+
+    /// Channel types that currently have a loaded provider.
+    #[doc(hidden)]
+    pub async fn configured_channels(&self) -> Vec<ChannelType> {
+        let mut channels = Vec::new();
+        if self.email.read().await.is_some() {
+            channels.push(ChannelType::Email);
+        }
+        if self.telegram.read().await.is_some() {
+            channels.push(ChannelType::Telegram);
+        }
+        if self.messagebird.read().await.is_some() {
+            channels.push(ChannelType::MessageBird);
+        }
+        channels
     }
 
     async fn channel_fingerprint(db: &DatabaseConnection) -> Result<ChannelFingerprint> {

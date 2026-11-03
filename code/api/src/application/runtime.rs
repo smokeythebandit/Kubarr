@@ -128,11 +128,7 @@ async fn run_as_leader(
             }
         }
     });
-    scheduler::start_scheduler(
-        Arc::new(conn.clone()),
-        chart_sync.clone(),
-        cancellation.clone(),
-    );
+    scheduler::start_scheduler(Arc::new(conn.clone()), cancellation.clone());
     let domain_reconciler = Arc::new(DomainReconciler::new(conn.clone(), k8s_client.clone()));
 
     // One watch feeds the pod status cache for every dashboard viewer, so the
@@ -230,14 +226,23 @@ async fn init_services() -> anyhow::Result<AppState> {
     let chart_sync = Arc::new(ChartSyncService::new(catalog.clone()));
     let conn = init_database(&k8s_client).await?;
 
-    // Run the initial sync in the background so slow registry/network calls cannot
-    // block startup, but persist a successful result to the shared database.
+    // Every replica keeps its own in-memory catalog and local charts directory,
+    // so each one refreshes them periodically (the database write is idempotent).
+    // The first sync runs in the background so slow registry/network calls cannot
+    // block startup.
     tokio::spawn({
         let chart_sync = chart_sync.clone();
         let conn = conn.clone();
         async move {
             if let Err(e) = chart_sync.sync_and_refresh(&conn).await {
                 tracing::warn!("Initial chart sync failed: {}", e);
+            }
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(CONFIG.charts.sync_interval))
+                    .await;
+                if let Err(e) = chart_sync.sync_and_refresh(&conn).await {
+                    tracing::warn!("Periodic chart sync failed: {}", e);
+                }
             }
         }
     });
