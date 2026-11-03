@@ -157,6 +157,9 @@ pub fn extra_ha_values(release: &str, n: u32) -> Vec<String> {
                 format!("{spread}.maxSkew=1"),
                 format!("{spread}.topologyKey=kubernetes.io/hostname"),
                 format!("{spread}.whenUnsatisfiable=DoNotSchedule"),
+                // Tainted nodes (control planes, unreachable) are not spread
+                // domains; as empty ones they would hold rollouts Pending.
+                format!("{spread}.nodeTaintsPolicy=Honor"),
                 format!(
                     "{spread}.labelSelector.matchLabels.app\\.kubernetes\\.io/instance={release}"
                 ),
@@ -702,6 +705,9 @@ mod tests {
             )));
             assert!(three.contains(&format!(
                 "{prefix}topologySpreadConstraints[0].whenUnsatisfiable=DoNotSchedule"
+            )));
+            assert!(three.contains(&format!(
+                "{prefix}topologySpreadConstraints[0].nodeTaintsPolicy=Honor"
             )));
         }
         assert!(three.contains(
