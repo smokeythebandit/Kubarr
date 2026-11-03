@@ -334,6 +334,9 @@ pub fn extra_ha_values(release: &str, n: u32) -> Vec<String> {
                 // Tainted nodes (control planes, unreachable) are not spread
                 // domains; as empty ones they would hold rollouts Pending.
                 format!("{spread}.nodeTaintsPolicy=Honor"),
+                // Count only the pod's own ReplicaSet, not the old pods a
+                // rolling update is about to delete.
+                format!("{spread}.matchLabelKeys[0]=pod-template-hash"),
                 format!(
                     "{spread}.labelSelector.matchLabels.app\\.kubernetes\\.io/instance={release}"
                 ),
@@ -886,6 +889,9 @@ mod tests {
             )));
             assert!(three.contains(&format!(
                 "{prefix}topologySpreadConstraints[0].nodeTaintsPolicy=Honor"
+            )));
+            assert!(three.contains(&format!(
+                "{prefix}topologySpreadConstraints[0].matchLabelKeys[0]=pod-template-hash"
             )));
         }
         assert!(three.contains(
