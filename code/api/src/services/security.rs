@@ -9,7 +9,7 @@ use rsa::{
     rand_core::OsRng,
     RsaPrivateKey, RsaPublicKey,
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 
 use crate::config::CONFIG;
@@ -66,73 +66,9 @@ pub struct SessionClaims {
 /// Initialize JWT keys from database (call once during startup)
 /// Generates new keys if not present and stores them in the database
 pub async fn init_jwt_keys(db: &sea_orm::DatabaseConnection) -> Result<()> {
-    use crate::models::prelude::*;
-    use crate::models::system_setting;
-
-    // Try to load existing keys from database
-    let private_setting = SystemSetting::find()
-        .filter(system_setting::Column::Key.eq(JWT_PRIVATE_KEY_SETTING))
-        .one(db)
-        .await?;
-
-    let public_setting = SystemSetting::find()
-        .filter(system_setting::Column::Key.eq(JWT_PUBLIC_KEY_SETTING))
-        .one(db)
-        .await?;
-
-    let (private_pem, public_pem) = match (private_setting, public_setting) {
-        (Some(priv_s), Some(pub_s)) if !priv_s.value.is_empty() && !pub_s.value.is_empty() => {
-            tracing::info!("JWT keys loaded from database");
-            (priv_s.value, pub_s.value)
-        }
-        _ => {
-            // Generate new key pair
-            tracing::info!("Generating new JWT key pair");
-            let (private_pem, public_pem) = generate_jwt_key_pair_for_init()?;
-
-            let now = chrono::Utc::now();
-
-            // Save private key
-            let private_model = system_setting::ActiveModel {
-                key: Set(JWT_PRIVATE_KEY_SETTING.to_string()),
-                value: Set(private_pem.clone()),
-                description: Set(Some("JWT signing private key (RSA)".to_string())),
-                updated_at: Set(now),
-            };
-            // Use insert or update based on whether it exists
-            if SystemSetting::find()
-                .filter(system_setting::Column::Key.eq(JWT_PRIVATE_KEY_SETTING))
-                .one(db)
-                .await?
-                .is_some()
-            {
-                private_model.update(db).await?;
-            } else {
-                private_model.insert(db).await?;
-            }
-
-            // Save public key
-            let public_model = system_setting::ActiveModel {
-                key: Set(JWT_PUBLIC_KEY_SETTING.to_string()),
-                value: Set(public_pem.clone()),
-                description: Set(Some("JWT signing public key (RSA)".to_string())),
-                updated_at: Set(now),
-            };
-            if SystemSetting::find()
-                .filter(system_setting::Column::Key.eq(JWT_PUBLIC_KEY_SETTING))
-                .one(db)
-                .await?
-                .is_some()
-            {
-                public_model.update(db).await?;
-            } else {
-                public_model.insert(db).await?;
-            }
-
-            tracing::info!("JWT keys saved to database");
-            (private_pem, public_pem)
-        }
-    };
+    // Generate a candidate pair; it is only used if no other backend stored one first.
+    let generated = generate_jwt_key_pair_for_init()?;
+    let (private_pem, public_pem) = persist_or_load_jwt_keys(db, generated).await?;
 
     // Cache in memory
     {
@@ -145,6 +81,75 @@ pub async fn init_jwt_keys(db: &sea_orm::DatabaseConnection) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Store the generated key pair unless a non-empty pair already exists, then
+/// return whatever is stored, so concurrent backends converge on one pair.
+async fn persist_or_load_jwt_keys(
+    db: &sea_orm::DatabaseConnection,
+    generated: (String, String),
+) -> Result<(String, String)> {
+    use crate::models::prelude::*;
+    use crate::models::system_setting;
+    use sea_orm::sea_query::{Expr, ExprTrait, OnConflict};
+    use sea_orm::TransactionTrait;
+
+    let txn = db.begin().await?;
+    let now = chrono::Utc::now();
+
+    for (key, value, description) in [
+        (
+            JWT_PRIVATE_KEY_SETTING,
+            generated.0,
+            "JWT signing private key (RSA)",
+        ),
+        (
+            JWT_PUBLIC_KEY_SETTING,
+            generated.1,
+            "JWT signing public key (RSA)",
+        ),
+    ] {
+        let row = system_setting::ActiveModel {
+            key: Set(key.to_string()),
+            value: Set(value),
+            description: Set(Some(description.to_string())),
+            updated_at: Set(now),
+        };
+        // Existing non-empty rows win; only empty rows are filled.
+        SystemSetting::insert(row)
+            .on_conflict(
+                OnConflict::column(system_setting::Column::Key)
+                    .update_columns([
+                        system_setting::Column::Value,
+                        system_setting::Column::Description,
+                        system_setting::Column::UpdatedAt,
+                    ])
+                    .action_and_where(
+                        Expr::col((SystemSetting, system_setting::Column::Value)).eq(""),
+                    )
+                    .to_owned(),
+            )
+            .exec_without_returning(&txn)
+            .await?;
+    }
+
+    let mut stored = Vec::with_capacity(2);
+    for key in [JWT_PRIVATE_KEY_SETTING, JWT_PUBLIC_KEY_SETTING] {
+        let row = SystemSetting::find()
+            .filter(system_setting::Column::Key.eq(key))
+            .one(&txn)
+            .await?
+            .ok_or_else(|| AppError::Internal(format!("{key} missing after upsert")))?;
+        stored.push(row.value);
+    }
+    txn.commit().await?;
+
+    let public = stored.pop().unwrap_or_default();
+    let private = stored.pop().unwrap_or_default();
+    if private.is_empty() || public.is_empty() {
+        return Err(AppError::Internal("JWT key rows are empty".to_string()));
+    }
+    Ok((private, public))
 }
 
 /// Get the JWT private key (PEM format)
@@ -752,5 +757,42 @@ mod tests {
         // Keys should now be non-empty in the DB
         let private_key = get_private_key().expect("private key after init");
         assert!(!private_key.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persist_returns_existing_keys_not_generated() {
+        use crate::models::system_setting;
+        use sea_orm::ActiveModelTrait;
+
+        let db = crate::application::database::connect_with_url("sqlite::memory:")
+            .await
+            .expect("db");
+        let now = chrono::Utc::now();
+        for (key, value) in [("jwt_private_key", "P1"), ("jwt_public_key", "Q1")] {
+            system_setting::ActiveModel {
+                key: sea_orm::Set(key.to_string()),
+                value: sea_orm::Set(value.to_string()),
+                description: sea_orm::Set(None),
+                updated_at: sea_orm::Set(now),
+            }
+            .insert(&db)
+            .await
+            .expect("insert");
+        }
+
+        let stored = persist_or_load_jwt_keys(&db, ("P2".to_string(), "Q2".to_string()))
+            .await
+            .expect("persist");
+        assert_eq!(stored, ("P1".to_string(), "Q1".to_string()));
+
+        let rows = system_setting::Entity::find().all(&db).await.expect("rows");
+        for row in rows {
+            let expected = if row.key == "jwt_private_key" {
+                "P1"
+            } else {
+                "Q1"
+            };
+            assert_eq!(row.value, expected);
+        }
     }
 }
