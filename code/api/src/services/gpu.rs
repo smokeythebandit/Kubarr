@@ -298,9 +298,52 @@ pub fn resource_roots(app_name: &str) -> Vec<String> {
 }
 
 fn chart_values(app_name: &str) -> Option<serde_yaml::Value> {
+    #[cfg(test)]
+    if let Some(values) = test_charts::values(app_name) {
+        return values;
+    }
     let path = CONFIG.charts.dir.join(app_name).join("values.yaml");
     let text = std::fs::read_to_string(path).ok()?;
     serde_yaml::from_str(&text).ok()
+}
+
+/// Chart values for unit tests, so a GPU test does not depend on whatever
+/// charts happen to sit in `CONFIG.charts.dir` on the machine running it.
+///
+/// [`chart_values`] would otherwise read `/tmp/charts` (or KUBARR_CHARTS_DIR):
+/// present on a developer host, absent on a CI runner, so the same test
+/// passed in one place and failed in the other. The override is per thread,
+/// which `#[tokio::test]`'s current-thread runtime keeps the whole test on.
+#[cfg(test)]
+pub(crate) mod test_charts {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static VALUES: RefCell<HashMap<String, Option<serde_yaml::Value>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// Serve `yaml` as `app_name`'s chart values on this thread; `None`
+    /// stands for a chart without a values file.
+    pub(crate) fn set(app_name: &str, yaml: Option<&str>) {
+        let values = yaml.map(|yaml| serde_yaml::from_str(yaml).expect("fixture values parse"));
+        VALUES.with(|map| map.borrow_mut().insert(app_name.to_string(), values));
+    }
+
+    /// A chart shaped like Plex's: a `gpu` block and one `plex` workload root.
+    pub(crate) fn set_gpu_chart(app_name: &str) {
+        set(
+            app_name,
+            Some(&format!(
+                "gpu:\n  enabled: false\n  provider: intel\n{app_name}:\n  resources: {{}}\n"
+            )),
+        );
+    }
+
+    pub(super) fn values(app_name: &str) -> Option<Option<serde_yaml::Value>> {
+        VALUES.with(|map| map.borrow().get(app_name).cloned())
+    }
 }
 
 /// None means preserve on upgrade; Some(None) explicitly disables and clears reused values.

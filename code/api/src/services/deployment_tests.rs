@@ -1100,6 +1100,7 @@ async fn deploy_app_without_database_explicitly_disables_reused_vpn_values() {
 
 #[tokio::test]
 async fn gpu_disable_clears_reused_values_and_omission_preserves_them() {
+    crate::services::gpu::test_charts::set_gpu_chart("plex");
     let app_name = "plex";
     let catalog = catalog(app_name, false);
     for (gpu, expected) in [(None, false), (Some(None), true)] {
@@ -1137,6 +1138,7 @@ async fn gpu_disable_clears_reused_values_and_omission_preserves_them() {
 
 #[tokio::test]
 async fn gpu_install_validates_node_then_sets_chart_provider_and_hostname_label() {
+    crate::services::gpu::test_charts::set_gpu_chart("plex");
     let service = service_fn(|request: Request<Body>| async move {
         let body = match request.uri().path() {
             "/api/v1/nodes/gpu-node" => json!({
@@ -1183,6 +1185,7 @@ async fn gpu_install_validates_node_then_sets_chart_provider_and_hostname_label(
 
 #[tokio::test]
 async fn gpu_deploy_rejects_unadvertised_resource_before_helm_or_namespace_changes() {
+    crate::services::gpu::test_charts::set_gpu_chart("plex");
     let service = service_fn(|request: Request<Body>| async move {
         assert_eq!(request.uri().path(), "/api/v1/nodes/gpu-node");
         let node = json!({

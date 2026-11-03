@@ -234,6 +234,7 @@ fn corrupt_queued_configuration_is_rejected_instead_of_resetting_chart_values() 
 
 #[tokio::test]
 async fn retry_is_single_use_and_preserves_gpu_queue_input_and_new_actor() {
+    crate::services::gpu::test_charts::set_gpu_chart("plex");
     let manager = setup().await;
     let mut plex = manager.catalog.read().await.get_app(APP).unwrap().clone();
     plex.name = "plex".into();
@@ -278,6 +279,7 @@ async fn retry_is_single_use_and_preserves_gpu_queue_input_and_new_actor() {
 
 #[tokio::test]
 async fn gpu_disable_survives_queue_and_managed_override_cannot_be_enqueued() {
+    crate::services::gpu::test_charts::set_gpu_chart("plex");
     let manager = setup().await;
     let mut plex = manager.catalog.read().await.get_app(APP).unwrap().clone();
     plex.name = "plex".into();
