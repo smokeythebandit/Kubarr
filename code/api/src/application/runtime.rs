@@ -23,8 +23,8 @@ use crate::endpoints;
 use crate::services::ha;
 use crate::services::leader::LeaderElector;
 use crate::services::{
-    init_jwt_keys, scheduler, start_network_broadcaster, AppCatalog, AppManager, AuditService,
-    ChartSyncService, DomainReconciler, K8sClient, NotificationService,
+    init_jwt_keys, scheduler, AppCatalog, AppManager, AuditService, ChartSyncService,
+    DomainReconciler, K8sClient, NotificationService,
 };
 use crate::state::AppState;
 
@@ -35,10 +35,6 @@ pub async fn run() -> anyhow::Result<()> {
     tracing::info!("Starting Kubarr backend v{}", env!("CARGO_PKG_VERSION"));
 
     let state = init_services().await?;
-
-    // Start background network metrics broadcaster
-    start_network_broadcaster(state.clone());
-    tracing::info!("Network metrics broadcaster started");
 
     let app = create_app(state);
 

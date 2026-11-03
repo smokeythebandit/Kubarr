@@ -1,5 +1,5 @@
-import { Radio, RotateCw, WifiOff } from 'lucide-react'
-import { ConnectionMode } from '../../hooks/useNetworkMetricsWs'
+import { Radio, WifiOff } from 'lucide-react'
+import { ConnectionMode } from '../../hooks/useNetworkMetrics'
 
 interface ConnectionStatusProps {
   mode: ConnectionMode
@@ -7,17 +7,11 @@ interface ConnectionStatusProps {
 
 export function ConnectionStatus({ mode }: ConnectionStatusProps) {
   const config = {
-    websocket: {
+    live: {
       icon: Radio,
       label: 'Live',
       className: 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400',
       iconClassName: 'text-green-500',
-    },
-    polling: {
-      icon: RotateCw,
-      label: 'Polling',
-      className: 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400',
-      iconClassName: 'text-yellow-500',
     },
     disconnected: {
       icon: WifiOff,

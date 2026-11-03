@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import { emptyClassTotals, FlowWindow } from '../api/networking'
 import { appVpnApi } from '../api/vpn'
-import { useNetworkMetricsWs } from '../hooks/useNetworkMetricsWs'
+import { useNetworkMetrics } from '../hooks/useNetworkMetrics'
 import { useFlowClasses } from '../hooks/useFlowClasses'
 import { ConnectionStatus } from '../components/networking/ConnectionStatus'
 import { FlowClassCards } from '../components/networking/FlowClassCards'
@@ -31,13 +31,12 @@ export default function NetworkingPage() {
   const networkFlowRef = useRef<HTMLDivElement>(null)
   const queryClient = useQueryClient()
 
-  // Use WebSocket hook for real-time updates with HTTP polling fallback
   const {
     topology,
     stats,
     connectionMode,
-    error: wsError,
-  } = useNetworkMetricsWs()
+    error,
+  } = useNetworkMetrics()
 
   const {
     data: flowClasses,
@@ -54,8 +53,10 @@ export default function NetworkingPage() {
     refetchInterval: VPN_CONFIG_REFETCH_MS,
   })
 
-  const isLoading = !topology && !stats
-  const hasError = wsError && connectionMode === 'disconnected'
+  const isLoading = !topology && stats.length === 0
+  // Only an error with nothing to show replaces the page; a failed refetch
+  // keeps the last good data on screen and flips the status pill.
+  const hasError = error !== null && isLoading
 
   /**
    * Refresh used to reload the whole document, which threw away the router
@@ -298,13 +299,6 @@ export default function NetworkingPage() {
             <p className="text-sm mt-1">Install some apps to see their network usage</p>
           </div>
         )}
-      </div>
-
-      {/* Connection mode indicator */}
-      <div className="text-center text-sm text-gray-500 dark:text-gray-500">
-        {connectionMode === 'websocket' && 'Real-time updates via WebSocket'}
-        {connectionMode === 'polling' && 'Updating via HTTP polling (reconnecting...)'}
-        {connectionMode === 'disconnected' && 'Disconnected'}
       </div>
     </div>
   )
