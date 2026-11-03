@@ -136,7 +136,7 @@ const topology: NetworkTopology = {
   ],
 }
 
-test.beforeEach(async ({ api, context }) => {
+test.beforeEach(async ({ api }) => {
   api.get('/api/networking/topology', topology)
   api.get('/api/networking/stats', stats)
   api.get('/api/vpn/apps', { configs: [] })
@@ -152,12 +152,6 @@ test.beforeEach(async ({ api, context }) => {
       json: flowClasses,
     }))
   }
-
-  // The page opens a metrics socket and falls back to HTTP polling when it
-  // fails. Closing it here is what puts the page on the polling path, which is
-  // the path these fixtures feed. Registered after the shared fixture's own
-  // handler so this one matches first.
-  await context.routeWebSocket('**/api/networking/ws', socket => socket.close())
 })
 
 test('the page separates internet, LAN, in-cluster and storage traffic', async ({ page }) => {

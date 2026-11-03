@@ -1,20 +1,14 @@
 use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
-    },
+    extract::{Query, State},
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
-use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
-use tracing::debug;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::error::Result;
 use crate::middleware::permissions::{Authorized, NetworkingView};
-use crate::services::cadvisor::{aggregate_by_namespace, fetch_cadvisor_metrics};
 use crate::state::AppState;
 
 /// Create networking routes
@@ -23,7 +17,6 @@ pub fn networking_routes(state: AppState) -> Router {
         .route("/topology", get(get_network_topology))
         .route("/stats", get(get_network_stats))
         .route("/flow-classes", get(get_flow_classes))
-        .route("/ws", get(ws_handler))
         .with_state(state)
 }
 
@@ -117,12 +110,11 @@ fn is_excluded_namespace(namespace: &str) -> bool {
     )
 )]
 /// Get network topology with nodes and edges
-/// Uses direct cAdvisor metrics for real-time network data
+/// Rates come from cAdvisor as scraped into VictoriaMetrics.
 async fn get_network_topology(
     State(state): State<AppState>,
     _auth: Authorized<NetworkingView>,
 ) -> Result<Json<NetworkTopology>> {
-    // Fetch metrics directly from cAdvisor via K8s API
     let k8s_guard = state.k8s_client.read().await;
     let k8s = match k8s_guard.as_ref() {
         Some(k8s) => k8s,
@@ -135,34 +127,13 @@ async fn get_network_topology(
         }
     };
 
-    // Fetch raw metrics from all nodes
-    let raw_metrics = fetch_cadvisor_metrics(k8s.client()).await;
-    let current_metrics = aggregate_by_namespace(&raw_metrics);
-
-    // Calculate rates using cached values, with fallback to last known rates
-    let mut metrics_map: HashMap<String, (f64, f64, i32)> = HashMap::new();
-
-    for (namespace, current) in &current_metrics {
-        if is_excluded_namespace(namespace) {
-            continue;
-        }
-
-        // Read rates from cache (updated by background broadcaster)
-        let (rx_rate, tx_rate) =
-            if let Some(cached) = state.network_metrics_cache.get(namespace).await {
-                (
-                    cached.last_rates.rx_bytes_per_sec,
-                    cached.last_rates.tx_bytes_per_sec,
-                )
-            } else {
-                (0.0, 0.0)
-            };
-
-        metrics_map.insert(
-            namespace.clone(),
-            (rx_rate, tx_rate, current.pod_count as i32),
-        );
-    }
+    // Ordered, so every poll lists the nodes the same way and hands out the
+    // same colors. A HashMap here repainted the graph on every refresh.
+    let metrics_map: BTreeMap<String, (f64, f64, i32)> = namespace_rates()
+        .await
+        .into_iter()
+        .map(|(namespace, rates)| (namespace, (rates.rx_bytes, rates.tx_bytes, rates.pod_count)))
+        .collect();
 
     // Color palette for nodes
     let colors = [
@@ -651,142 +622,136 @@ async fn discover_service_connections(
     )
 )]
 /// Get detailed network statistics per app
-/// Uses direct cAdvisor metrics for real-time network data
-async fn get_network_stats(
-    State(state): State<AppState>,
-    _auth: Authorized<NetworkingView>,
-) -> Result<Json<Vec<NetworkStats>>> {
-    // Fetch metrics directly from cAdvisor via K8s API
-    let k8s_guard = state.k8s_client.read().await;
-    let k8s = match k8s_guard.as_ref() {
-        Some(k8s) => k8s,
-        None => {
-            // No K8s client available, return empty stats
-            return Ok(Json(Vec::new()));
-        }
-    };
-
-    // Fetch raw metrics from all nodes
-    let raw_metrics = fetch_cadvisor_metrics(k8s.client()).await;
-    let current_metrics = aggregate_by_namespace(&raw_metrics);
-
-    // Drop the lock before processing
-    drop(k8s_guard);
-
-    // Calculate rates using cached values, with fallback to last known rates
-    let mut stats: Vec<NetworkStats> = Vec::new();
-
-    for (namespace, current) in &current_metrics {
-        if is_excluded_namespace(namespace) {
-            continue;
-        }
-
-        // Read rates from cache (updated by background broadcaster)
-        let (
-            rx_bytes,
-            tx_bytes,
-            rx_packets,
-            tx_packets,
-            rx_errors,
-            tx_errors,
-            rx_dropped,
-            tx_dropped,
-        ) = if let Some(cached) = state.network_metrics_cache.get(namespace).await {
-            let r = &cached.last_rates;
-            (
-                r.rx_bytes_per_sec,
-                r.tx_bytes_per_sec,
-                r.rx_packets_per_sec,
-                r.tx_packets_per_sec,
-                r.rx_errors_per_sec,
-                r.tx_errors_per_sec,
-                r.rx_dropped_per_sec,
-                r.tx_dropped_per_sec,
-            )
-        } else {
-            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        };
-
-        stats.push(NetworkStats {
-            namespace: namespace.clone(),
-            app_name: capitalize_first(namespace),
-            rx_bytes_per_sec: (rx_bytes * 100.0).round() / 100.0,
-            tx_bytes_per_sec: (tx_bytes * 100.0).round() / 100.0,
-            rx_packets_per_sec: (rx_packets * 100.0).round() / 100.0,
-            tx_packets_per_sec: (tx_packets * 100.0).round() / 100.0,
-            rx_errors_per_sec: (rx_errors * 100.0).round() / 100.0,
-            tx_errors_per_sec: (tx_errors * 100.0).round() / 100.0,
-            rx_dropped_per_sec: (rx_dropped * 100.0).round() / 100.0,
-            tx_dropped_per_sec: (tx_dropped * 100.0).round() / 100.0,
-            pod_count: current.pod_count as i32,
-        });
-        // Note: Cache is updated by get_network_topology, not here
-        // to avoid race conditions when both endpoints are called simultaneously
-    }
+/// Rates come from cAdvisor as scraped into VictoriaMetrics.
+async fn get_network_stats(_auth: Authorized<NetworkingView>) -> Result<Json<Vec<NetworkStats>>> {
+    let round = |value: f64| (value * 100.0).round() / 100.0;
+    let stats = namespace_rates()
+        .await
+        .into_iter()
+        .map(|(namespace, r)| NetworkStats {
+            app_name: capitalize_first(&namespace),
+            namespace,
+            rx_bytes_per_sec: round(r.rx_bytes),
+            tx_bytes_per_sec: round(r.tx_bytes),
+            rx_packets_per_sec: round(r.rx_packets),
+            tx_packets_per_sec: round(r.tx_packets),
+            rx_errors_per_sec: round(r.rx_errors),
+            tx_errors_per_sec: round(r.tx_errors),
+            rx_dropped_per_sec: round(r.rx_dropped),
+            tx_dropped_per_sec: round(r.tx_dropped),
+            pod_count: r.pod_count,
+        })
+        .collect();
 
     Ok(Json(stats))
 }
 
 // ============================================================================
-// WebSocket Handler
+// Per-namespace rates from VictoriaMetrics
 // ============================================================================
 
-/// WebSocket upgrade handler for real-time network metrics
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    tracing::info!("WebSocket upgrade request received");
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+/// Rate window for the cAdvisor counters. VictoriaMetrics scrapes cAdvisor once
+/// a minute, so a shorter window holds too few samples to be steady; five
+/// minutes also matches the header and dashboard, so the numbers agree.
+const NAMESPACE_RATE_WINDOW: &str = "5m";
+
+/// How long the page waits on VictoriaMetrics for its main numbers.
+const NAMESPACE_RATE_TIMEOUT_SECONDS: u64 = 10;
+
+#[derive(Debug, Default, Clone, PartialEq)]
+struct NamespaceRates {
+    rx_bytes: f64,
+    tx_bytes: f64,
+    rx_packets: f64,
+    tx_packets: f64,
+    rx_errors: f64,
+    tx_errors: f64,
+    rx_dropped: f64,
+    tx_dropped: f64,
+    pod_count: i32,
 }
 
-/// Handle WebSocket connection
-async fn handle_socket(socket: WebSocket, state: AppState) {
-    let (mut sender, mut receiver) = socket.split();
+/// The counters behind [`NamespaceRates`], in its field order.
+const NAMESPACE_RATE_METRICS: [&str; 8] = [
+    "container_network_receive_bytes_total",
+    "container_network_transmit_bytes_total",
+    "container_network_receive_packets_total",
+    "container_network_transmit_packets_total",
+    "container_network_receive_errors_total",
+    "container_network_transmit_errors_total",
+    "container_network_receive_packets_dropped_total",
+    "container_network_transmit_packets_dropped_total",
+];
 
-    // Subscribe to the broadcast channel
-    let mut rx = state.network_metrics_tx.subscribe();
+fn namespace_rate_query(metric: &str) -> String {
+    format!("sum by (namespace) (rate({metric}{{interface!=\"lo\"}}[{NAMESPACE_RATE_WINDOW}]))")
+}
 
-    tracing::info!(
-        "New WebSocket client connected for network metrics, subscribers: {}",
-        state.network_metrics_tx.receiver_count()
+/// Network rates for every displayed namespace, read from VictoriaMetrics.
+///
+/// This replaced an in-process cache that a background task filled by polling
+/// cAdvisor every second. That cache lived in one API pod's memory, so another
+/// replica answered with zeros; VictoriaMetrics is shared, and already holds
+/// these counters.
+///
+/// The namespace set comes from the pod count, not the byte rates, so an idle
+/// app still appears with zero traffic.
+async fn namespace_rates() -> BTreeMap<String, NamespaceRates> {
+    use crate::endpoints::monitoring::query_vm_with_timeout;
+    use futures_util::future::join_all;
+
+    let t = NAMESPACE_RATE_TIMEOUT_SECONDS;
+    let rate_queries: Vec<String> = NAMESPACE_RATE_METRICS
+        .iter()
+        .map(|metric| namespace_rate_query(metric))
+        .collect();
+    let (pods, rates) = tokio::join!(
+        query_vm_with_timeout(
+            "count by (namespace) (count by (namespace, pod) (container_network_receive_bytes_total))",
+            t,
+        ),
+        join_all(rate_queries.iter().map(|q| query_vm_with_timeout(q, t))),
     );
+    build_namespace_rates(&pods, &rates)
+}
 
-    // Spawn task to forward broadcast messages to WebSocket
-    let send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg.into())).await.is_err() {
-                break;
-            }
+/// Fold the query results into one entry per namespace. `rates` follows
+/// [`NAMESPACE_RATE_METRICS`].
+fn build_namespace_rates(
+    pods: &[serde_json::Value],
+    rates: &[Vec<serde_json::Value>],
+) -> BTreeMap<String, NamespaceRates> {
+    let mut out: BTreeMap<String, NamespaceRates> = BTreeMap::new();
+    for row in pods {
+        let namespace = metric_label(row, "namespace");
+        if is_excluded_namespace(&namespace) {
+            continue;
         }
-    });
-
-    // Handle incoming messages (ping/pong, close)
-    let recv_task = tokio::spawn(async move {
-        while let Some(result) = receiver.next().await {
-            match result {
-                Ok(Message::Ping(data)) => {
-                    debug!("Received ping from WebSocket client");
-                    // Pong is handled automatically by axum
-                    let _ = data;
-                }
-                Ok(Message::Close(_)) => {
-                    debug!("WebSocket client requested close");
-                    break;
-                }
-                Err(e) => {
-                    debug!("WebSocket error: {}", e);
-                    break;
-                }
-                _ => {}
-            }
-        }
-    });
-
-    // Wait for either task to complete (client disconnect or error)
-    tokio::select! {
-        _ = send_task => {},
-        _ = recv_task => {},
+        out.entry(namespace).or_default().pod_count =
+            sample_value(row).unwrap_or(0.0).round() as i32;
     }
-
-    tracing::info!("WebSocket client disconnected");
+    for (index, rows) in rates.iter().enumerate() {
+        for row in rows {
+            // Only namespaces that have pods: a counter's rate outlives its
+            // pods by the rate window, and a node with nothing behind it is noise.
+            let Some(entry) = out.get_mut(&metric_label(row, "namespace")) else {
+                continue;
+            };
+            let value = sample_value(row).filter(|v| v.is_finite()).unwrap_or(0.0);
+            let field = match index {
+                0 => &mut entry.rx_bytes,
+                1 => &mut entry.tx_bytes,
+                2 => &mut entry.rx_packets,
+                3 => &mut entry.tx_packets,
+                4 => &mut entry.rx_errors,
+                5 => &mut entry.tx_errors,
+                6 => &mut entry.rx_dropped,
+                _ => &mut entry.tx_dropped,
+            };
+            *field = value;
+        }
+    }
+    out
 }
 
 // ============================================================================
@@ -1994,6 +1959,60 @@ mod topology_merge_tests {
             bytes_per_sec: None,
             observed: false,
         }
+    }
+
+    fn ns_row(namespace: &str, value: &str) -> serde_json::Value {
+        serde_json::json!({"metric": {"namespace": namespace}, "value": [0, value]})
+    }
+
+    #[test]
+    fn an_idle_app_is_listed_with_zero_traffic() {
+        let pods = vec![ns_row("sonarr", "2"), ns_row("radarr", "1")];
+        let mut rates = vec![Vec::new(); 8];
+        rates[0] = vec![ns_row("radarr", "1500.5")];
+        rates[1] = vec![ns_row("radarr", "20")];
+        let out = build_namespace_rates(&pods, &rates);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out["sonarr"].pod_count, 2);
+        assert_eq!(out["sonarr"].rx_bytes, 0.0);
+        assert_eq!(out["radarr"].rx_bytes, 1500.5);
+        assert_eq!(out["radarr"].tx_bytes, 20.0);
+    }
+
+    #[test]
+    fn system_namespaces_and_podless_rates_are_dropped() {
+        let pods = vec![ns_row("kube-system", "5"), ns_row("sonarr", "1")];
+        let mut rates = vec![Vec::new(); 8];
+        rates[0] = vec![
+            ns_row("kube-system", "99"),
+            ns_row("gone", "42"),
+            ns_row("sonarr", "NaN"),
+        ];
+        let out = build_namespace_rates(&pods, &rates);
+        assert_eq!(out.keys().collect::<Vec<_>>(), vec!["sonarr"]);
+        assert_eq!(out["sonarr"].rx_bytes, 0.0);
+    }
+
+    #[test]
+    fn every_rate_lands_in_its_own_field() {
+        let pods = vec![ns_row("app", "1")];
+        let rates: Vec<Vec<serde_json::Value>> = (1..=8)
+            .map(|n| vec![ns_row("app", &n.to_string())])
+            .collect();
+        let r = &build_namespace_rates(&pods, &rates)["app"];
+        assert_eq!(
+            [
+                r.rx_bytes,
+                r.tx_bytes,
+                r.rx_packets,
+                r.tx_packets,
+                r.rx_errors,
+                r.tx_errors,
+                r.rx_dropped,
+                r.tx_dropped
+            ],
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
     }
 
     fn observed_row(source: &str, destination: &str, rate: &str) -> serde_json::Value {
