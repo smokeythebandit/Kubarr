@@ -6,6 +6,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use tokio::sync::RwLock;
@@ -19,6 +20,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::config::CONFIG;
 use crate::db;
 use crate::endpoints;
+use crate::services::ha;
 use crate::services::leader::LeaderElector;
 use crate::services::{
     init_jwt_keys, scheduler, start_network_broadcaster, AppCatalog, AppManager, AuditService,
@@ -156,8 +158,16 @@ async fn run_as_leader(
     let poll_interval = env_duration("KUBARR_WORKER_POLL_INTERVAL_SECONDS", 5);
     let reconcile_interval = env_duration("KUBARR_WORKER_RECONCILE_INTERVAL_SECONDS", 30);
     let domain_reconcile_interval = env_duration("KUBARR_DOMAIN_RECONCILE_INTERVAL_SECONDS", 60);
-    let worker_tasks = manager.run_worker(poll_interval, reconcile_interval, cancellation.clone());
+    let worker_tasks =
+        manager
+            .clone()
+            .run_worker(poll_interval, reconcile_interval, cancellation.clone());
     domain_reconciler.run(domain_reconcile_interval);
+    let ha_task = tokio::spawn(run_ha_loop(
+        manager,
+        env_duration("KUBARR_HA_RECONCILE_INTERVAL_SECONDS", 30),
+        cancellation.clone(),
+    ));
 
     tracing::info!(
         poll_interval_seconds = poll_interval.as_secs(),
@@ -169,7 +179,31 @@ async fn run_as_leader(
     cancellation.cancelled().await;
     tracing::info!("Kubarr worker draining in-flight work");
     worker_tasks.wait().await;
+    if let Err(error) = ha_task.await {
+        tracing::error!(%error, "HA rescale task stopped unexpectedly");
+    }
     Ok(())
+}
+
+/// Resize the HA system releases whenever the usable node count changes.
+async fn run_ha_loop(
+    manager: Arc<AppManager>,
+    interval: Duration,
+    cancellation: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => break,
+            _ = ticker.tick() => {}
+        }
+        match ha::reconcile_ha(&manager).await {
+            Ok(Some(nodes)) => tracing::info!(nodes, "HA system releases resized"),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "HA rescale failed; will retry"),
+        }
+    }
 }
 
 type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;

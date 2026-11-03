@@ -8,6 +8,7 @@ pub mod deployment;
 pub mod domain_reconciler;
 pub mod flow_classes;
 pub mod gpu;
+pub mod ha;
 pub mod install_options;
 pub mod jellyfin_link;
 pub mod k8s;

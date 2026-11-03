@@ -131,9 +131,11 @@ pub struct AppStateResponse {
 
 #[derive(Clone)]
 pub struct AppManager {
-    db: DatabaseConnection,
-    k8s_client: SharedK8sClient,
-    catalog: SharedCatalog,
+    pub(super) db: DatabaseConnection,
+    pub(super) k8s_client: SharedK8sClient,
+    pub(super) catalog: SharedCatalog,
+    /// Serializes Helm writes between queued operations and the HA rescaler.
+    pub(super) helm_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppManager {
@@ -146,6 +148,7 @@ impl AppManager {
             db,
             k8s_client,
             catalog,
+            helm_lock: Arc::default(),
         }
     }
 
@@ -962,7 +965,8 @@ impl AppManager {
                         break;
                     }
                     // This loop is sequential: it never classifies its own in-flight Helm
-                    // execution as abandoned. Recreate deployment keeps predecessor workers gone.
+                    // execution as abandoned. Only the Lease-elected leader runs it, and a
+                    // leader that loses its Lease exits, so no other worker runs it concurrently.
                     if let Err(e) = self.recover_stale_operations().await {
                         tracing::error!(error = %e, "Failed to recover interrupted app operations");
                         continue;
@@ -1231,6 +1235,10 @@ impl AppManager {
             .as_ref()
             .ok_or_else(|| AppError::Internal("Kubernetes client not available".to_string()))?;
         let catalog = self.catalog.read().await;
+        // Taken after the read guards, as reconcile_ha does: acquiring a read
+        // while holding this lock could queue behind a catalog writer that is
+        // itself waiting on the other holder's read.
+        let _helm = self.helm_lock.lock().await;
 
         let outcome = match operation.operation.as_str() {
             OP_INSTALL | OP_UPDATE => {

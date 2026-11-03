@@ -87,7 +87,7 @@ impl<'a> DeploymentManager<'a> {
     }
 
     /// Get the OCI chart reference for an app
-    fn get_chart_ref(&self, app_name: &str) -> String {
+    pub fn chart_ref(&self, app_name: &str) -> String {
         format!("{}/{}", CONFIG.charts.registry, app_name)
     }
 
@@ -317,7 +317,7 @@ impl<'a> DeploymentManager<'a> {
         }
         let cleanup_unassigned_vpn_secret = self.db.is_some() && vpn_config.is_none();
 
-        let chart_ref = self.get_chart_ref(&request.app_name);
+        let chart_ref = self.chart_ref(&request.app_name);
         let lifecycle = lifecycle_for_app_name(&request.app_name);
         let release = lifecycle.release_name.as_str();
         let release_namespace = lifecycle.release_namespace.as_str();
