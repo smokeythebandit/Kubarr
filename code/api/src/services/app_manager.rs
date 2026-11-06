@@ -35,6 +35,9 @@ pub const OP_DELETE: &str = "delete";
 pub const OP_RESTART: &str = "restart";
 const QUEUED_INSTALL_KEY: &str = "__kubarr_install_choices";
 const QUEUED_STORAGE_KEY: &str = "__kubarr_storage_snapshot";
+/// Marks an update the auto-updater queued, with the chart version it aimed
+/// at. It is bookkeeping, never a chart value: it is stripped before Helm.
+pub const AUTO_UPDATE_TARGET_KEY: &str = "__kubarr_auto_update_target";
 
 #[derive(Serialize, Deserialize)]
 struct QueuedInstall {
@@ -129,6 +132,18 @@ pub struct AppStateResponse {
     pub updated_at: chrono::DateTime<Utc>,
 }
 
+#[derive(Debug, Default, Serialize, utoipa::ToSchema)]
+pub struct UpdateAllResult {
+    pub queued: Vec<AppOperationResponse>,
+    pub skipped: Vec<SkippedUpdate>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SkippedUpdate {
+    pub app_name: String,
+    pub reason: String,
+}
+
 #[derive(Clone)]
 pub struct AppManager {
     pub(super) db: DatabaseConnection,
@@ -163,6 +178,7 @@ impl AppManager {
         install_options::validate_custom_storage_keys(&custom_config)?;
         if custom_config.contains_key(QUEUED_INSTALL_KEY)
             || custom_config.contains_key(QUEUED_STORAGE_KEY)
+            || custom_config.contains_key(AUTO_UPDATE_TARGET_KEY)
         {
             return Err(AppError::BadRequest("Reserved install key".into()));
         }
@@ -234,6 +250,7 @@ impl AppManager {
         install_options::validate_custom_storage_keys(&custom_config)?;
         if custom_config.contains_key(QUEUED_INSTALL_KEY)
             || custom_config.contains_key(QUEUED_STORAGE_KEY)
+            || custom_config.contains_key(AUTO_UPDATE_TARGET_KEY)
         {
             return Err(AppError::BadRequest("Reserved install key".into()));
         }
@@ -359,6 +376,147 @@ impl AppManager {
             .await?;
         log_queued(tx, &operation).await?;
         Ok(operation.into())
+    }
+
+    pub fn db(&self) -> &DatabaseConnection {
+        &self.db
+    }
+
+    async fn has_active_operation(&self, app_name: Option<&str>) -> Result<bool> {
+        let mut query =
+            app_operation::Entity::find().filter(app_operation::Column::Status.is_in([
+                STATUS_QUEUED,
+                STATUS_RUNNING,
+                STATUS_PAUSED,
+            ]));
+        if let Some(app_name) = app_name {
+            query = query.filter(app_operation::Column::AppName.eq(app_name));
+        }
+        Ok(query.one(&self.db).await?.is_some())
+    }
+
+    /// Installed, non-system apps with a newer chart waiting, as
+    /// (name, installed, available), sorted by name.
+    async fn updatable_apps(&self) -> Result<Vec<(String, String, String)>> {
+        let states = app_state::Entity::find()
+            .filter(app_state::Column::UpdateAvailable.eq(true))
+            .filter(app_state::Column::DesiredState.eq(DESIRED_INSTALLED))
+            .order_by_asc(app_state::Column::AppName)
+            .all(&self.db)
+            .await?;
+        let catalog = self.catalog.read().await;
+        Ok(states
+            .into_iter()
+            .filter(|state| {
+                // System apps are Kubarr itself; they update with the platform.
+                catalog
+                    .get_app(&state.app_name)
+                    .is_some_and(|app| !app.is_system)
+            })
+            .filter_map(|state| {
+                Some((
+                    state.app_name,
+                    state.installed_chart_version?,
+                    state.available_chart_version?,
+                ))
+            })
+            .collect())
+    }
+
+    /// The next app the auto-updater should update, with its target version.
+    ///
+    /// Nothing is picked while any operation is queued, running or paused, so
+    /// automatic updates go one at a time and never stack behind manual work.
+    /// Unhealthy apps are left alone: an update should not be the second thing
+    /// to go wrong with them. A target that already failed once is skipped.
+    pub async fn auto_update_candidate(
+        &self,
+        allow_major: bool,
+    ) -> Result<Option<(String, String)>> {
+        if self.has_active_operation(None).await? {
+            return Ok(None);
+        }
+        let healthy: std::collections::HashSet<String> = app_state::Entity::find()
+            .filter(app_state::Column::ObservedState.eq(OBS_INSTALLED))
+            .filter(app_state::Column::Healthy.eq(true))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|state| state.app_name)
+            .collect();
+        for (app_name, installed, available) in self.updatable_apps().await? {
+            if !healthy.contains(&app_name) {
+                continue;
+            }
+            if !allow_major && crate::services::auto_update::is_major_jump(&installed, &available) {
+                continue;
+            }
+            if self.auto_update_failed_for(&app_name, &available).await? {
+                continue;
+            }
+            return Ok(Some((app_name, available)));
+        }
+        Ok(None)
+    }
+
+    async fn auto_update_failed_for(&self, app_name: &str, target: &str) -> Result<bool> {
+        let failed = app_operation::Entity::find()
+            .filter(app_operation::Column::AppName.eq(app_name))
+            .filter(app_operation::Column::Operation.eq(OP_UPDATE))
+            .filter(app_operation::Column::Status.is_in([STATUS_FAILED, STATUS_RETRIED]))
+            .all(&self.db)
+            .await?;
+        Ok(failed.iter().any(|operation| {
+            operation
+                .custom_config
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(raw).ok())
+                .is_some_and(|config| {
+                    config.get(AUTO_UPDATE_TARGET_KEY).map(String::as_str) == Some(target)
+                })
+        }))
+    }
+
+    /// Queue an update on the auto-updater's behalf. It has no user, so the
+    /// operation's creator is empty and the audit log shows it as the system.
+    pub async fn enqueue_auto_update(
+        &self,
+        app_name: &str,
+        target_version: &str,
+    ) -> Result<AppOperationResponse> {
+        let config = HashMap::from([(
+            AUTO_UPDATE_TARGET_KEY.to_string(),
+            target_version.to_string(),
+        )]);
+        self.persist_operation(app_name, OP_UPDATE, config, None)
+            .await
+    }
+
+    /// Queue an update for every installed app that has one. The worker runs
+    /// them one after another. Apps already busy with an operation are
+    /// skipped rather than queued twice.
+    pub async fn update_all(&self, created_by: Option<i64>) -> Result<UpdateAllResult> {
+        let mut result = UpdateAllResult::default();
+        for (app_name, _, _) in self.updatable_apps().await? {
+            if self.has_active_operation(Some(&app_name)).await? {
+                result.skipped.push(SkippedUpdate {
+                    app_name,
+                    reason: "An operation is already in progress".into(),
+                });
+                continue;
+            }
+            match self
+                .persist_operation(&app_name, OP_UPDATE, HashMap::new(), created_by)
+                .await
+            {
+                Ok(operation) => result.queued.push(operation),
+                Err(error) => result.skipped.push(SkippedUpdate {
+                    app_name,
+                    reason: error.to_string(),
+                }),
+            }
+        }
+        Ok(result)
     }
 
     async fn enqueue_operation_unchecked(
@@ -656,6 +814,7 @@ impl AppManager {
         let mut public_config = config.clone();
         let mut promoted_config: Option<String> = None;
         public_config.remove(QUEUED_GPU_KEY);
+        public_config.remove(AUTO_UPDATE_TARGET_KEY);
         if let Some(raw) = public_config.remove(QUEUED_STORAGE_KEY) {
             let snapshot: QueuedStorage = serde_json::from_str(&raw)
                 .map_err(|_| AppError::BadRequest("Invalid stored storage snapshot".into()))?;
@@ -1285,7 +1444,7 @@ impl AppManager {
     ) -> Result<String> {
         // A malformed persisted request must fail rather than silently deploying
         // with defaults (which can reset a queued GPU or other chart settings).
-        let mut custom_config = parse_queued_config(operation.custom_config.as_deref())?;
+        let mut custom_config = queued_chart_config(operation.custom_config.as_deref())?;
         let gpu: Option<Option<GpuSelection>> = custom_config
             .remove(QUEUED_GPU_KEY)
             .map(|raw| {
@@ -2031,6 +2190,14 @@ fn check_stop(stop: &CancellationToken) -> Result<()> {
 fn parse_queued_config(config: Option<&str>) -> Result<HashMap<String, String>> {
     serde_json::from_str(config.unwrap_or("{}"))
         .map_err(|_| AppError::BadRequest("Invalid queued operation config".into()))
+}
+
+/// The queued config bound for Helm, minus pure bookkeeping. Whatever is
+/// left here becomes chart values, so a marker left in would be deployed.
+fn queued_chart_config(config: Option<&str>) -> Result<HashMap<String, String>> {
+    let mut config = parse_queued_config(config)?;
+    config.remove(AUTO_UPDATE_TARGET_KEY);
+    Ok(config)
 }
 
 async fn watch_stop(db: DatabaseConnection, id: String, stop: CancellationToken) {

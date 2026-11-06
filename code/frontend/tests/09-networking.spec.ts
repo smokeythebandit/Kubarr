@@ -75,16 +75,14 @@ test.describe('Networking Page', () => {
     });
 
     test('Connection status indicator is shown', async ({ page }) => {
-      // Should show one of: Live, Polling, or Disconnected
+      // Should show one of: Live or Disconnected
       const live = page.locator('text=Live');
-      const polling = page.locator('text=Polling');
       const disconnected = page.locator('text=Disconnected');
 
       await page.waitForLoadState('networkidle');
       const hasLive = await live.first().isVisible().catch(() => false);
-      const hasPolling = await polling.isVisible().catch(() => false);
       const hasDisconnected = await disconnected.isVisible().catch(() => false);
-      expect(hasLive || hasPolling || hasDisconnected).toBe(true);
+      expect(hasLive || hasDisconnected).toBe(true);
     });
   });
 

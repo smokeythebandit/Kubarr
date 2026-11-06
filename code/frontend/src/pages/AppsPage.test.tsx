@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => ({
   install: vi.fn(),
   getInstallOptions: vi.fn(),
   update: vi.fn(),
+  updateAll: vi.fn(),
+  getAutoUpdate: vi.fn(),
+  sonarrUpdate: false,
   getGpus: vi.fn(),
   pauseOperation: vi.fn(),
   resumeOperation: vi.fn(),
@@ -47,6 +50,8 @@ vi.mock('../api/apps', () => ({
     install: (...args: unknown[]) => mocks.install(...args),
     getInstallOptions: (...args: unknown[]) => mocks.getInstallOptions(...args),
     update: (...args: unknown[]) => mocks.update(...args),
+    updateAll: (...args: unknown[]) => mocks.updateAll(...args),
+    getAutoUpdate: (...args: unknown[]) => mocks.getAutoUpdate(...args),
     getGpus: (...args: unknown[]) => mocks.getGpus(...args),
     delete: vi.fn(),
     logAccess: vi.fn().mockResolvedValue(undefined),
@@ -149,7 +154,10 @@ vi.mock('../contexts/MonitoringContext', () => ({
       ...(mocks.showDevelopment ? [{ ...app, name: 'redmine', display_name: 'Redmine', category: 'development' }] : []),
       ...(mocks.showSystemExporter ? [{ ...app, name: 'node-exporter', display_name: 'Node Exporter', category: 'monitoring', is_system: true, is_browseable: false }] : [])],
     installedApps: mocks.plexInstalled ? ['sonarr', 'plex'] : ['sonarr'],
-    appStates: mocks.plexInstalled ? { sonarr: appState, plex: { ...appState, app_name: 'plex' } } : { sonarr: appState },
+    appStates: (() => {
+      const sonarr = { ...appState, update_available: mocks.sonarrUpdate, available_chart_version: mocks.sonarrUpdate ? '1.1.0' : '1.0.0' }
+      return mocks.plexInstalled ? { sonarr, plex: { ...appState, app_name: 'plex' } } : { sonarr }
+    })(),
     appStatuses: { sonarr: { healthy: true, loading: false, pods: [] } },
     refreshAppStatuses: mocks.refreshAppStatuses,
   }),
@@ -662,5 +670,69 @@ describe('AppsPage compact view', () => {
     renderPage()
     await screen.findByRole('heading', { name: 'Sonarr', level: 3 })
     expect(screen.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true')
+  })
+})
+
+describe('AppsPage update all', () => {
+  const autoUpdateOff = {
+    config: { enabled: false, allow_major: false, window: { days: ['mon'], start: '03:00', end: '06:00', timezone: 'UTC' } },
+    in_window: false,
+    next_window_start: null,
+  }
+
+  beforeEach(() => {
+    mocks.canInstall = true
+    mocks.sonarrUpdate = false
+    mocks.getOperations.mockResolvedValue([])
+    mocks.updateAll.mockReset()
+    mocks.getAutoUpdate.mockResolvedValue(autoUpdateOff)
+    mocks.refreshAppStatuses.mockReset()
+  })
+
+  it('is hidden when nothing has an update', async () => {
+    renderPage()
+    await screen.findByRole('heading', { name: 'Sonarr', level: 2 })
+    expect(screen.queryByRole('button', { name: /Update all/ })).not.toBeInTheDocument()
+  })
+
+  it('queues every pending update after confirmation', async () => {
+    mocks.sonarrUpdate = true
+    mocks.updateAll.mockResolvedValue({ queued: [{ ...queuedRestart, id: 'update-1', operation: 'update' }], skipped: [] })
+    const confirm = vi.fn().mockReturnValue(true)
+    vi.stubGlobal('confirm', confirm)
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Update all (1)' }))
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('sonarr'))
+    await waitFor(() => expect(mocks.updateAll).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('1 update queued')).toBeInTheDocument()
+    vi.unstubAllGlobals()
+  })
+
+  it('does nothing when the confirmation is declined', async () => {
+    mocks.sonarrUpdate = true
+    const confirm = vi.fn().mockReturnValue(false)
+    vi.stubGlobal('confirm', confirm)
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Update all (1)' }))
+
+    expect(mocks.updateAll).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('leaves out apps that are already busy, and is not offered without apps.install', async () => {
+    mocks.sonarrUpdate = true
+    mocks.getOperations.mockResolvedValue([queuedRestart])
+    renderPage()
+    await screen.findByRole('heading', { name: 'Sonarr', level: 2 })
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Update all/ })).not.toBeInTheDocument())
+  })
+
+  it('links to the update settings and says when auto-update is off', async () => {
+    renderPage()
+    const link = await screen.findByRole('link', { name: 'Auto-update off' })
+    expect(link).toHaveAttribute('href', '/settings?section=updates')
   })
 })

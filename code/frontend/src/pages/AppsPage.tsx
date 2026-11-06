@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, type JSX } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { appsApi } from '../api/apps'
 import { monitoringApi } from '../api/monitoring'
@@ -1456,6 +1456,54 @@ export default function AppsPage() {
     },
   })
 
+  // Apps the Update all button would touch: installed user apps with a newer
+  // chart and nothing already in flight. System apps update with Kubarr.
+  const updatableApps = useMemo(
+    () => catalog
+      .filter(app => !app.is_system && appStates[app.name]?.update_available === true && !activeOperationsByApp[app.name])
+      .map(app => app.name),
+    [catalog, appStates, activeOperationsByApp],
+  )
+
+  const updateAllMutation = useMutation({
+    mutationFn: appsApi.updateAll,
+    onSuccess: result => {
+      queryClient.setQueryData<AppOperation[]>(['app-operations'], current => [
+        ...result.queued,
+        ...(current || []).filter(item => !result.queued.some(queued => queued.id === item.id)),
+      ])
+      refreshAppStatuses()
+      const queued = result.queued.length
+      const skipped = result.skipped.length
+      if (queued === 0 && skipped === 0) {
+        showToast('Everything is already up to date', 'success')
+      } else if (skipped === 0) {
+        showToast(`${queued} update${queued === 1 ? '' : 's'} queued`, 'success')
+      } else {
+        showToast(
+          `${queued} queued, ${skipped} skipped: ${result.skipped.map(s => `${s.app_name} (${s.reason})`).join(', ')}`,
+          queued === 0 ? 'error' : 'success',
+        )
+      }
+    },
+    onError: (error: { response?: { data?: { detail?: string } }; message: string }) => {
+      showToast(`Failed to queue updates: ${error.response?.data?.detail || error.message}`, 'error')
+    },
+  })
+
+  const { data: autoUpdate } = useQuery({
+    queryKey: ['auto-update'],
+    queryFn: appsApi.getAutoUpdate,
+    staleTime: 60000,
+  })
+
+  const updateAll = () => {
+    const names = updatableApps.join(', ')
+    if (window.confirm(`Update ${updatableApps.length} app${updatableApps.length === 1 ? '' : 's'}?\n\n${names}\n\nThey update one after another, and each restarts while it updates.`)) {
+      updateAllMutation.mutate()
+    }
+  }
+
   const gpuUpdateMutation = useMutation({
     mutationFn: ({ appName, gpu }: { appName: string; gpu: GpuSelection | null }) => {
       setOperationState(appName, 'updating')
@@ -1662,6 +1710,17 @@ export default function AppsPage() {
                 </option>
               ))}
             </select>
+            {autoUpdate && (
+              <Link
+                to="/settings?section=updates"
+                title={autoUpdate.config.enabled ? 'Automatic updates are on' : 'Automatic updates are off'}
+                className="text-sm whitespace-nowrap text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400"
+              >
+                {autoUpdate.config.enabled
+                  ? `Auto-update on · ${autoUpdate.in_window ? 'window open' : autoUpdate.next_window_start ? `next ${new Date(autoUpdate.next_window_start).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : 'no window'}`
+                  : 'Auto-update off'}
+              </Link>
+            )}
             <span className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap" title={syncStatus?.last_synced ?? undefined}>
               {syncStatus?.last_synced ? `Catalog updated ${formatTimeAgo(syncStatus.last_synced)}` : 'Catalog not synced yet'}
             </span>
@@ -1676,6 +1735,19 @@ export default function AppsPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                 </svg>
                 {syncMutation.isPending ? 'Syncing…' : 'Refresh Catalog'}
+              </button>
+            )}
+            {canSyncCatalog && updatableApps.length > 0 && (
+              <button
+                onClick={updateAll}
+                disabled={updateAllMutation.isPending}
+                title={`Update ${updatableApps.join(', ')}`}
+                className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50 disabled:cursor-wait shadow-sm flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                {updateAllMutation.isPending ? 'Queuing…' : `Update all (${updatableApps.length})`}
               </button>
             )}
           </div>}

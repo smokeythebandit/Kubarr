@@ -118,12 +118,20 @@ function NetworkFlowVisualizationInner({ topology, isFullscreen, vpnConfigs = []
 
   // Convert topology to React Flow nodes and edges
   const { initialNodes, initialEdges } = useMemo(() => {
+    // An edge can name a namespace that is not drawn (kube-system is filtered
+    // out of the nodes but still shows up in Hubble flows). React Flow cannot
+    // draw it and dagre would lay out a phantom node for it, so drop it here.
+    const nodeIds = new Set(topology.nodes.map(node => node.id))
+    const drawable = topology.edges.filter(
+      edge => nodeIds.has(edge.source) && nodeIds.has(edge.target)
+    )
+
     // Edge weight is the link's own measured byte rate, not the endpoints'
     // total volume and not a connection count. A busy app talking to a quiet
     // one used to make that link look busy, and weighting by connections made
     // a chatty link outrank one carrying a download.
     const maxBytesPerSec = Math.max(
-      ...topology.edges.map(edge => edge.bytes_per_sec ?? 0),
+      ...drawable.map(edge => edge.bytes_per_sec ?? 0),
       1
     )
 
@@ -151,8 +159,11 @@ function NetworkFlowVisualizationInner({ topology, isFullscreen, vpnConfigs = []
       }
     })
 
-    const edges: Edge<AnimatedEdgeData>[] = topology.edges.map((edge, i) => ({
-      id: `e${i}-${edge.source}-${edge.target}`,
+    // Keyed by its ends, not its position. The backend sends one edge per
+    // pair, and an index-based id pointed at a different edge whenever the
+    // list shifted between polls, so weights jumped from line to line.
+    const edges: Edge<AnimatedEdgeData>[] = drawable.map(edge => ({
+      id: `${edge.source}->${edge.target}`,
       source: edge.source,
       target: edge.target,
       type: 'animated',

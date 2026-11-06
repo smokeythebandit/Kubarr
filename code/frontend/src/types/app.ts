@@ -101,3 +101,31 @@ export interface AppState {
   last_checked_at: string | null;
   updated_at: string;
 }
+
+export interface UpdateWindow {
+  /** "mon" through "sun". */
+  days: string[];
+  /** Local "HH:MM". */
+  start: string;
+  /** Local "HH:MM"; earlier than start means the window runs past midnight. */
+  end: string;
+  /** IANA timezone, e.g. "Europe/Amsterdam". */
+  timezone: string;
+}
+
+export interface AutoUpdateConfig {
+  enabled: boolean;
+  allow_major: boolean;
+  window: UpdateWindow;
+}
+
+export interface AutoUpdateStatus {
+  config: AutoUpdateConfig;
+  in_window: boolean;
+  next_window_start: string | null;
+}
+
+export interface UpdateAllResult {
+  queued: AppOperation[];
+  skipped: { app_name: string; reason: string }[];
+}

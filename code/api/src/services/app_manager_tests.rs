@@ -1302,3 +1302,229 @@ async fn catalog_sync_preserves_queued_operation_intent() {
     assert_eq!(current.last_operation_id, Some(queued.id));
     assert_eq!(current.available_chart_version.as_deref(), Some("2.0.0"));
 }
+
+// ============================================================================
+// Update all and automatic updates
+// ============================================================================
+
+const SYSTEM_APP: &str = "kubarr-system-fixture";
+const OTHER_APP: &str = "another-test-app";
+
+fn fixture_app(name: &str, is_system: bool) -> crate::services::catalog::AppConfig {
+    serde_json::from_value(serde_json::json!({
+        "name": name, "display_name": name, "description": "Fixture",
+        "icon": "", "container_image": "unused", "default_port": 8080,
+        "resource_requirements": {"cpu_request": "100m", "cpu_limit": "1",
+            "memory_request": "128Mi", "memory_limit": "256Mi"},
+        "volumes": [], "environment_variables": {}, "category": "test",
+        "is_system": is_system, "is_hidden": false, "is_browseable": true
+    }))
+    .unwrap()
+}
+
+async fn update_fixture() -> AppManager {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    crate::migrations::Migrator::up(&db, None).await.unwrap();
+    let apps = HashMap::from([
+        (APP.to_string(), fixture_app(APP, false)),
+        (OTHER_APP.to_string(), fixture_app(OTHER_APP, false)),
+        (SYSTEM_APP.to_string(), fixture_app(SYSTEM_APP, true)),
+    ]);
+    AppManager::new(
+        db,
+        Arc::new(RwLock::new(None)),
+        Arc::new(RwLock::new(AppCatalog::with_apps(apps))),
+    )
+}
+
+async fn installed(manager: &AppManager, name: &str, from: &str, to: &str, healthy: bool) {
+    let now = Utc::now();
+    app_state::ActiveModel {
+        app_name: Set(name.into()),
+        namespace: Set(name.into()),
+        desired_state: Set(DESIRED_INSTALLED.into()),
+        observed_state: Set(OBS_INSTALLED.into()),
+        healthy: Set(healthy),
+        message: Set(None),
+        installed_chart_version: Set(Some(from.into())),
+        available_chart_version: Set(Some(to.into())),
+        update_available: Set(from != to),
+        last_operation_id: Set(None),
+        last_checked_at: Set(Some(now)),
+        updated_at: Set(now),
+    }
+    .insert(&manager.db)
+    .await
+    .unwrap();
+}
+
+/// Put an app back to installed and healthy at these versions, as the
+/// reconciler would after an operation settles.
+async fn set_versions(manager: &AppManager, name: &str, from: &str, to: &str) {
+    let mut active: app_state::ActiveModel = app_state::Entity::find_by_id(name)
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .into();
+    active.observed_state = Set(OBS_INSTALLED.into());
+    active.healthy = Set(true);
+    active.installed_chart_version = Set(Some(from.into()));
+    active.available_chart_version = Set(Some(to.into()));
+    active.update_available = Set(from != to);
+    active.update(&manager.db).await.unwrap();
+}
+
+async fn finish(manager: &AppManager, id: &str, status: &str) {
+    let mut active: app_operation::ActiveModel = operation(manager, id).await.into();
+    active.status = Set(status.into());
+    active.update(&manager.db).await.unwrap();
+}
+
+#[tokio::test]
+async fn update_all_queues_user_apps_with_updates_and_skips_busy_ones() {
+    let manager = update_fixture().await;
+    installed(&manager, APP, "1.0.0", "1.1.0", true).await;
+    installed(&manager, OTHER_APP, "2.0.0", "3.0.0", false).await;
+    installed(&manager, SYSTEM_APP, "1.0.0", "1.1.0", true).await;
+    let busy = manager
+        .enqueue_operation(OTHER_APP, OP_RESTART, HashMap::new(), None)
+        .await
+        .unwrap();
+
+    let result = manager.update_all(Some(7)).await.unwrap();
+
+    let queued: Vec<_> = result
+        .queued
+        .iter()
+        .map(|op| op.app_name.as_str())
+        .collect();
+    assert_eq!(
+        queued,
+        vec![APP],
+        "manual: unhealthy and major are fine, system is not"
+    );
+    assert_eq!(result.queued[0].created_by, Some(7));
+    assert_eq!(result.skipped.len(), 1);
+    assert_eq!(result.skipped[0].app_name, OTHER_APP);
+
+    finish(&manager, &busy.id, STATUS_SUCCEEDED).await;
+    let again = manager.update_all(Some(7)).await.unwrap();
+    let queued: Vec<_> = again.queued.iter().map(|op| op.app_name.as_str()).collect();
+    assert_eq!(
+        queued,
+        vec![OTHER_APP],
+        "an app already queued is not queued twice"
+    );
+}
+
+#[tokio::test]
+async fn auto_update_picks_one_healthy_minor_update_at_a_time() {
+    let manager = update_fixture().await;
+    installed(&manager, APP, "1.0.0", "2.0.0", true).await;
+    installed(&manager, OTHER_APP, "1.0.0", "1.0.1", true).await;
+    installed(&manager, SYSTEM_APP, "1.0.0", "1.0.1", true).await;
+
+    assert_eq!(
+        manager.auto_update_candidate(false).await.unwrap(),
+        Some((OTHER_APP.to_string(), "1.0.1".to_string())),
+        "the major jump is skipped"
+    );
+    assert_eq!(
+        manager.auto_update_candidate(true).await.unwrap(),
+        Some((OTHER_APP.to_string(), "1.0.1".to_string())),
+        "apps are taken in name order"
+    );
+    set_versions(&manager, OTHER_APP, "1.0.1", "1.0.1").await;
+    assert_eq!(manager.auto_update_candidate(false).await.unwrap(), None);
+    assert_eq!(
+        manager.auto_update_candidate(true).await.unwrap(),
+        Some((APP.to_string(), "2.0.0".to_string())),
+        "a major jump goes once allowed"
+    );
+    set_versions(&manager, OTHER_APP, "1.0.0", "1.0.1").await;
+
+    let queued = manager
+        .enqueue_auto_update(OTHER_APP, "1.0.1")
+        .await
+        .unwrap();
+    assert_eq!(queued.created_by, None);
+    assert_eq!(
+        manager.auto_update_candidate(true).await.unwrap(),
+        None,
+        "nothing more while an operation is in flight"
+    );
+}
+
+#[tokio::test]
+async fn auto_update_leaves_unhealthy_apps_and_failed_targets_alone() {
+    let manager = update_fixture().await;
+    installed(&manager, APP, "1.0.0", "1.0.1", false).await;
+    installed(&manager, OTHER_APP, "1.0.0", "1.0.1", true).await;
+    assert_eq!(
+        manager.auto_update_candidate(false).await.unwrap(),
+        Some((OTHER_APP.to_string(), "1.0.1".to_string()))
+    );
+
+    let failed = manager
+        .enqueue_auto_update(OTHER_APP, "1.0.1")
+        .await
+        .unwrap();
+    finish(&manager, &failed.id, STATUS_FAILED).await;
+    assert_eq!(
+        manager.auto_update_candidate(false).await.unwrap(),
+        None,
+        "a target that failed once is not retried on its own"
+    );
+
+    // A newer release is a new target.
+    set_versions(&manager, OTHER_APP, "1.0.0", "1.0.2").await;
+    assert_eq!(
+        manager.auto_update_candidate(false).await.unwrap(),
+        Some((OTHER_APP.to_string(), "1.0.2".to_string()))
+    );
+}
+
+#[test]
+fn the_auto_update_marker_never_reaches_helm_and_cannot_be_injected() {
+    let raw = format!(
+        r#"{{"{}":"1.0.1","persistence.size":"5Gi"}}"#,
+        AUTO_UPDATE_TARGET_KEY
+    );
+    let values = queued_chart_config(Some(&raw)).unwrap();
+    assert_eq!(
+        values,
+        HashMap::from([("persistence.size".to_string(), "5Gi".to_string())])
+    );
+}
+
+#[tokio::test]
+async fn users_cannot_queue_the_auto_update_marker_themselves() {
+    let manager = update_fixture().await;
+    let forged = HashMap::from([(AUTO_UPDATE_TARGET_KEY.to_string(), "9.9.9".to_string())]);
+    assert!(manager
+        .enqueue_operation(APP, OP_UPDATE, forged, None)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn auto_update_settings_round_trip_and_fall_back_to_off() {
+    use crate::services::auto_update;
+    let manager = update_fixture().await;
+    assert_eq!(
+        auto_update::load(&manager.db).await.unwrap(),
+        auto_update::AutoUpdateConfig::default()
+    );
+
+    let mut config = auto_update::AutoUpdateConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    config.window.timezone = "Europe/Amsterdam".into();
+    auto_update::save(&manager.db, &config).await.unwrap();
+    assert_eq!(auto_update::load(&manager.db).await.unwrap(), config);
+
+    config.window.days.clear();
+    assert!(auto_update::save(&manager.db, &config).await.is_err());
+}

@@ -23,8 +23,8 @@ use crate::endpoints;
 use crate::services::ha;
 use crate::services::leader::LeaderElector;
 use crate::services::{
-    init_jwt_keys, scheduler, start_network_broadcaster, AppCatalog, AppManager, AuditService,
-    ChartSyncService, DomainReconciler, K8sClient, NotificationService,
+    init_jwt_keys, scheduler, AppCatalog, AppManager, AuditService, ChartSyncService,
+    DomainReconciler, K8sClient, NotificationService,
 };
 use crate::state::AppState;
 
@@ -35,10 +35,6 @@ pub async fn run() -> anyhow::Result<()> {
     tracing::info!("Starting Kubarr backend v{}", env!("CARGO_PKG_VERSION"));
 
     let state = init_services().await?;
-
-    // Start background network metrics broadcaster
-    start_network_broadcaster(state.clone());
-    tracing::info!("Network metrics broadcaster started");
 
     let app = create_app(state);
 
@@ -154,6 +150,10 @@ async fn run_as_leader(
     // Only aged claims are recovered: a recent claim might belong to a still
     // draining predecessor during deployment. Recovery never invokes Helm again.
     manager.recover_stale_operations().await?;
+
+    // Runs only here, in the elected worker, so two workers never queue
+    // competing automatic updates.
+    crate::services::auto_update::start(manager.clone(), cancellation.clone());
 
     let poll_interval = env_duration("KUBARR_WORKER_POLL_INTERVAL_SECONDS", 5);
     let reconcile_interval = env_duration("KUBARR_WORKER_RECONCILE_INTERVAL_SECONDS", 30);

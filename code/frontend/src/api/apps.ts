@@ -1,6 +1,6 @@
 import apiClient from './client';
 import type { AppConfig, AppOperation, AppState, DeploymentRequest, GpuSelection } from '../types';
-import type { InstallOptions } from '../types/app';
+import type { AutoUpdateConfig, AutoUpdateStatus, InstallOptions, UpdateAllResult } from '../types/app';
 
 // Export type for convenience
 export type App = AppConfig;
@@ -65,6 +65,22 @@ export const appsApi = {
     const response = gpu === undefined
       ? await apiClient.post<AppOperation>(`/apps/${appName}/update`)
       : await apiClient.post<AppOperation>(`/apps/${appName}/update`, { gpu });
+    return response.data;
+  },
+
+  // Queue an update for every installed app that has one
+  updateAll: async (): Promise<UpdateAllResult> => {
+    const response = await apiClient.post<UpdateAllResult>('/apps/update-all');
+    return response.data;
+  },
+
+  getAutoUpdate: async (): Promise<AutoUpdateStatus> => {
+    const response = await apiClient.get<AutoUpdateStatus>('/apps/auto-update');
+    return response.data;
+  },
+
+  setAutoUpdate: async (config: AutoUpdateConfig): Promise<AutoUpdateStatus> => {
+    const response = await apiClient.put<AutoUpdateStatus>('/apps/auto-update', config);
     return response.data;
   },
 
