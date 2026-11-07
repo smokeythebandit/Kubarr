@@ -355,3 +355,26 @@ func TestTunMeterReadsCounter(t *testing.T) {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
 }
+
+func TestHTTPTesterEmptyBodyIsFailure(t *testing.T) {
+	hits := 0
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(200)
+	}))
+	defer empty.Close()
+	start := time.Now()
+	if err := (HTTPTester{URLs: []string{empty.URL}}).Run(context.Background(), 5*time.Second); err == nil {
+		t.Fatal("expected error for zero-byte body")
+	}
+	if time.Since(start) > 2*time.Second || hits != 1 {
+		t.Fatalf("hits=%d elapsed=%s", hits, time.Since(start))
+	}
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(make([]byte, 1024))
+	}))
+	defer good.Close()
+	if err := (HTTPTester{URLs: []string{empty.URL, good.URL}, MaxBytes: 1024}).Run(context.Background(), 5*time.Second); err != nil {
+		t.Fatalf("should fall through to next URL: %v", err)
+	}
+}

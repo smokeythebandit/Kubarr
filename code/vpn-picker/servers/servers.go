@@ -115,13 +115,16 @@ func matches(list []string, v string) bool {
 }
 
 // Candidates returns the servers of f.Provider that satisfy f, excluding
-// secure-core, Tor and free servers. An unknown provider yields no servers.
+// secure-core, Tor and free servers and any hostname shared with one. An unknown provider yields no servers.
 func Candidates(list []byte, f Filter) ([]Server, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(list, &top); err != nil {
 		return nil, fmt.Errorf("parse server list: %w", err)
 	}
-	raw, ok := top[strings.ToLower(strings.TrimSpace(f.Provider))]
+	// The Kubarr backend writes ids like "private_internet_access"; gluetun's
+	// list keys use spaces.
+	key := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(f.Provider)), "_", " ")
+	raw, ok := top[key]
 	if !ok {
 		return nil, nil
 	}
@@ -131,9 +134,19 @@ func Candidates(list []byte, f Filter) ([]Server, error) {
 	if err := json.Unmarshal(raw, &prov); err != nil {
 		return nil, fmt.Errorf("parse provider %q: %w", f.Provider, err)
 	}
-	var out []Server
+	// gluetun's filters never exclude secure-core/Tor/free entries, and some
+	// hostnames are shared with such a sibling that has different IPs. Pinning
+	// such a hostname could connect to the sibling, so drop it entirely.
+	type hostKey struct{ vpn, host string }
+	tainted := map[hostKey]bool{}
 	for _, r := range prov.Servers {
 		if r.SecureCore || r.Tor || r.Free {
+			tainted[hostKey{strings.ToLower(r.VPN), strings.ToLower(r.Hostname)}] = true
+		}
+	}
+	var out []Server
+	for _, r := range prov.Servers {
+		if r.SecureCore || r.Tor || r.Free || tainted[hostKey{strings.ToLower(r.VPN), strings.ToLower(r.Hostname)}] {
 			continue
 		}
 		if f.VPNType != "" && !strings.EqualFold(f.VPNType, r.VPN) {

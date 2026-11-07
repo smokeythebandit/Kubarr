@@ -86,7 +86,11 @@ func (h HTTPTester) Run(ctx context.Context, d time.Duration) error {
 			if resp.StatusCode/100 != 2 {
 				return 0, fmt.Errorf("%s: %s", u, resp.Status)
 			}
-			return io.Copy(io.Discard, io.LimitReader(resp.Body, remaining))
+			n, err := io.Copy(io.Discard, io.LimitReader(resp.Body, remaining))
+			if err == nil && n == 0 {
+				err = fmt.Errorf("%s: empty response body", u)
+			}
+			return n, err
 		}()
 		remaining -= n
 		if ctx.Err() != nil {

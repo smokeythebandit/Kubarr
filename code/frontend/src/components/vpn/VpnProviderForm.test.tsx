@@ -69,7 +69,7 @@ describe('VpnProviderForm WireGuard server filters', () => {
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'protonvpn' } });
     fireEvent.change(screen.getByPlaceholderText('My VPN'), { target: { value: 'VPN' } });
     fireEvent.change(screen.getByPlaceholderText('Enter WireGuard private key'), { target: { value: 'k' } });
-    fireEvent.change(screen.getByPlaceholderText('US,UK'), { target: { value: 'Netherlands' } });
+    fireEvent.change(screen.getByPlaceholderText('Netherlands,Switzerland'), { target: { value: 'Netherlands' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
 
     await waitFor(() =>

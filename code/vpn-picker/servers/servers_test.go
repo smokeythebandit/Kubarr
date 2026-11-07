@@ -117,3 +117,32 @@ func TestSample(t *testing.T) {
 		t.Fatal("input mutated")
 	}
 }
+
+const sharedHostFixture = `{
+ "protonvpn": {"version": 4, "timestamp": 1, "servers": [
+  {"vpn":"wireguard","country":"Argentina","city":"Buenos Aires","server_name":"AR#26","hostname":"node-ar-04.protonvpn.net","port_forward":true,"ips":["149.102.224.161"]},
+  {"vpn":"wireguard","country":"Argentina","city":"Buenos Aires","server_name":"CH-AR#2","hostname":"node-ar-04.protonvpn.net","secure_core":true,"ips":["62.169.136.105"]},
+  {"vpn":"wireguard","country":"Argentina","city":"Buenos Aires","server_name":"AR#27","hostname":"node-ar-05.protonvpn.net","ips":["149.102.224.162"]},
+  {"vpn":"openvpn","country":"Argentina","city":"Buenos Aires","server_name":"AR#28","hostname":"node-ar-05.protonvpn.net","ips":["149.102.224.163"]},
+  {"vpn":"openvpn","country":"Argentina","city":"Buenos Aires","server_name":"CH-AR#3","hostname":"node-ar-05.protonvpn.net","secure_core":true,"ips":["62.169.136.106"]}
+ ]}
+}`
+
+func TestCandidatesDropsHostnameSharedWithExcludedEntry(t *testing.T) {
+	got, err := Candidates([]byte(sharedHostFixture), Filter{Provider: "protonvpn", VPNType: "wireguard"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ar-04 is shared with a secure-core wireguard entry; ar-05's secure-core
+	// sibling is openvpn, so it does not affect wireguard.
+	if len(got) != 1 || got[0].Hostname != "node-ar-05.protonvpn.net" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestCandidatesNormalisesUnderscoreProvider(t *testing.T) {
+	got, _ := Candidates([]byte(fixture), Filter{Provider: " Private_Internet_Access ", VPNType: "wireguard"})
+	if len(got) != 1 || got[0].Hostname != "pia-nl" {
+		t.Fatalf("got %+v", got)
+	}
+}

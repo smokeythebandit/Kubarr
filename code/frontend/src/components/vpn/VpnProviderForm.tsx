@@ -81,7 +81,7 @@ export function VpnProviderForm({
                 type="text"
                 value={serverCountries}
                 onChange={e => setServerCountries(e.target.value)}
-                placeholder="US,UK"
+                placeholder="Netherlands,Switzerland"
                 className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
               />
             </div>
