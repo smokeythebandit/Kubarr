@@ -105,6 +105,17 @@ fn kube_client_with_owner(
                     ("DELETE", named_secret_path.as_str(), 404),
                 ]
             };
+            if request.method() == "PATCH" && request.uri().path() == ns_path {
+                // Pod Security labelling is asserted by its own test; it is
+                // not part of the scripted request sequence.
+                let ns = json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}});
+                return Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(200)
+                        .body(Body::from(serde_json::to_vec(&ns).unwrap()))
+                        .unwrap(),
+                );
+            }
             let index = recorded.lock().unwrap().len();
             let (method, path, status) = steps.get(index).expect("unexpected kube request");
             assert_eq!(request.method(), *method);
@@ -665,6 +676,10 @@ async fn deploy_app_successfully_deletes_unassigned_managed_vpn_secret_after_hel
                     "apiVersion": "v1", "kind": "Namespace",
                     "metadata": {"name": "regression-vpn-cleanup"}
                 }),
+                ("PATCH", "/api/v1/namespaces/regression-vpn-cleanup") => json!({
+                    "apiVersion": "v1", "kind": "Namespace",
+                    "metadata": {"name": "regression-vpn-cleanup"}
+                }),
                 (
                     "DELETE",
                     "/api/v1/namespaces/regression-vpn-cleanup/secrets/vpn-regression-vpn-cleanup",
@@ -691,14 +706,14 @@ async fn deploy_app_successfully_deletes_unassigned_managed_vpn_secret_after_hel
     DeploymentManager::with_db(&k8s, &catalog, &db)
         .deploy_app_with_command(&request, None, |_| {
             *called.lock().unwrap() = true;
-            assert_eq!(requests.lock().unwrap().len(), 1);
+            assert_eq!(requests.lock().unwrap().len(), 2);
             Ok("deployed".into())
         })
         .await
         .unwrap();
 
     assert!(*helm_called.lock().unwrap());
-    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert_eq!(requests.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -744,6 +759,10 @@ async fn deploy_app_vpn_secret_cleanup_forbidden_fails_after_successful_helm() {
                     200,
                     json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": app_name}}),
                 ),
+                ("PATCH", "/api/v1/namespaces/regression-vpn-cleanup-denied") => (
+                    200,
+                    json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": app_name}}),
+                ),
                 (
                     "DELETE",
                     "/api/v1/namespaces/regression-vpn-cleanup-denied/secrets/vpn-regression-vpn-cleanup-denied",
@@ -777,7 +796,7 @@ async fn deploy_app_vpn_secret_cleanup_forbidden_fails_after_successful_helm() {
         .to_string();
 
     assert_eq!(helm_calls, 1);
-    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert_eq!(requests.lock().unwrap().len(), 3);
     assert!(error.contains("VPN sidecar was removed"), "{error}");
     assert!(error.contains("failed to delete managed Secret"), "{error}");
     assert!(error.contains("injected cleanup denial"), "{error}");
@@ -949,6 +968,10 @@ async fn deploy_app_vpn_secret_create_failure_prevents_helm_execution() {
                     200,
                     json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": app_name}}),
                 ),
+                ("PATCH", "/api/v1/namespaces/regression-secret-denied") => (
+                    200,
+                    json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": app_name}}),
+                ),
                 (
                     "DELETE",
                     "/api/v1/namespaces/regression-secret-denied/secrets/vpn-regression-secret-denied",
@@ -981,7 +1004,7 @@ async fn deploy_app_vpn_secret_create_failure_prevents_helm_execution() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("injected secret denial"), "{error}");
-    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(requests.lock().unwrap().len(), 4);
 }
 
 #[tokio::test]
@@ -1444,7 +1467,7 @@ async fn managed_key_secrets_precede_helm_and_keys_stay_out_of_args() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(method, _, _)| method == "PATCH")
+            .filter(|(method, path, _)| method == "PATCH" && path.contains("/secrets/"))
             .map(|(_, _, body)| body.clone())
             .collect();
         assert_eq!(patches.len(), links.len(), "{app_name}");
@@ -1496,4 +1519,112 @@ async fn apps_outside_every_managed_link_get_no_secret_or_value() {
         2,
         "no Secret request for Plex"
     );
+}
+
+#[tokio::test]
+async fn app_namespace_pod_security_follows_vpn_and_precedes_helm() {
+    // (app, is_system, vpn assigned, expected namespace PATCH labels)
+    let privileged = json!("privileged");
+    let cases = [
+        ("qbittorrent", false, true, Some(privileged)),
+        ("qbittorrent", false, false, Some(Value::Null)),
+        ("qbittorrent", true, false, None),
+    ];
+    for (app_name, is_system, with_vpn, expected) in cases {
+        let db = database(app_name).await;
+        if with_vpn {
+            let provider = vpn::create_vpn_provider(&db, vpn::CreateVpnProviderRequest {
+                name: "Regression VPN".into(),
+                vpn_type: vpn_provider::VpnType::WireGuard,
+                service_provider: Some("custom".into()),
+                credentials: json!({"private_key": PRIVATE_KEY, "preshared_key": PRESHARED_KEY, "addresses": ["10.2.0.2/32"]}),
+                enabled: true,
+                kill_switch: true,
+                firewall_outbound_subnets: SUBNETS.into(),
+            }).await.unwrap();
+            vpn::assign_vpn_to_app(
+                &db,
+                app_name,
+                vpn::AssignVpnRequest {
+                    vpn_provider_id: provider.id,
+                    kill_switch_override: None,
+                    port_forwarding: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let requests = Arc::new(Mutex::new(Vec::<(String, String, Value)>::new()));
+        let recorded = requests.clone();
+        let service = service_fn(move |request: Request<Body>| {
+            let recorded = recorded.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_owned();
+                let bytes = request.into_body().collect().await.unwrap().to_bytes();
+                let body: Value = if bytes.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&bytes).unwrap()
+                };
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), path.clone(), body.clone()));
+                let (status, response) = if path == "/api/v1/namespaces/qbittorrent" {
+                    (
+                        200,
+                        json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "qbittorrent"}}),
+                    )
+                } else if method == "POST" || method == "PATCH" {
+                    (201, body)
+                } else {
+                    (
+                        404,
+                        json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
+                        "code": 404, "reason": "NotFound", "message": "not found"}),
+                    )
+                };
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                        .unwrap(),
+                )
+            }
+        });
+        let k8s = K8sClient::from_client(Client::new(service, "default"));
+        let catalog = catalog(app_name, is_system);
+        let request: DeploymentRequest =
+            serde_json::from_value(json!({"app_name": app_name, "wait": false})).unwrap();
+        let mut before_helm = Vec::new();
+        DeploymentManager::with_db(&k8s, &catalog, &db)
+            .deploy_app_with_command(&request, None, |_| {
+                before_helm = requests.lock().unwrap().clone();
+                Ok("deployed".into())
+            })
+            .await
+            .unwrap();
+        let ns_patches: Vec<&Value> = before_helm
+            .iter()
+            .filter(|(method, path, _)| {
+                method == "PATCH" && path == "/api/v1/namespaces/qbittorrent"
+            })
+            .map(|(_, _, body)| body)
+            .collect();
+        match expected {
+            Some(level) => {
+                let labels: serde_json::Map<String, Value> = ["enforce", "audit", "warn"]
+                    .map(|mode| (format!("pod-security.kubernetes.io/{mode}"), level.clone()))
+                    .into_iter()
+                    .collect();
+                assert_eq!(
+                    ns_patches,
+                    [&json!({"metadata": {"labels": labels}})],
+                    "vpn={with_vpn}: one namespace PATCH before Helm"
+                );
+            }
+            None => assert!(ns_patches.is_empty(), "system app must not be patched"),
+        }
+    }
 }

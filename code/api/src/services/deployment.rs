@@ -358,6 +358,11 @@ impl<'a> DeploymentManager<'a> {
         } else {
             // VPN credentials must exist before Helm renders an app release.
             self.k8s.ensure_namespace(namespace).await?;
+            // The gluetun sidecar needs NET_ADMIN and a hostPath, which the
+            // cluster's default `baseline` Pod Security forbids.
+            self.k8s
+                .set_namespace_pod_security(namespace, vpn_config.is_some())
+                .await?;
             false
         };
 

@@ -147,3 +147,70 @@ async fn ensure_namespace_visibility_timeout_is_bounded() {
     assert!(remaining.lock().unwrap().is_empty());
     assert_eq!(start.elapsed(), Duration::from_secs(5));
 }
+
+/// A client that records every request's method, path, content type and JSON body.
+fn recording_client() -> (
+    K8sClient,
+    Arc<Mutex<Vec<(String, String, String, serde_json::Value)>>>,
+) {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = recorded.clone();
+    let service = service_fn(move |request: Request<Body>| {
+        let sink = sink.clone();
+        async move {
+            let method = request.method().to_string();
+            let path = request.uri().path().to_owned();
+            let content_type = request
+                .headers()
+                .get("content-type")
+                .map(|value| value.to_str().unwrap().to_owned())
+                .unwrap_or_default();
+            let bytes = request.into_body().collect().await.unwrap().to_bytes();
+            let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            sink.lock()
+                .unwrap()
+                .push((method, path, content_type, body));
+            let namespace = json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "regression"}});
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(200)
+                    .body(Body::from(serde_json::to_vec(&namespace).unwrap()))
+                    .unwrap(),
+            )
+        }
+    });
+    (
+        K8sClient::from_client(Client::new(service, "default")),
+        recorded,
+    )
+}
+
+async fn assert_pod_security_patch(privileged: bool, value: serde_json::Value) {
+    let (client, recorded) = recording_client();
+    client
+        .set_namespace_pod_security("regression", privileged)
+        .await
+        .unwrap();
+    let recorded = recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    let (method, path, content_type, body) = &recorded[0];
+    assert_eq!(method, "PATCH");
+    assert_eq!(path, "/api/v1/namespaces/regression");
+    assert_eq!(content_type, "application/merge-patch+json");
+    let labels = ["enforce", "audit", "warn"]
+        .map(|mode| (format!("pod-security.kubernetes.io/{mode}"), value.clone()));
+    assert_eq!(
+        *body,
+        json!({"metadata": {"labels": serde_json::Map::from_iter(labels)}})
+    );
+}
+
+#[tokio::test]
+async fn privileged_vpn_namespace_gets_three_labels() {
+    assert_pod_security_patch(true, json!("privileged")).await;
+}
+
+#[tokio::test]
+async fn disabling_vpn_removes_the_labels() {
+    assert_pod_security_patch(false, serde_json::Value::Null).await;
+}
