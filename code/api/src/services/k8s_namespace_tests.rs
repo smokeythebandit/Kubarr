@@ -148,11 +148,11 @@ async fn ensure_namespace_visibility_timeout_is_bounded() {
     assert_eq!(start.elapsed(), Duration::from_secs(5));
 }
 
+/// A recorded request: method, path, content type and JSON body.
+type Recorded = (String, String, String, serde_json::Value);
+
 /// A client that records every request's method, path, content type and JSON body.
-fn recording_client() -> (
-    K8sClient,
-    Arc<Mutex<Vec<(String, String, String, serde_json::Value)>>>,
-) {
+fn recording_client() -> (K8sClient, Arc<Mutex<Vec<Recorded>>>) {
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let sink = recorded.clone();
     let service = service_fn(move |request: Request<Body>| {

@@ -658,6 +658,77 @@ async fn deploy_app_namespace_failure_prevents_helm_execution() {
 }
 
 #[tokio::test]
+async fn pod_security_patch_failure_only_blocks_deploys_with_vpn() {
+    for with_vpn in [false, true] {
+        let app_name = "regression-psa-denied";
+        let db = database(app_name).await;
+        if with_vpn {
+            let provider = vpn::create_vpn_provider(&db, vpn::CreateVpnProviderRequest {
+                name: "Regression VPN".into(),
+                vpn_type: vpn_provider::VpnType::WireGuard,
+                service_provider: Some("custom".into()),
+                credentials: json!({"private_key": PRIVATE_KEY, "preshared_key": PRESHARED_KEY, "addresses": ["10.2.0.2/32"]}),
+                enabled: true,
+                kill_switch: true,
+                firewall_outbound_subnets: SUBNETS.into(),
+            }).await.unwrap();
+            vpn::assign_vpn_to_app(
+                &db,
+                app_name,
+                vpn::AssignVpnRequest {
+                    vpn_provider_id: provider.id,
+                    kill_switch_override: None,
+                    port_forwarding: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let service = service_fn(move |request: Request<Body>| async move {
+            let (status, body) = match request.method().as_str() {
+                "GET" => (
+                    200,
+                    json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": app_name}}),
+                ),
+                "PATCH" => (
+                    403,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": 403, "reason": "Forbidden", "message": "injected psa denial"}),
+                ),
+                _ => (
+                    404,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": 404, "reason": "NotFound", "message": "not found"}),
+                ),
+            };
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(status)
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+        });
+        let k8s = K8sClient::from_client(Client::new(service, "default"));
+        let catalog = catalog(app_name, false);
+        let request: DeploymentRequest =
+            serde_json::from_value(json!({"app_name": app_name})).unwrap();
+        let mut helm_calls = 0;
+        let result = DeploymentManager::with_db(&k8s, &catalog, &db)
+            .deploy_app_with_command(&request, None, |_| {
+                helm_calls += 1;
+                Ok("deployed".into())
+            })
+            .await;
+        if with_vpn {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("injected psa denial"), "{error}");
+            assert_eq!(helm_calls, 0, "Helm must not run without privileged");
+        } else {
+            result.unwrap();
+            assert_eq!(helm_calls, 1, "label cleanup failure must not block");
+        }
+    }
+}
+
+#[tokio::test]
 async fn deploy_app_successfully_deletes_unassigned_managed_vpn_secret_after_helm() {
     let app_name = "regression-vpn-cleanup";
     let requests = Arc::new(Mutex::new(Vec::new()));
