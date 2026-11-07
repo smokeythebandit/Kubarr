@@ -74,6 +74,14 @@ func (m *Monitor) round(ctx context.Context) {
 // Step performs one periodic check.
 func (m *Monitor) Step(ctx context.Context) {
 	cfg := m.Cfg.withDefaults()
+	if m.Baseline <= 0 {
+		// The last round failed: nothing to compare against. Retry the
+		// round itself once the cooldown has passed.
+		if cfg.Now().Sub(m.LastRound) >= cfg.Cooldown {
+			m.round(ctx)
+		}
+		return
+	}
 	rate, err := measure(cfg, m.M, func() error { return m.T.Run(ctx, cfg.TestDuration) })
 	if err != nil {
 		log.Printf("check: %v", err)

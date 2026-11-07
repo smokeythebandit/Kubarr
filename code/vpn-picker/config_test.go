@@ -66,7 +66,7 @@ func TestP2PFilterFromPickerP2P(t *testing.T) {
 func TestInvalidValuesError(t *testing.T) {
 	for _, kv := range [][2]string{
 		{"PICKER_INIT_BUDGET", "soon"}, {"PICKER_INTERVAL", "x"}, {"PICKER_COOLDOWN", "-1h"},
-		{"PICKER_TEST_SECONDS", "abc"}, {"PICKER_SHORTLIST", "many"},
+		{"PICKER_TEST_SECONDS", "abc"}, {"PICKER_SHORTLIST", "many"}, {"PICKER_DEGRADE_CHECKS", "0"},
 		{"PICKER_DEGRADE_THRESHOLD", "lots"}, {"PICKER_SWITCH_WHILE_RUNNING", "maybe"},
 	} {
 		if _, err := loadConfig(env(map[string]string{kv[0]: kv[1]})); err == nil {

@@ -46,10 +46,13 @@ type Tester interface {
 	Run(ctx context.Context, d time.Duration) error
 }
 
-// HTTPTester downloads from URLs (in order, next one on error) until d or 100 MB.
+// HTTPTester keeps downloading from URLs until d elapses or MaxBytes (default
+// 100 MB) have been read. On an error it moves to the next URL; it fails only
+// when every URL has failed in a row.
 type HTTPTester struct {
-	URLs   []string
-	Client *http.Client
+	URLs     []string
+	Client   *http.Client
+	MaxBytes int64
 }
 
 func (h HTTPTester) Run(ctx context.Context, d time.Duration) error {
@@ -59,31 +62,47 @@ func (h HTTPTester) Run(ctx context.Context, d time.Duration) error {
 	if client == nil {
 		client = &http.Client{}
 	}
-	var last error = errors.New("no test endpoints configured")
-	for _, u := range h.URLs {
-		err := func() error {
+	remaining := h.MaxBytes
+	if remaining <= 0 {
+		remaining = maxDownload
+	}
+	if len(h.URLs) == 0 {
+		return errors.New("no test endpoints configured")
+	}
+	var last error
+	failures := 0
+	for i := 0; remaining > 0 && ctx.Err() == nil; i++ {
+		u := h.URLs[i%len(h.URLs)]
+		n, err := func() (int64, error) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 			if err != nil {
-				return err
+				return 0, err
 			}
 			resp, err := client.Do(req)
 			if err != nil {
-				return err
+				return 0, err
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode/100 != 2 {
-				return fmt.Errorf("%s: %s", u, resp.Status)
+				return 0, fmt.Errorf("%s: %s", u, resp.Status)
 			}
-			_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDownload))
-			return err
+			return io.Copy(io.Discard, io.LimitReader(resp.Body, remaining))
 		}()
-		if err == nil || ctx.Err() != nil {
-			// The deadline ending the download is the normal outcome.
-			return nil
+		remaining -= n
+		if ctx.Err() != nil {
+			return nil // the deadline ending the download is the normal outcome
 		}
-		last = err
+		if err != nil {
+			last = err
+			failures++
+			if failures >= len(h.URLs) {
+				return last
+			}
+			continue
+		}
+		failures = 0
 	}
-	return last
+	return nil
 }
 
 // Config holds the round and monitor tunables.
@@ -163,19 +182,28 @@ func Round(ctx context.Context, c Switcher, short []servers.Server, m Meter, t T
 	}
 	var results []Result
 	bestIdx := -1
+	connected := "" // candidate gluetun is on and running
 	for _, s := range short {
 		if ctx.Err() != nil {
 			break
 		}
 		r := Result{Hostname: s.Hostname}
+		connected = ""
 		if err := c.Switch(ctx, s.Hostname); err != nil {
 			r.Err = err.Error()
 		} else if err := c.WaitRunning(ctx, cfg.RunTimeout); err != nil {
 			r.Err = err.Error()
-		} else if bps, err := measure(cfg, m, func() error { return t.Run(ctx, cfg.TestDuration) }); err != nil {
-			r.Err = err.Error()
 		} else {
-			r.BytesPerSec = bps
+			connected = s.Hostname
+			bps, err := measure(cfg, m, func() error { return t.Run(ctx, cfg.TestDuration) })
+			if err != nil {
+				r.Err = err.Error()
+			} else {
+				r.BytesPerSec = bps
+			}
+		}
+		if r.Err == "" {
+			bps := r.BytesPerSec
 			if bestIdx < 0 || bps > results[bestIdx].BytesPerSec {
 				bestIdx = len(results)
 			}
@@ -190,6 +218,9 @@ func Round(ctx context.Context, c Switcher, short []servers.Server, m Meter, t T
 		return short[0], results, errors.New("no candidate worked; returned to first shortlist entry")
 	}
 	best := short[bestIdx]
+	if connected == best.Hostname {
+		return best, results, nil // already on the winner; no reconnect
+	}
 	if err := c.Switch(ctx, best.Hostname); err != nil {
 		return best, results, err
 	}

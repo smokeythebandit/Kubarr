@@ -122,6 +122,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 			errs = append(errs, fmt.Sprintf("PICKER_TEST_SECONDS=%q: not a positive number of seconds", v))
 		}
 	}
+	if c.DegradeChecks < 1 {
+		errs = append(errs, fmt.Sprintf("PICKER_DEGRADE_CHECKS=%q: must be at least 1", getenv("PICKER_DEGRADE_CHECKS")))
+	}
 	if v := getenv("PICKER_DEGRADE_THRESHOLD"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil || f <= 0 || f > 1 {

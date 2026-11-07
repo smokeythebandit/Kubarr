@@ -260,15 +260,90 @@ func TestHTTPTesterFallsBackToNextURL(t *testing.T) {
 		w.Write(make([]byte, 1024))
 	}))
 	defer good.Close()
-	tr := HTTPTester{URLs: []string{bad.URL, good.URL}}
-	if err := tr.Run(context.Background(), time.Second); err != nil {
+	tr := HTTPTester{URLs: []string{bad.URL, good.URL}, MaxBytes: 2048}
+	if err := tr.Run(context.Background(), 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if hits != 1 {
+	if hits != 2 {
 		t.Fatalf("good hits=%d", hits)
 	}
 	if err := (HTTPTester{URLs: []string{bad.URL}}).Run(context.Background(), time.Second); err == nil {
 		t.Fatal("expected error when all URLs fail")
+	}
+}
+
+func TestHTTPTesterRepeatsUntilDeadline(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write(make([]byte, 1024))
+	}))
+	defer srv.Close()
+	start := time.Now()
+	if err := (HTTPTester{URLs: []string{srv.URL}}).Run(context.Background(), 150*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if el := time.Since(start); el < 140*time.Millisecond || el > 2*time.Second {
+		t.Fatalf("elapsed %s", el)
+	}
+	if hits < 2 {
+		t.Fatalf("expected repeated requests, got %d", hits)
+	}
+}
+
+func TestHTTPTesterStopsAtByteCap(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write(make([]byte, 1024))
+	}))
+	defer srv.Close()
+	start := time.Now()
+	if err := (HTTPTester{URLs: []string{srv.URL}, MaxBytes: 4096}).Run(context.Background(), 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 3*time.Second || hits != 4 {
+		t.Fatalf("hits=%d elapsed=%s", hits, time.Since(start))
+	}
+}
+
+func TestRoundDoesNotReconnectWhenLastCandidateIsBest(t *testing.T) {
+	w := newWorld()
+	w.rate = map[string]float64{"a": 5e6, "b": 20e6}
+	best, _, err := Round(context.Background(), w, sv("a", "b"), w, w, w.cfg(t.TempDir()))
+	if err != nil || best.Hostname != "b" {
+		t.Fatalf("best=%s err=%v", best.Hostname, err)
+	}
+	if len(w.switches) != 2 {
+		t.Fatalf("expected 2 switches, got %v", w.switches)
+	}
+}
+
+func TestFailedRoundIsRetriedAfterCooldownAndNeverReadsAsDegraded(t *testing.T) {
+	dir := t.TempDir()
+	w := newWorld()
+	w.dead["a"], w.dead["b"] = true, true
+	writeShortlist(t, dir, sv("a", "b"))
+	m, err := Startup(context.Background(), w, w, w, w.cfg(dir))
+	if err != nil || m == nil {
+		t.Fatalf("m=%v err=%v", m, err)
+	}
+	if m.Baseline != 0 {
+		t.Fatal("expected no baseline after failed round")
+	}
+	n := len(w.switches)
+	for i := 0; i < 5; i++ {
+		m.Step(context.Background())
+	}
+	if len(w.switches) != n || m.degraded != 0 {
+		t.Fatalf("checks ran without a baseline: switches=%d degraded=%d", len(w.switches), m.degraded)
+	}
+	w.dead = map[string]bool{}
+	w.rate = map[string]float64{"a": 5e6, "b": 20e6}
+	w.now = w.now.Add(7 * time.Hour)
+	m.Step(context.Background())
+	if m.Baseline != 20e6 || w.cur != "b" {
+		t.Fatalf("round not retried: baseline=%v cur=%s", m.Baseline, w.cur)
 	}
 }
 
