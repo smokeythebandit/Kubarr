@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.4
+FROM golang:1.26-alpine AS builder
+ARG VERSION=dev
+ARG CHANNEL=stable
+ARG COMMIT_HASH=unknown
+WORKDIR /src
+COPY code/vpn-picker/go.mod code/vpn-picker/go.sum ./
+RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod,sharing=locked \
+    go mod download
+COPY code/vpn-picker ./
+RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,id=go-build,target=/root/.cache/go-build,sharing=locked \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /vpn-picker .
+
+FROM gcr.io/distroless/static:nonroot
+LABEL org.opencontainers.image.version="${VERSION}"
+USER 1000:1000
+COPY --from=builder /vpn-picker /vpn-picker
+ENTRYPOINT ["/vpn-picker"]
