@@ -1353,7 +1353,7 @@ fn custom_config_cannot_set_a_managed_link() {
 
 #[tokio::test]
 async fn managed_key_secrets_precede_helm_and_keys_stay_out_of_args() {
-    for app_name in ["sonarr", "jellyfin", "sabnzbd", "lidarr"] {
+    for app_name in ["sonarr", "jellyfin", "sabnzbd", "lidarr", "prowlarr", "bazarr"] {
         let links: Vec<_> = crate::services::managed_key::ALL
             .iter()
             .filter(|link| link.applies_to(app_name))
