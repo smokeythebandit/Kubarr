@@ -1178,7 +1178,25 @@ fn build_wireguard_secret_data(
         );
     }
 
+    add_server_selection_secret_data(credentials, data);
+
     Ok(())
+}
+
+/// Shared by WireGuard and OpenVPN: comma-separated gluetun server filters.
+fn add_server_selection_secret_data(
+    credentials: &serde_json::Value,
+    data: &mut BTreeMap<String, String>,
+) {
+    if let Some(countries) = credentials.get("server_countries").and_then(|v| v.as_str()) {
+        data.insert("SERVER_COUNTRIES".to_string(), countries.to_string());
+    }
+    if let Some(cities) = credentials.get("server_cities").and_then(|v| v.as_str()) {
+        data.insert("SERVER_CITIES".to_string(), cities.to_string());
+    }
+    if let Some(hostnames) = credentials.get("server_hostnames").and_then(|v| v.as_str()) {
+        data.insert("SERVER_HOSTNAMES".to_string(), hostnames.to_string());
+    }
 }
 
 fn build_openvpn_secret_data(
@@ -1193,16 +1211,7 @@ fn build_openvpn_secret_data(
         data.insert("OPENVPN_PASSWORD".to_string(), password.to_string());
     }
 
-    // Server selection
-    if let Some(countries) = credentials.get("server_countries").and_then(|v| v.as_str()) {
-        data.insert("SERVER_COUNTRIES".to_string(), countries.to_string());
-    }
-    if let Some(cities) = credentials.get("server_cities").and_then(|v| v.as_str()) {
-        data.insert("SERVER_CITIES".to_string(), cities.to_string());
-    }
-    if let Some(hostnames) = credentials.get("server_hostnames").and_then(|v| v.as_str()) {
-        data.insert("SERVER_HOSTNAMES".to_string(), hostnames.to_string());
-    }
+    add_server_selection_secret_data(credentials, data);
 
     Ok(())
 }
@@ -1212,6 +1221,25 @@ mod tests {
     use super::*;
     use crate::models::vpn_provider::VpnType;
     use serde_json::json;
+
+    // -------------------------------------------------------------------------
+    // build_wireguard_secret_data tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_build_wireguard_secret_data_server_selection() {
+        let creds = json!({
+            "private_key": "k",
+            "addresses": ["10.2.0.2/32"],
+            "server_countries": "Netherlands,Belgium",
+            "server_hostnames": "nl-01.protonvpn.net"
+        });
+        let mut data = BTreeMap::new();
+        build_wireguard_secret_data(&creds, &mut data).unwrap();
+        assert_eq!(data["SERVER_COUNTRIES"], "Netherlands,Belgium");
+        assert_eq!(data["SERVER_HOSTNAMES"], "nl-01.protonvpn.net");
+        assert!(!data.contains_key("SERVER_CITIES"));
+    }
 
     // -------------------------------------------------------------------------
     // validate_credentials tests
