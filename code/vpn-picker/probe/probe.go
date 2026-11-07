@@ -3,12 +3,15 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/icmp"
@@ -38,12 +41,36 @@ func (p TCPPinger) RTT(ctx context.Context, ip netip.Addr) (time.Duration, error
 	var d net.Dialer
 	start := time.Now()
 	c, err := d.DialContext(ctx, "tcp", netip.AddrPortFrom(ip, uint16(p.Port)).String())
+	rtt := time.Since(start)
 	if err != nil {
+		// A refused connection (RST) proves the host answered.
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return rtt, nil
+		}
 		return 0, err
 	}
-	rtt := time.Since(start)
 	c.Close()
 	return rtt, nil
+}
+
+var icmpSeq atomic.Uint32
+
+// matchesEcho reports whether msg is the echo reply to our request: it must
+// come from target and carry the request's id and seq.
+func matchesEcho(peer net.Addr, msg *icmp.Message, target netip.Addr, id, seq int) bool {
+	ipa, ok := peer.(*net.IPAddr)
+	if !ok {
+		return false
+	}
+	src, ok := netip.AddrFromSlice(ipa.IP)
+	if !ok || src.Unmap() != target.Unmap() {
+		return false
+	}
+	if msg.Type != ipv4.ICMPTypeEchoReply && msg.Type != ipv6.ICMPTypeEchoReply {
+		return false
+	}
+	echo, ok := msg.Body.(*icmp.Echo)
+	return ok && echo.ID == id && echo.Seq == seq
 }
 
 // ICMPPinger sends ICMP echo using a raw (privileged) socket.
@@ -52,11 +79,10 @@ type ICMPPinger struct{}
 func (ICMPPinger) RTT(ctx context.Context, ip netip.Addr) (time.Duration, error) {
 	network, listen := "ip4:icmp", "0.0.0.0"
 	var reqType icmp.Type = ipv4.ICMPTypeEcho
-	var replyType icmp.Type = ipv4.ICMPTypeEchoReply
 	proto := 1
 	if ip.Is6() {
 		network, listen, proto = "ip6:ipv6-icmp", "::", 58
-		reqType, replyType = ipv6.ICMPTypeEchoRequest, ipv6.ICMPTypeEchoReply
+		reqType = ipv6.ICMPTypeEchoRequest
 	}
 	conn, err := icmp.ListenPacket(network, listen)
 	if err != nil {
@@ -69,7 +95,8 @@ func (ICMPPinger) RTT(ctx context.Context, ip netip.Addr) (time.Duration, error)
 	}
 	conn.SetDeadline(deadline)
 	id := os.Getpid() & 0xffff
-	msg := icmp.Message{Type: reqType, Body: &icmp.Echo{ID: id, Seq: 1, Data: []byte("kubarr")}}
+	seq := int(icmpSeq.Add(1) & 0xffff)
+	msg := icmp.Message{Type: reqType, Body: &icmp.Echo{ID: id, Seq: seq, Data: []byte("kubarr")}}
 	wb, err := msg.Marshal(nil)
 	if err != nil {
 		return 0, err
@@ -80,7 +107,7 @@ func (ICMPPinger) RTT(ctx context.Context, ip netip.Addr) (time.Duration, error)
 	}
 	buf := make([]byte, 1500)
 	for {
-		n, _, err := conn.ReadFrom(buf)
+		n, peer, err := conn.ReadFrom(buf)
 		if err != nil {
 			return 0, err
 		}
@@ -88,7 +115,7 @@ func (ICMPPinger) RTT(ctx context.Context, ip netip.Addr) (time.Duration, error)
 		if err != nil {
 			continue
 		}
-		if echo, ok := rm.Body.(*icmp.Echo); ok && rm.Type == replyType && echo.ID == id && echo.Seq == 1 {
+		if matchesEcho(peer, rm, ip, id, seq) {
 			return time.Since(start), nil
 		}
 		if ctx.Err() != nil {

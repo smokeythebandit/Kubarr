@@ -3,10 +3,14 @@ package probe
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 
 	"github.com/smokeythebandit/kubarr-vpn-picker/servers"
 )
@@ -96,4 +100,70 @@ func TestRankRespectsContextDeadline(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("got %+v", got)
 	}
+}
+
+func echoMsg(t icmp.Type, id, seq int) *icmp.Message {
+	return &icmp.Message{Type: t, Body: &icmp.Echo{ID: id, Seq: seq}}
+}
+
+func TestMatchesEcho(t *testing.T) {
+	target := netip.MustParseAddr("9.9.9.9")
+	peer := &net.IPAddr{IP: net.ParseIP("9.9.9.9")}
+	reply := echoMsg(ipv4.ICMPTypeEchoReply, 7, 3)
+	if !matchesEcho(peer, reply, target, 7, 3) {
+		t.Fatal("right source/id/seq should match")
+	}
+	if matchesEcho(&net.IPAddr{IP: net.ParseIP("8.8.8.8")}, reply, target, 7, 3) {
+		t.Fatal("wrong source matched")
+	}
+	if matchesEcho(peer, reply, target, 7, 4) {
+		t.Fatal("wrong seq matched")
+	}
+	if matchesEcho(peer, reply, target, 8, 3) {
+		t.Fatal("wrong id matched")
+	}
+	if matchesEcho(peer, echoMsg(ipv4.ICMPTypeEcho, 7, 3), target, 7, 3) {
+		t.Fatal("request matched as reply")
+	}
+}
+
+func TestTCPPingerRefusedCountsAsSuccess(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	rtt, err := TCPPinger{Port: port}.RTT(context.Background(), netip.MustParseAddr("127.0.0.1"))
+	if err != nil || rtt <= 0 {
+		t.Fatalf("rtt=%v err=%v", rtt, err)
+	}
+}
+
+func TestTCPPingerTimeoutIsError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := (TCPPinger{Port: 443}).RTT(ctx, netip.MustParseAddr("10.255.255.1")); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestRankReturnsOnlyFinishedBeforeDeadline(t *testing.T) {
+	f := &slowFake{slow: netip.MustParseAddr("1.0.0.2")}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	got := Rank(ctx, []servers.Server{srv("fast", "1.0.0.1"), srv("slow", "1.0.0.2")}, f, 5)
+	if len(got) != 1 || got[0].Hostname != "fast" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+type slowFake struct{ slow netip.Addr }
+
+func (f *slowFake) RTT(ctx context.Context, ip netip.Addr) (time.Duration, error) {
+	if ip == f.slow {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	return time.Millisecond, nil
 }
