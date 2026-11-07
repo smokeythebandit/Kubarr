@@ -2,7 +2,8 @@
 //!
 //! Some applications need a key that two charts must agree on before either
 //! has run: Jellyfin and the managers that refresh its library, SABnzbd and
-//! the managers that queue downloads with it. Shipping a fixed key in the
+//! the managers that queue downloads with it, Prowlarr and Bazarr and the
+//! managers that register with them. Shipping a fixed key in the
 //! chart makes it a published default credential, and letting each
 //! application generate its own leaves the other side unable to guess it.
 //!
@@ -66,8 +67,32 @@ pub const SABNZBD: ManagedKey = ManagedKey {
     refusal: "sets the SABnzbd link, which Kubarr manages",
 };
 
+/// Prowlarr registers each manager as an application and pushes its indexers
+/// to it, but the managers register themselves, so they must call Prowlarr's
+/// API before anyone could copy its self-generated key out of `config.xml`.
+pub const PROWLARR: ManagedKey = ManagedKey {
+    setting_key: "prowlarr_api_key",
+    secret_name: "kubarr-prowlarr-api-key",
+    helm_root: "prowlarrIntegration",
+    description: "API key Sonarr, Radarr and Lidarr use to register with Prowlarr",
+    participants: &["prowlarr", "sonarr", "radarr", "lidarr"],
+    refusal: "sets the Prowlarr link, which Kubarr manages",
+};
+
+/// Bazarr reads the series and movie lists with each manager's key, which only
+/// the manager knows, so the managers switch themselves on in Bazarr through
+/// its settings API, with a key Bazarr is given before it first starts.
+pub const BAZARR: ManagedKey = ManagedKey {
+    setting_key: "bazarr_api_key",
+    secret_name: "kubarr-bazarr-api-key",
+    helm_root: "bazarrIntegration",
+    description: "API key Sonarr and Radarr use to connect themselves in Bazarr",
+    participants: &["bazarr", "sonarr", "radarr"],
+    refusal: "sets the Bazarr link, which Kubarr manages",
+};
+
 /// Every managed key, so a new one is wired into deployment by adding it here.
-pub const ALL: &[&ManagedKey] = &[&JELLYFIN, &SABNZBD];
+pub const ALL: &[&ManagedKey] = &[&JELLYFIN, &SABNZBD, &PROWLARR, &BAZARR];
 
 impl ManagedKey {
     pub fn applies_to(&self, app_name: &str) -> bool {
@@ -189,6 +214,8 @@ mod tests {
         assert!(!valid_key("0123456789abcdef0123456789abcde,"));
         assert!(JELLYFIN.checked("x".into()).is_err());
         assert!(SABNZBD.checked("x".into()).is_err());
+        assert!(PROWLARR.checked("x".into()).is_err());
+        assert!(BAZARR.checked("x".into()).is_err());
     }
 
     #[test]
@@ -212,6 +239,20 @@ mod tests {
             "jellyfin",
         ] {
             assert!(!SABNZBD.applies_to(app), "{app}");
+        }
+        for app in ["prowlarr", "sonarr", "radarr", "lidarr"] {
+            assert!(PROWLARR.applies_to(app), "{app}");
+        }
+        // Jackett is queried with its own key and needs no registration.
+        for app in ["jackett", "qbittorrent", "sabnzbd", "jellyfin"] {
+            assert!(!PROWLARR.applies_to(app), "{app}");
+        }
+        for app in ["bazarr", "sonarr", "radarr"] {
+            assert!(BAZARR.applies_to(app), "{app}");
+        }
+        // Bazarr handles subtitles for series and movies only.
+        for app in ["lidarr", "prowlarr", "jellyfin"] {
+            assert!(!BAZARR.applies_to(app), "{app}");
         }
     }
 
