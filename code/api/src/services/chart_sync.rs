@@ -1,6 +1,6 @@
 //! Chart sync service
 //!
-//! Discovers charts from GitHub and pulls them from an OCI registry
+//! Discovers charts from the GitHub source archive and pulls them from an OCI registry
 //! so the catalog always reflects the latest published versions.
 
 use std::collections::{HashSet, VecDeque};
@@ -16,14 +16,6 @@ use serde::Deserialize;
 use crate::config::CONFIG;
 use crate::models::app_state;
 use crate::state::SharedCatalog;
-
-/// GitHub Contents API entry
-#[derive(Debug, Deserialize)]
-struct GitHubContent {
-    name: String,
-    #[serde(rename = "type")]
-    content_type: String,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DiscoveredChart {
@@ -141,16 +133,8 @@ impl ChartSyncService {
         let charts = if let Some(source_dir) = CONFIG.charts.source_dir.as_deref() {
             discover_charts_from_local_source(source_dir)?
         } else {
-            match self.discover_charts().await {
-                Ok(charts) => charts,
-                Err(e) => {
-                    tracing::warn!(
-                        "Chart sync: GitHub Contents API discovery failed, trying archive fallback: {}",
-                        e
-                    );
-                    self.discover_charts_from_archive().await?
-                }
-            }
+            // The source archive is not counted against the GitHub API rate limit.
+            self.discover_charts_from_archive().await?
         };
 
         if charts.is_empty() {
@@ -158,36 +142,78 @@ impl ChartSyncService {
             return Ok(());
         }
 
-        self.sync_discovered_with(charts, |chart| {
-            // Helm/tar/filesystem work is blocking; keep it off the async
-            // workers without re-entering the runtime (a nested `block_on`
-            // here panics the timer driver if the runtime shuts down while a
-            // sync is in flight, taking the whole process down with it).
-            let service = self.clone();
-            async move {
-                tokio::task::spawn_blocking(move || service.pull_chart(&chart))
-                    .await
-                    .map_err(|error| anyhow::anyhow!("pull task panicked: {error}"))?
-            }
-        })
+        let pull_service = self.clone();
+        let latest_service = self.clone();
+        self.sync_discovered_with(
+            charts,
+            |chart| {
+                // Helm/tar/filesystem work is blocking; keep it off the async
+                // workers without re-entering the runtime (a nested `block_on`
+                // here panics the timer driver if the runtime shuts down while a
+                // sync is in flight, taking the whole process down with it).
+                let service = pull_service.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || service.pull_chart(&chart))
+                        .await
+                        .map_err(|error| anyhow::anyhow!("pull task panicked: {error}"))?
+                }
+            },
+            move |name| {
+                let service = latest_service.clone();
+                async move { service.latest_published_version(&name).await }
+            },
+        )
         .await
     }
 
-    async fn sync_discovered_with<P, F>(
+    /// Newest version of `chart` published to the configured OCI registry.
+    async fn latest_published_version(&self, chart: &str) -> anyhow::Result<String> {
+        let (base, repository) =
+            registry_endpoint(&CONFIG.charts.registry, CONFIG.charts.plain_http)?;
+        let tags = list_chart_tags(&self.client, &base, &repository, chart).await?;
+        newest_published_version(&tags)
+            .ok_or_else(|| anyhow::anyhow!("no published versions of {chart} in the registry"))
+    }
+
+    async fn sync_discovered_with<P, F, L, G>(
         &self,
         charts: Vec<DiscoveredChart>,
         mut pull: P,
+        mut latest_published: L,
     ) -> anyhow::Result<()>
     where
         P: FnMut(DiscoveredChart) -> F,
         F: std::future::Future<Output = anyhow::Result<()>>,
+        L: FnMut(String) -> G,
+        G: std::future::Future<Output = anyhow::Result<String>>,
     {
         let mut synced = 0usize;
         let mut failures = Vec::new();
         for chart in charts {
             let name = chart.name.clone();
             let version = chart.version.clone();
-            match pull(chart).await {
+            let mut result = pull(chart.clone()).await;
+            if let Err(error) = &result {
+                if is_missing_version_error(error) {
+                    result = match latest_published(name.clone()).await {
+                        Ok(fallback) if fallback != version => {
+                            tracing::warn!(
+                                "Chart sync: {name} {version} is not published to the registry, using newest published version {fallback}"
+                            );
+                            pull(DiscoveredChart {
+                                name: name.clone(),
+                                version: fallback,
+                            })
+                            .await
+                        }
+                        Ok(_) => result,
+                        Err(lookup) => Err(anyhow::anyhow!(
+                            "{error}; registry fallback lookup failed: {lookup}"
+                        )),
+                    };
+                }
+            }
+            match result {
                 Ok(()) => synced += 1,
                 Err(error) => {
                     tracing::warn!("Chart sync: failed to pull {name} {version}: {error}");
@@ -219,67 +245,6 @@ impl ChartSyncService {
     /// pool per chart, so async workers and HTTP probes are never starved.
     pub async fn sync_on_blocking_thread(self: Arc<Self>) -> anyhow::Result<()> {
         self.sync().await
-    }
-
-    /// Query the GitHub Contents API to discover which chart directories exist.
-    async fn discover_charts(&self) -> anyhow::Result<Vec<DiscoveredChart>> {
-        let mut charts = Vec::new();
-        let mut dirs = VecDeque::from([String::new()]);
-
-        while let Some(dir) = dirs.pop_front() {
-            let url = if dir.is_empty() {
-                format!(
-                    "https://api.github.com/repos/{}/contents/?ref={}",
-                    CONFIG.charts.repo, CONFIG.charts.git_ref,
-                )
-            } else {
-                format!(
-                    "https://api.github.com/repos/{}/contents/{}?ref={}",
-                    CONFIG.charts.repo, dir, CONFIG.charts.git_ref,
-                )
-            };
-
-            let resp = self.client.get(&url).send().await?.error_for_status()?;
-            let entries: Vec<GitHubContent> = resp.json().await?;
-            let has_chart = entries
-                .iter()
-                .any(|e| e.name == "Chart.yaml" && e.content_type == "file");
-
-            if has_chart {
-                if let Some(name) = dir.rsplit('/').next() {
-                    let url = format!(
-                        "https://raw.githubusercontent.com/{}/{}/{}/Chart.yaml",
-                        CONFIG.charts.repo, CONFIG.charts.git_ref, dir,
-                    );
-                    let content = self
-                        .client
-                        .get(url)
-                        .send()
-                        .await?
-                        .error_for_status()?
-                        .text()
-                        .await?;
-                    charts.push(DiscoveredChart {
-                        name: name.to_string(),
-                        version: chart_version_from_yaml(&content)?,
-                    });
-                }
-                continue;
-            }
-
-            for entry in entries {
-                if entry.content_type == "dir" && !entry.name.starts_with('.') {
-                    dirs.push_back(if dir.is_empty() {
-                        entry.name
-                    } else {
-                        format!("{}/{}", dir, entry.name)
-                    });
-                }
-            }
-        }
-
-        tracing::debug!("Chart sync: discovered {} charts from GitHub", charts.len());
-        Ok(charts)
     }
 
     /// Download the source archive and discover charts without using the GitHub API.
@@ -408,6 +373,184 @@ impl ChartSyncService {
         tracing::debug!("Chart sync: pulled {} {}", chart.name, chart.version);
         Ok(())
     }
+}
+
+/// Helm cannot say "no such tag" in a structured way; its error text contains `not found`.
+fn is_missing_version_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains("not found")
+}
+
+/// Helm stores `+` in chart versions as `_` in OCI tags.
+#[cfg(test)]
+fn version_to_oci_tag(version: &str) -> String {
+    version.replace('+', "_")
+}
+
+fn oci_tag_to_version(tag: &str) -> Option<String> {
+    let version = tag.replace('_', "+");
+    validate_chart_version(&version).ok()?;
+    Some(version)
+}
+
+/// Sort key: semver core, releases above prereleases, then build metadata
+/// compared numerically per dot-separated part.
+fn version_sort_key(version: &str) -> (Vec<u64>, bool, String, Vec<(u64, String)>) {
+    let (without_build, build) = version.split_once('+').unwrap_or((version, ""));
+    let (core, prerelease) = without_build.split_once('-').unwrap_or((without_build, ""));
+    let core = core
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0))
+        .collect();
+    let build = build
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.parse::<u64>() {
+            Ok(number) => (number, String::new()),
+            Err(_) => (u64::MAX, part.to_string()),
+        })
+        .collect();
+    (core, prerelease.is_empty(), prerelease.to_string(), build)
+}
+
+fn newest_published_version(tags: &[String]) -> Option<String> {
+    tags.iter()
+        .filter_map(|tag| oci_tag_to_version(tag))
+        .max_by_key(|version| version_sort_key(version))
+}
+
+/// Split `oci://host/path` into (`scheme://host`, `path`).
+fn registry_endpoint(registry: &str, plain_http: bool) -> anyhow::Result<(String, String)> {
+    let rest = registry
+        .strip_prefix("oci://")
+        .ok_or_else(|| anyhow::anyhow!("registry '{registry}' is not an oci:// reference"))?;
+    let (host, path) = rest
+        .split_once('/')
+        .filter(|(host, path)| !host.is_empty() && !path.trim_matches('/').is_empty())
+        .ok_or_else(|| anyhow::anyhow!("registry '{registry}' has no host/path"))?;
+    let scheme = if plain_http { "http" } else { "https" };
+    Ok((
+        format!("{scheme}://{host}"),
+        path.trim_matches('/').to_string(),
+    ))
+}
+
+#[derive(Debug)]
+struct BearerChallenge {
+    realm: String,
+    service: Option<String>,
+    scope: Option<String>,
+}
+
+fn parse_bearer_challenge(header: &str) -> Option<BearerChallenge> {
+    let params = header.trim().strip_prefix("Bearer ")?;
+    let mut realm = None;
+    let mut service = None;
+    let mut scope = None;
+    let mut rest = params;
+    while let Some((key, after)) = rest.split_once("=\"") {
+        let (value, tail) = after.split_once('"')?;
+        match key.trim_matches(|c: char| c == ',' || c.is_whitespace()) {
+            "realm" => realm = Some(value.to_string()),
+            "service" => service = Some(value.to_string()),
+            "scope" => scope = Some(value.to_string()),
+            _ => {}
+        }
+        rest = tail;
+    }
+    Some(BearerChallenge {
+        realm: realm?,
+        service,
+        scope,
+    })
+}
+
+fn next_link(header: &str) -> Option<String> {
+    header.split(',').find_map(|part| {
+        let (target, params) = part.split_once(';')?;
+        let is_next = params.split(';').any(|param| {
+            let param = param.trim().replace('"', "");
+            param == "rel=next"
+        });
+        let target = target.trim().strip_prefix('<')?.strip_suffix('>')?;
+        is_next.then(|| target.to_string())
+    })
+}
+
+/// List every tag of `{base}/v2/{repository}/{chart}` via the OCI distribution API,
+/// answering a Bearer challenge with an anonymous token and following `Link` pagination.
+async fn list_chart_tags(
+    client: &reqwest::Client,
+    base: &str,
+    repository: &str,
+    chart: &str,
+) -> anyhow::Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct TagList {
+        tags: Option<Vec<String>>,
+    }
+    #[derive(Deserialize)]
+    struct Token {
+        token: Option<String>,
+        access_token: Option<String>,
+    }
+
+    let mut url = format!("{base}/v2/{repository}/{chart}/tags/list");
+    let mut token: Option<String> = None;
+    let mut tags = Vec::new();
+    // Bounds a misbehaving registry that keeps returning `next` links.
+    for _ in 0..100 {
+        let mut response = send_tag_request(client, &url, token.as_deref()).await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && token.is_none() {
+            let challenge = response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_bearer_challenge)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("registry returned 401 without a bearer challenge")
+                })?;
+            let mut request = client.get(&challenge.realm);
+            if let Some(service) = &challenge.service {
+                request = request.query(&[("service", service)]);
+            }
+            if let Some(scope) = &challenge.scope {
+                request = request.query(&[("scope", scope)]);
+            }
+            let body: Token = request.send().await?.error_for_status()?.json().await?;
+            token = Some(
+                body.token
+                    .or(body.access_token)
+                    .ok_or_else(|| anyhow::anyhow!("registry token response has no token"))?,
+            );
+            response = send_tag_request(client, &url, token.as_deref()).await?;
+        }
+        let response = response.error_for_status()?;
+        let next = response
+            .headers()
+            .get(reqwest::header::LINK)
+            .and_then(|value| value.to_str().ok())
+            .and_then(next_link);
+        let page: TagList = response.json().await?;
+        tags.extend(page.tags.unwrap_or_default());
+        match next {
+            Some(link) if link.starts_with("http://") || link.starts_with("https://") => url = link,
+            Some(link) => url = format!("{base}{link}"),
+            None => return Ok(tags),
+        }
+    }
+    anyhow::bail!("registry tag listing for {chart} did not terminate")
+}
+
+async fn send_tag_request(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+) -> anyhow::Result<reqwest::Response> {
+    let mut request = client.get(url);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    Ok(request.send().await?)
 }
 
 fn chart_version_from_yaml(content: &str) -> anyhow::Result<String> {
@@ -608,81 +751,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_content_deser_dir() {
-        let json = r#"{"name":"sonarr","type":"dir"}"#;
-        let entry: GitHubContent = serde_json::from_str(json).expect("deser");
-        assert_eq!(entry.name, "sonarr");
-        assert_eq!(entry.content_type, "dir");
-    }
-
-    #[test]
-    fn github_content_deser_file() {
-        let json = r#"{"name":"README.md","type":"file"}"#;
-        let entry: GitHubContent = serde_json::from_str(json).expect("deser");
-        assert_eq!(entry.name, "README.md");
-        assert_eq!(entry.content_type, "file");
-    }
-
-    #[test]
-    fn github_content_filter_dirs_only() {
-        let entries = vec![
-            GitHubContent {
-                name: "sonarr".to_string(),
-                content_type: "dir".to_string(),
-            },
-            GitHubContent {
-                name: "README.md".to_string(),
-                content_type: "file".to_string(),
-            },
-            GitHubContent {
-                name: ".github".to_string(),
-                content_type: "dir".to_string(),
-            },
-            GitHubContent {
-                name: "radarr".to_string(),
-                content_type: "dir".to_string(),
-            },
-        ];
-
-        // Simulate the filter logic from discover_charts
-        let names: Vec<String> = entries
-            .into_iter()
-            .filter(|e| e.content_type == "dir" && !e.name.starts_with('.'))
-            .map(|e| e.name)
-            .collect();
-
-        assert_eq!(names, vec!["sonarr", "radarr"]);
-    }
-
-    #[test]
     fn chart_sync_service_new() {
         use crate::services::catalog::AppCatalog;
         use std::sync::Arc;
         use tokio::sync::RwLock;
         let catalog = Arc::new(RwLock::new(AppCatalog::new()));
         let _svc = ChartSyncService::new(catalog);
-    }
-
-    #[test]
-    fn github_content_filter_excludes_dot_dirs() {
-        let entries = vec![
-            GitHubContent {
-                name: ".hidden".to_string(),
-                content_type: "dir".to_string(),
-            },
-            GitHubContent {
-                name: "visible".to_string(),
-                content_type: "dir".to_string(),
-            },
-        ];
-
-        let names: Vec<String> = entries
-            .into_iter()
-            .filter(|e| e.content_type == "dir" && !e.name.starts_with('.'))
-            .map(|e| e.name)
-            .collect();
-
-        assert_eq!(names, vec!["visible"]);
     }
 
     #[test]
@@ -709,6 +783,10 @@ mod tests {
         }
     }
 
+    async fn no_fallback(_name: String) -> anyhow::Result<String> {
+        anyhow::bail!("fallback not expected")
+    }
+
     fn test_service() -> Arc<ChartSyncService> {
         use crate::services::catalog::AppCatalog;
         use std::collections::HashMap;
@@ -719,16 +797,293 @@ mod tests {
         ))))
     }
 
+    #[test]
+    fn oci_tag_and_version_round_trip() {
+        assert_eq!(version_to_oci_tag("2.7.0+8"), "2.7.0_8");
+        assert_eq!(oci_tag_to_version("2.7.0_8").as_deref(), Some("2.7.0+8"));
+        assert_eq!(oci_tag_to_version("1.0.0").as_deref(), Some("1.0.0"));
+        assert_eq!(
+            oci_tag_to_version("1.29.2_5.18").as_deref(),
+            Some("1.29.2+5.18")
+        );
+        assert_eq!(oci_tag_to_version("latest"), None);
+        assert_eq!(oci_tag_to_version("sha256-abc.sig"), None);
+    }
+
+    #[test]
+    fn newest_version_orders_core_then_numeric_build() {
+        let tags = |list: &[&str]| list.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            newest_published_version(&tags(&["2.7.0_9", "2.7.0_10", "2.6.9_99", "latest"]))
+                .as_deref(),
+            Some("2.7.0+10")
+        );
+        assert_eq!(
+            newest_published_version(&tags(&["1.29.2_5.9", "1.29.2_5.18", "1.29.1_7.1"]))
+                .as_deref(),
+            Some("1.29.2+5.18")
+        );
+        assert_eq!(
+            newest_published_version(&tags(&["1.0.0-rc.1", "1.0.0", "bogus", "x_y"])).as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(newest_published_version(&tags(&["latest", "nope"])), None);
+        assert_eq!(newest_published_version(&[]), None);
+    }
+
+    #[test]
+    fn registry_endpoint_parses_oci_references() {
+        assert_eq!(
+            registry_endpoint("oci://ghcr.io/smokeythebandit/kubarr-charts", false).expect("ok"),
+            (
+                "https://ghcr.io".to_string(),
+                "smokeythebandit/kubarr-charts".to_string()
+            )
+        );
+        assert_eq!(
+            registry_endpoint("oci://registry.local:5000/charts", true).expect("ok"),
+            (
+                "http://registry.local:5000".to_string(),
+                "charts".to_string()
+            )
+        );
+        assert!(registry_endpoint("https://example.com/x", false).is_err());
+        assert!(registry_endpoint("oci://hostonly", false).is_err());
+    }
+
+    #[test]
+    fn bearer_challenge_is_parsed() {
+        let challenge = r#"Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:o/r/c:pull""#;
+        let parsed = parse_bearer_challenge(challenge).expect("bearer");
+        assert_eq!(parsed.realm, "https://ghcr.io/token");
+        assert_eq!(parsed.service.as_deref(), Some("ghcr.io"));
+        assert_eq!(parsed.scope.as_deref(), Some("repository:o/r/c:pull"));
+        assert!(parse_bearer_challenge("Basic realm=\"x\"").is_none());
+    }
+
+    #[test]
+    fn next_link_is_extracted() {
+        assert_eq!(
+            next_link(r#"</v2/o/r/c/tags/list?last=1.0.0&n=2>; rel="next""#).as_deref(),
+            Some("/v2/o/r/c/tags/list?last=1.0.0&n=2")
+        );
+        assert_eq!(next_link(r#"</a>; rel="prev""#), None);
+    }
+
+    /// Minimal one-request-per-connection HTTP server for registry tests.
+    /// The handler receives (path_and_query, authorization header) and returns a raw response.
+    async fn spawn_test_server<H>(make_handler: impl FnOnce(String) -> H) -> String
+    where
+        H: Fn(&str, Option<&str>) -> String + Send + Sync + 'static,
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let handler = make_handler(base.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&buffer).to_string();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split(' ').nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let auth = request.lines().find_map(|line| {
+                    line.strip_prefix("authorization: ")
+                        .or_else(|| line.strip_prefix("Authorization: "))
+                });
+                let response = handler(&path, auth);
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        base
+    }
+
+    fn http_response(status: &str, headers: &[String], body: &str) -> String {
+        let mut out = format!("HTTP/1.1 {status}\r\n");
+        for header in headers {
+            out.push_str(header);
+            out.push_str("\r\n");
+        }
+        out.push_str(&format!(
+            "Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ));
+        out
+    }
+
+    #[tokio::test]
+    async fn list_tags_authenticates_with_anonymous_bearer_token() {
+        let base = spawn_test_server(|base| {
+            move |path: &str, auth: Option<&str>| {
+                if path.starts_with("/token?") {
+                    assert!(path.contains("service=reg.test"), "{path}");
+                    assert!(path.contains("scope=repository"), "{path}");
+                    return http_response("200 OK", &[], r#"{"token":"abc123"}"#);
+                }
+                if auth != Some("Bearer abc123") {
+                    return http_response(
+                        "401 Unauthorized",
+                        &[format!(
+                            r#"WWW-Authenticate: Bearer realm="{base}/token",service="reg.test",scope="repository:o/charts/app:pull""#
+                        )],
+                        "",
+                    );
+                }
+                assert_eq!(path, "/v2/o/charts/app/tags/list");
+                http_response(
+                    "200 OK",
+                    &[],
+                    r#"{"name":"o/charts/app","tags":["1.0.0_1","1.0.0_2","junk"]}"#,
+                )
+            }
+        })
+        .await;
+
+        let client = reqwest::Client::new();
+        let tags = list_chart_tags(&client, &base, "o/charts", "app")
+            .await
+            .expect("tags");
+        assert_eq!(tags, vec!["1.0.0_1", "1.0.0_2", "junk"]);
+        assert_eq!(newest_published_version(&tags).as_deref(), Some("1.0.0+2"));
+    }
+
+    #[tokio::test]
+    async fn list_tags_follows_link_pagination() {
+        let base = spawn_test_server(|_| {
+            |path: &str, _auth: Option<&str>| {
+                if path.contains("last=1.0.0_2") {
+                    http_response("200 OK", &[], r#"{"tags":["1.0.0_3"]}"#)
+                } else {
+                    http_response(
+                        "200 OK",
+                        &[
+                            r#"Link: </v2/o/charts/app/tags/list?last=1.0.0_2&n=2>; rel="next""#
+                                .to_string(),
+                        ],
+                        r#"{"tags":["1.0.0_1","1.0.0_2"]}"#,
+                    )
+                }
+            }
+        })
+        .await;
+
+        let client = reqwest::Client::new();
+        let tags = list_chart_tags(&client, &base, "o/charts", "app")
+            .await
+            .expect("tags");
+        assert_eq!(tags, vec!["1.0.0_1", "1.0.0_2", "1.0.0_3"]);
+    }
+
+    #[tokio::test]
+    async fn list_tags_reports_registry_errors() {
+        let base = spawn_test_server(|_| {
+            |_: &str, _: Option<&str>| http_response("404 Not Found", &[], "{}")
+        })
+        .await;
+        let client = reqwest::Client::new();
+        assert!(list_chart_tags(&client, &base, "o/charts", "app")
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn missing_version_is_detected_from_helm_error() {
+        let missing = anyhow::anyhow!(
+            "helm pull failed for app 2.7.0+8: Error: failed to perform \"FetchReference\" on source: ghcr.io/o/c/app:2.7.0_8: not found"
+        );
+        assert!(is_missing_version_error(&missing));
+        assert!(!is_missing_version_error(&anyhow::anyhow!(
+            "helm pull failed for app 1.0.0: dial tcp: i/o timeout"
+        )));
+    }
+
+    #[tokio::test]
+    async fn missing_version_falls_back_to_newest_published_and_counts_as_synced() {
+        use std::sync::Mutex;
+        let service = test_service();
+        let pulled = Arc::new(Mutex::new(Vec::new()));
+        let log = pulled.clone();
+        service
+            .run_serialized(service.sync_discovered_with(
+                vec![discovered("alpha", "2.7.0+8")],
+                move |chart| {
+                    let log = log.clone();
+                    async move {
+                        log.lock().expect("lock").push(chart.version.clone());
+                        if chart.version == "2.7.0+8" {
+                            anyhow::bail!("helm pull failed: ghcr.io/o/alpha:2.7.0_8: not found");
+                        }
+                        Ok(())
+                    }
+                },
+                |name| async move {
+                    assert_eq!(name, "alpha");
+                    Ok("2.7.0+7".to_string())
+                },
+            ))
+            .await
+            .expect("fallback counts as synced");
+        assert_eq!(*pulled.lock().expect("lock"), vec!["2.7.0+8", "2.7.0+7"]);
+        assert!(service.last_synced().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn non_missing_pull_failure_does_not_fall_back() {
+        let service = test_service();
+        let error = service
+            .run_serialized(service.sync_discovered_with(
+                vec![discovered("alpha", "1.0.0")],
+                |_| async { anyhow::bail!("dial tcp: i/o timeout") },
+                |_| async { panic!("fallback must not be consulted") },
+            ))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("alpha 1.0.0"), "{error}");
+        assert_eq!(service.last_synced().await, None);
+    }
+
+    #[tokio::test]
+    async fn failed_fallback_lookup_fails_the_transaction() {
+        let service = test_service();
+        let error = service
+            .run_serialized(service.sync_discovered_with(
+                vec![discovered("alpha", "1.0.0")],
+                |_| async { anyhow::bail!("x: not found") },
+                |_| async { anyhow::bail!("registry unreachable") },
+            ))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("alpha 1.0.0"), "{error}");
+        assert_eq!(service.last_synced().await, None);
+    }
+
     #[tokio::test]
     async fn serialized_sync_success_updates_last_synced() {
         let service = test_service();
         assert_eq!(service.last_synced().await, None);
 
         service
-            .run_serialized(
-                service
-                    .sync_discovered_with(vec![discovered("alpha", "1.0.0")], |_| async { Ok(()) }),
-            )
+            .run_serialized(service.sync_discovered_with(
+                vec![discovered("alpha", "1.0.0")],
+                |_| async { Ok(()) },
+                no_fallback,
+            ))
             .await
             .expect("sync succeeds");
 
@@ -739,11 +1094,11 @@ mod tests {
     async fn serialized_sync_failure_is_aggregated_and_preserves_last_synced() {
         let service = test_service();
         service
-            .run_serialized(
-                service.sync_discovered_with(vec![discovered("initial", "1.0.0")], |_| async {
-                    Ok(())
-                }),
-            )
+            .run_serialized(service.sync_discovered_with(
+                vec![discovered("initial", "1.0.0")],
+                |_| async { Ok(()) },
+                no_fallback,
+            ))
             .await
             .expect("initial sync");
         let initial_timestamp = service.last_synced().await;
@@ -752,6 +1107,7 @@ mod tests {
             .run_serialized(service.sync_discovered_with(
                 vec![discovered("alpha", "1.0.0"), discovered("beta", "2.0.0")],
                 |chart| async move { anyhow::bail!("injected failure for {}", chart.name) },
+                no_fallback,
             ))
             .await
             .unwrap_err();
@@ -795,6 +1151,7 @@ mod tests {
                             Ok(())
                         }
                     },
+                    no_fallback,
                 ))
                 .await
         });
@@ -820,6 +1177,7 @@ mod tests {
                             Ok(())
                         }
                     },
+                    no_fallback,
                 ))
                 .await
         });
