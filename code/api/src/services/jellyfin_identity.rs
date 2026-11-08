@@ -416,7 +416,7 @@ async fn push(state: &AppState) -> Result<()> {
     );
     let response = push_client()
         .post(&url)
-        .bearer_auth(key)
+        .header("X-Kubarr-Key", key)
         .json(&body)
         .send()
         .await?;
