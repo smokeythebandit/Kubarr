@@ -1,8 +1,10 @@
+pub mod app_passwords;
 pub mod apps;
 pub mod audit;
 pub mod auth;
 pub mod domains;
 pub mod extractors;
+pub mod integrations;
 pub mod logs;
 pub mod monitoring;
 pub mod networking;
@@ -19,7 +21,7 @@ use axum::{extract::State, middleware as axum_middleware, response::Html, Router
 use utoipa::OpenApi;
 
 use crate::config::CONFIG;
-use crate::middleware::require_auth;
+use crate::middleware::{optional_auth, require_auth};
 use crate::state::AppState;
 
 #[derive(OpenApi)]
@@ -40,6 +42,13 @@ use crate::state::AppState;
         auth::revoke_session,
         auth::switch_session,
         auth::list_accounts,
+        auth::jwks,
+        app_passwords::list_app_passwords,
+        app_passwords::create_app_password,
+        app_passwords::delete_app_password,
+        // Integrations
+        integrations::verify_jellyfin_credentials,
+        integrations::jellyfin_users,
         // Users
         users::list_users,
         users::get_current_user_info,
@@ -215,6 +224,7 @@ use crate::state::AppState;
         (name = "Domains", description = "Domains, Dynamic DNS, and Let's Encrypt configuration"),
         (name = "OAuth", description = "OAuth provider configuration and login"),
         (name = "VPN", description = "VPN provider and app VPN configuration"),
+        (name = "Integrations", description = "Service endpoints for app plugins using Kubarr as identity provider"),
     )
 )]
 pub struct ApiDoc;
@@ -239,17 +249,46 @@ pub fn create_router(state: AppState) -> Router {
         axum_middleware::from_fn_with_state(state.clone(), require_auth),
     );
 
+    // Gateway authorization decides for anonymous requests as well (apps that
+    // authenticate their own clients), so it runs with optional auth.
+    let gateway_auth_routes = Router::new()
+        .nest("/api/proxy-auth", proxy::proxy_auth_routes(state.clone()))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            optional_auth,
+        ));
+
+    // Service-to-service routes authenticate with a managed key, not a session.
+    let integration_routes = Router::new().nest(
+        "/api/integrations",
+        integrations::integration_routes(state.clone()),
+    );
+
     // Merge API routes only. Frontend and app proxying are handled by the gateway.
     health_routes
         .merge(public_routes)
+        .merge(gateway_auth_routes)
+        .merge(integration_routes)
         .merge(protected_api_routes)
 }
 
 /// API routes under /api/* (protected by auth middleware)
 fn api_routes(state: AppState) -> Router {
     Router::new()
-        .nest("/users", users::users_routes(state.clone()))
-        .nest("/roles", roles::roles_routes(state.clone()))
+        .nest(
+            "/users",
+            users::users_routes(state.clone()).layer(axum_middleware::from_fn_with_state(
+                state.clone(),
+                integrations::push_identity_on_change,
+            )),
+        )
+        .nest(
+            "/roles",
+            roles::roles_routes(state.clone()).layer(axum_middleware::from_fn_with_state(
+                state.clone(),
+                integrations::push_identity_on_change,
+            )),
+        )
         .nest("/settings", settings::settings_routes(state.clone()))
         .nest("/domains", domains::domains_routes(state.clone()))
         .nest("/monitoring", monitoring::monitoring_routes(state.clone()))
@@ -264,7 +303,6 @@ fn api_routes(state: AppState) -> Router {
         )
         .nest("/oauth", oauth::protected_oauth_routes(state.clone()))
         .nest("/vpn", vpn::vpn_routes(state.clone()))
-        .nest("/proxy-auth", proxy::proxy_auth_routes(state.clone()))
         .route("/system/version", axum::routing::get(get_version))
         .route("/openapi.json", axum::routing::get(openapi_json))
         .route("/docs", axum::routing::get(swagger_ui))

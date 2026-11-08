@@ -51,6 +51,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 rand = "0.10"
 base64 = "0.23"
 hex = "0.4"
+sha2 = "0.10"
 totp-rs = { version = "6", features = ["qr", "gen_secret"] }
 
 # Serialization

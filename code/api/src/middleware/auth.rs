@@ -83,6 +83,24 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
     next.run(req).await
 }
 
+/// Like [`require_auth`], but a missing or invalid session is not an error:
+/// the request continues without an [`AuthenticatedUser`]. Used by the
+/// gateway's authorization endpoints, which must answer for anonymous
+/// requests too -- an app that authenticates its own clients still receives
+/// them.
+pub async fn optional_auth(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    if let Some(token) = extract_token(&req) {
+        if let Ok(auth_user) = authenticate_session(&state, &token).await {
+            req.extensions_mut().insert(auth_user);
+        }
+    }
+    next.run(req).await
+}
+
 /// Extract session token from cookie (supports multi-session)
 pub(crate) fn extract_token(req: &Request) -> Option<String> {
     let cookies = req.headers().get(header::COOKIE)?;
@@ -199,7 +217,7 @@ pub(crate) async fn authenticate_session(
 }
 
 /// Fetch all permissions for a user from their roles
-async fn fetch_user_permissions(state: &AppState, user_id: i64) -> Vec<String> {
+pub(crate) async fn fetch_user_permissions(state: &AppState, user_id: i64) -> Vec<String> {
     // Get database connection
     let db = match state.get_db().await {
         Ok(db) => db,
