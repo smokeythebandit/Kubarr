@@ -29,6 +29,9 @@ jobs:
           - component: dns-webhook
             image: kubarr-dns-webhook
             dockerfile: docker/Dockerfile.dns-webhook
+          - component: vpn-picker
+            image: kubarr-vpn-picker
+            dockerfile: docker/Dockerfile.vpn-picker
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

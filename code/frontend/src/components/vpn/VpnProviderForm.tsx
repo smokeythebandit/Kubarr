@@ -33,6 +33,11 @@ export function VpnProviderForm({
     provider?.firewall_outbound_subnets ?? ''
   );
 
+  // Server selection (shared by WireGuard and OpenVPN with a named provider)
+  const [serverCountries, setServerCountries] = useState('');
+  const [serverCities, setServerCities] = useState('');
+  const [serverHostnames, setServerHostnames] = useState('');
+
   // WireGuard credentials
   const [wgPrivateKey, setWgPrivateKey] = useState('');
   const [wgAddresses, setWgAddresses] = useState('');
@@ -43,8 +48,6 @@ export function VpnProviderForm({
   // OpenVPN credentials
   const [ovpnUsername, setOvpnUsername] = useState('');
   const [ovpnPassword, setOvpnPassword] = useState('');
-  const [ovpnCountries, setOvpnCountries] = useState('');
-  const [ovpnCities, setOvpnCities] = useState('');
 
   // Supported providers
   const [supportedProviders, setSupportedProviders] = useState<SupportedProvider[]>([]);
@@ -67,6 +70,49 @@ export function VpnProviderForm({
     }
   }, [serviceProvider, supportedVpnTypes, vpnType]);
 
+  const serverFilters = (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">
+                Server Countries
+              </label>
+              <input
+                type="text"
+                value={serverCountries}
+                onChange={e => setServerCountries(e.target.value)}
+                placeholder="Netherlands,Switzerland"
+                className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">
+                Server Cities
+              </label>
+              <input
+                type="text"
+                value={serverCities}
+                onChange={e => setServerCities(e.target.value)}
+                placeholder="New York"
+                className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+              />
+            </div>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">
+                Server Hostnames
+              </label>
+              <input
+                type="text"
+                value={serverHostnames}
+                onChange={e => setServerHostnames(e.target.value)}
+                placeholder="comma-separated hostnames"
+                className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+              />
+            </div>
+          </div>
+  );
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -85,6 +131,9 @@ export function VpnProviderForm({
           ...(wgPublicKey && { public_key: wgPublicKey }),
           ...(wgEndpointIp && { endpoint_ip: wgEndpointIp }),
           ...(wgEndpointPort && { endpoint_port: parseInt(wgEndpointPort, 10) }),
+          ...(serverCountries && serviceProvider !== 'custom' && { server_countries: serverCountries }),
+          ...(serverCities && serviceProvider !== 'custom' && { server_cities: serverCities }),
+          ...(serverHostnames && serviceProvider !== 'custom' && { server_hostnames: serverHostnames }),
         };
       } else {
         if (!ovpnUsername || !ovpnPassword) {
@@ -93,8 +142,9 @@ export function VpnProviderForm({
         credentials = {
           username: ovpnUsername,
           password: ovpnPassword,
-          ...(ovpnCountries && { server_countries: ovpnCountries }),
-          ...(ovpnCities && { server_cities: ovpnCities }),
+          ...(serverCountries && { server_countries: serverCountries }),
+          ...(serverCities && { server_cities: serverCities }),
+          ...(serverHostnames && { server_hostnames: serverHostnames }),
         };
       }
 
@@ -295,6 +345,7 @@ export function VpnProviderForm({
                   </div>
                 </>
               )}
+              {serviceProvider !== 'custom' && serverFilters}
             </div>
           )}
 
@@ -330,34 +381,7 @@ export function VpnProviderForm({
                   className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
                 />
               </div>
-              {serviceProvider !== 'custom' && (
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">
-                      Server Countries
-                    </label>
-                    <input
-                      type="text"
-                      value={ovpnCountries}
-                      onChange={e => setOvpnCountries(e.target.value)}
-                      placeholder="US,UK"
-                      className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">
-                      Server Cities
-                    </label>
-                    <input
-                      type="text"
-                      value={ovpnCities}
-                      onChange={e => setOvpnCities(e.target.value)}
-                      placeholder="New York"
-                      className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                    />
-                  </div>
-                </div>
-              )}
+              {serviceProvider !== 'custom' && serverFilters}
             </div>
           )}
 

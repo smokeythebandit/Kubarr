@@ -115,6 +115,26 @@ jobs:
       - run: pnpm audit --prod --audit-level high
         working-directory: code/frontend
 
+  # ── Go ───────────────────────────────────────────────────────────────────────
+
+  go:
+    name: go / vet & test (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [vpn-picker, dns-webhook]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: code/${{ matrix.module }}/go.mod
+          cache-dependency-path: code/${{ matrix.module }}/go.sum
+      - run: go vet ./...
+        working-directory: code/${{ matrix.module }}
+      - run: go test ./...
+        working-directory: code/${{ matrix.module }}
+
   # ── General ──────────────────────────────────────────────────────────────────
 
   secrets:
@@ -164,4 +184,8 @@ jobs:
       - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387
         with:
           dockerfile: docker/Dockerfile.dns-webhook
+          config: docker/.hadolint.yaml
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387
+        with:
+          dockerfile: docker/Dockerfile.vpn-picker
           config: docker/.hadolint.yaml

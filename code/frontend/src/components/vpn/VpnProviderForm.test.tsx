@@ -50,3 +50,36 @@ describe('VpnProviderForm outbound subnet allowlist', () => {
     expect(screen.getByRole('textbox', { name: 'Allowed Subnets' })).toHaveValue('10.42.0.0/16');
   });
 });
+
+describe('VpnProviderForm WireGuard server filters', () => {
+  beforeEach(() => {
+    mocks.listSupportedProviders.mockResolvedValue([
+      { id: 'custom', name: 'Custom', description: '', vpn_types: ['wireguard', 'openvpn'] },
+      { id: 'protonvpn', name: 'ProtonVPN', description: '', vpn_types: ['wireguard', 'openvpn'] },
+    ]);
+    mocks.createProvider.mockReset();
+  });
+
+  it('shows server filters for WireGuard with a named provider and submits them', async () => {
+    mocks.createProvider.mockResolvedValue({});
+    render(<VpnProviderForm onSave={vi.fn()} onClose={vi.fn()} />);
+    await act(async () => {});
+
+    expect(screen.queryByText('Server Countries')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'protonvpn' } });
+    fireEvent.change(screen.getByPlaceholderText('My VPN'), { target: { value: 'VPN' } });
+    fireEvent.change(screen.getByPlaceholderText('Enter WireGuard private key'), { target: { value: 'k' } });
+    fireEvent.change(screen.getByPlaceholderText('Netherlands,Switzerland'), { target: { value: 'Netherlands' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
+
+    await waitFor(() =>
+      expect(mocks.createProvider).toHaveBeenCalledWith(
+        expect.objectContaining({
+          vpn_type: 'wireguard',
+          service_provider: 'protonvpn',
+          credentials: expect.objectContaining({ private_key: 'k', server_countries: 'Netherlands' }),
+        })
+      )
+    );
+  });
+});

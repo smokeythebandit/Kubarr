@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [backend, worker, frontend, dns-webhook]
+        image: [backend, worker, frontend, dns-webhook, vpn-picker]
 
     steps:
       - name: Compute image name

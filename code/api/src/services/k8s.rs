@@ -8,7 +8,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{
-    api::{Api, ListParams, PostParams},
+    api::{Api, ListParams, Patch, PatchParams, PostParams},
     config::{Config, KubeConfigOptions, Kubeconfig},
     Client,
 };
@@ -261,6 +261,35 @@ impl K8sClient {
         let secrets: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
         let secret = secrets.get(secret_name).await?;
         Ok(secret)
+    }
+
+    /// Make a namespace's Pod Security level follow its VPN state. The gluetun
+    /// sidecar needs NET_ADMIN and a hostPath, which the cluster default
+    /// (`baseline`) rejects, so VPN namespaces are labelled `privileged`;
+    /// otherwise the labels are removed (merge-patch `null`) to restore it.
+    pub async fn set_namespace_pod_security(
+        &self,
+        namespace: &str,
+        privileged: bool,
+    ) -> Result<()> {
+        let namespaces: Api<Namespace> = Api::all(self.client.clone());
+        let level = if privileged {
+            serde_json::json!("privileged")
+        } else {
+            serde_json::Value::Null
+        };
+        let patch = serde_json::json!({"metadata": {"labels": {
+            "pod-security.kubernetes.io/enforce": level,
+            "pod-security.kubernetes.io/audit": level,
+            "pod-security.kubernetes.io/warn": level,
+        }}});
+        namespaces
+            .patch(namespace, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to set namespace Pod Security: {error}"))
+            })?;
+        Ok(())
     }
 
     /// Ensure a namespace exists before creating namespaced resources in it.

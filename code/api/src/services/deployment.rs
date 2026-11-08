@@ -358,6 +358,23 @@ impl<'a> DeploymentManager<'a> {
         } else {
             // VPN credentials must exist before Helm renders an app release.
             self.k8s.ensure_namespace(namespace).await?;
+            // The gluetun sidecar needs NET_ADMIN and a hostPath, which the
+            // cluster's default `baseline` Pod Security forbids.
+            let privileged = vpn_config.is_some();
+            if let Err(error) = self
+                .k8s
+                .set_namespace_pod_security(namespace, privileged)
+                .await
+            {
+                // Without VPN this only removes labels, so it must not block
+                // a deploy that would otherwise succeed.
+                if privileged {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    "Failed to clear Pod Security labels on namespace {namespace}: {error}"
+                );
+            }
             false
         };
 
