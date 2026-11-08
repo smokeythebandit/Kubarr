@@ -502,7 +502,8 @@ impl<'a> DeploymentManager<'a> {
 
         // Applications that must agree on a key before either has run get it
         // from Kubarr: Jellyfin and the managers that refresh its library,
-        // SABnzbd and the managers that queue downloads with it. Each Secret
+        // SABnzbd and the managers that queue downloads with it, Prowlarr and
+        // Bazarr and the managers that register with them. Each Secret
         // must exist before Helm renders a Pod that mounts it.
         for link in managed_key::ALL {
             if !link.applies_to(&request.app_name) {
