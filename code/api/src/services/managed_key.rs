@@ -55,6 +55,21 @@ pub const JELLYFIN: ManagedKey = ManagedKey {
     refusal: "sets the Jellyfin link, which Kubarr manages",
 };
 
+/// The Kubarr plugin inside Jellyfin calls back into Kubarr to check a native
+/// client's password and to read which users belong in Jellyfin, and Kubarr
+/// calls the plugin to push user changes. This key authenticates both
+/// directions. It is separate from [`JELLYFIN`] because Sonarr and Radarr hold
+/// that one, and a pod that can ask Kubarr "is this password right?" must not
+/// be any pod but Jellyfin's.
+pub const JELLYFIN_IDENTITY: ManagedKey = ManagedKey {
+    setting_key: "jellyfin_identity_key",
+    secret_name: "kubarr-jellyfin-identity",
+    helm_root: "kubarrIdentity",
+    description: "Key the Jellyfin Kubarr plugin and Kubarr use to call each other",
+    participants: &["jellyfin"],
+    refusal: "sets the Jellyfin sign-in link, which Kubarr manages",
+};
+
 /// SABnzbd generates its own key on first start and keeps it in `sabnzbd.ini`,
 /// where no other pod can read it, so the managers could never authenticate
 /// without a key both sides are told in advance.
@@ -92,7 +107,7 @@ pub const BAZARR: ManagedKey = ManagedKey {
 };
 
 /// Every managed key, so a new one is wired into deployment by adding it here.
-pub const ALL: &[&ManagedKey] = &[&JELLYFIN, &SABNZBD, &PROWLARR, &BAZARR];
+pub const ALL: &[&ManagedKey] = &[&JELLYFIN, &JELLYFIN_IDENTITY, &SABNZBD, &PROWLARR, &BAZARR];
 
 impl ManagedKey {
     pub fn applies_to(&self, app_name: &str) -> bool {
@@ -253,6 +268,11 @@ mod tests {
         // Bazarr handles subtitles for series and movies only.
         for app in ["lidarr", "prowlarr", "jellyfin"] {
             assert!(!BAZARR.applies_to(app), "{app}");
+        }
+        // The identity key can check Kubarr passwords, so only Jellyfin holds it.
+        assert!(JELLYFIN_IDENTITY.applies_to("jellyfin"));
+        for app in ["sonarr", "radarr", "jellyseerr", "seerr", "plex"] {
+            assert!(!JELLYFIN_IDENTITY.applies_to(app), "{app}");
         }
     }
 

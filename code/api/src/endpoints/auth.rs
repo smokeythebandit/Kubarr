@@ -113,7 +113,26 @@ pub fn auth_routes(state: AppState) -> Router {
         .route("/host-transfer/start", get(start_host_transfer))
         .route("/host-transfer/complete", get(complete_host_transfer))
         .route("/2fa/recover", post(recover_with_code))
+        .route("/jwks", get(jwks))
         .with_state(state)
+}
+
+/// Public keys that verify tokens Kubarr signs, including the identity tokens
+/// the gateway hands to apps (`X-Kubarr-Identity`).
+#[utoipa::path(
+    get,
+    path = "/auth/jwks",
+    tag = "Auth",
+    responses((status = 200, description = "JSON Web Key Set"))
+)]
+async fn jwks() -> Result<Response> {
+    let keys = crate::services::security::get_jwks()?;
+    let mut response = Json(keys).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("public, max-age=300"),
+    );
+    Ok(response)
 }
 
 #[derive(Deserialize)]

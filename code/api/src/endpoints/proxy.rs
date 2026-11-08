@@ -5,23 +5,70 @@ use axum::{
     http::{header, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::get,
-    Router,
+    Extension, Router,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Deserialize;
 
 use crate::error::{AppError, Result};
-use crate::middleware::Authenticated;
+use crate::middleware::AuthenticatedUser;
 use crate::models::prelude::*;
 use crate::models::{app_domain_assignment, domain};
+use crate::services::app_identity;
+use crate::services::catalog::GatewayTraits;
 use crate::state::AppState;
 
 /// Create lightweight gateway authorization routes.
+///
+/// These are mounted behind `optional_auth`, not `require_auth`: an app that
+/// authenticates its own clients (`kubarr.io/gateway-auth: app-native`) is
+/// reachable without a Kubarr session, and only this module may decide that.
 pub fn proxy_auth_routes(state: AppState) -> Router {
     Router::new()
         .route("/route", get(resolve_gateway_route))
         .route("/{app_name}", get(authorize_gateway_app_proxy))
         .with_state(state)
+}
+
+/// Header carrying the signed identity token to apps that asked for it.
+const IDENTITY_HEADER: &str = "x-kubarr-identity";
+
+/// Decide whether the gateway may forward a request for `app_name`, and with
+/// which identity token, if any.
+///
+/// - A signed-in user with access is forwarded, with an identity token when
+///   the app asked for one.
+/// - A signed-in user without access is refused even by an app-native app, so
+///   the browser shows Kubarr's answer rather than an app login that would
+///   reject them anyway.
+/// - An anonymous request reaches only an app-native app, and then without an
+///   identity: the app's own authentication decides.
+fn gateway_access(
+    user: Option<&AuthenticatedUser>,
+    app_name: &str,
+    traits: GatewayTraits,
+) -> Result<Option<String>> {
+    match user {
+        Some(user) if user.has_app_access(app_name) => {
+            if traits.identity_header {
+                Ok(Some(app_identity::mint(user, app_name)?))
+            } else {
+                Ok(None)
+            }
+        }
+        Some(_) => Err(AppError::Forbidden(format!(
+            "No access to app: {}",
+            app_name
+        ))),
+        None if traits.app_native_auth => Ok(None),
+        None => Err(AppError::Unauthorized(
+            "Authentication required".to_string(),
+        )),
+    }
+}
+
+async fn app_gateway_traits(state: &AppState, app_name: &str) -> GatewayTraits {
+    state.catalog.read().await.gateway_traits(app_name)
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,7 +80,7 @@ struct RouteLookupQuery {
 async fn resolve_gateway_route(
     State(state): State<AppState>,
     Query(query): Query<RouteLookupQuery>,
-    auth: Authenticated,
+    user: Option<Extension<AuthenticatedUser>>,
 ) -> Result<impl IntoResponse> {
     let resolved = resolve_app_assignment(&state, &query.host, &query.path).await?;
     let Some(resolved) = resolved else {
@@ -44,16 +91,15 @@ async fn resolve_gateway_route(
 
     // Authentication already resolved this user's permissions; the gateway
     // asks for a route on every proxied request, so do not fetch them again.
-    if !auth.allows_app(&resolved.app_name) {
-        return Err(AppError::Forbidden(format!(
-            "No access to app: {}",
-            resolved.app_name
-        )));
-    }
+    let traits = app_gateway_traits(&state, &resolved.app_name).await;
+    let identity = gateway_access(user.as_deref(), &resolved.app_name, traits)?;
 
     let (upstream, base_path, landing_path) =
         get_app_upstream_url(&state, &resolved.app_name).await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Some(identity) = identity {
+        insert_header(&mut response, IDENTITY_HEADER, &identity)?;
+    }
     insert_header(&mut response, "x-kubarr-app-name", &resolved.app_name)?;
     insert_header(&mut response, "x-kubarr-route-mode", &resolved.route_mode)?;
     insert_header(&mut response, "x-kubarr-target-path", &resolved.target_path)?;
@@ -74,17 +120,16 @@ async fn resolve_gateway_route(
 async fn authorize_gateway_app_proxy(
     State(state): State<AppState>,
     Path(app_name): Path<String>,
-    auth: Authenticated,
+    user: Option<Extension<AuthenticatedUser>>,
 ) -> Result<impl IntoResponse> {
-    if !auth.allows_app(&app_name) {
-        return Err(AppError::Forbidden(format!(
-            "No access to app: {}",
-            app_name
-        )));
-    }
+    let traits = app_gateway_traits(&state, &app_name).await;
+    let identity = gateway_access(user.as_deref(), &app_name, traits)?;
 
     let (upstream, base_path, landing_path) = get_app_upstream_url(&state, &app_name).await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Some(identity) = identity {
+        insert_header(&mut response, IDENTITY_HEADER, &identity)?;
+    }
     insert_header(&mut response, "x-kubarr-upstream", &upstream)?;
     if let Some(base_path) = base_path {
         insert_header(&mut response, "x-kubarr-base-path", &base_path)?;
@@ -227,7 +272,7 @@ fn strip_path_prefix(path: &str, prefix: &str) -> String {
 }
 
 /// Get the upstream base URL for an app. The gateway appends the request path.
-async fn get_app_upstream_url(
+pub(crate) async fn get_app_upstream_url(
     state: &AppState,
     app_name: &str,
 ) -> Result<(String, Option<String>, Option<String>)> {

@@ -390,9 +390,39 @@ pub struct VolumeConfig {
     pub size: String,
 }
 
+/// How the gateway treats an app's traffic, declared by its chart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GatewayTraits {
+    /// `kubarr.io/identity-header: "true"`: the gateway hands the app a
+    /// short-lived signed token naming the Kubarr user, so the app can sign
+    /// that user in without a second password.
+    pub identity_header: bool,
+    /// `kubarr.io/gateway-auth: "app-native"`: the app authenticates every
+    /// request itself (with accounts Kubarr provisions), so requests without
+    /// a Kubarr session still reach it. Native clients -- TV and phone apps --
+    /// cannot carry a browser cookie.
+    pub app_native_auth: bool,
+}
+
+impl GatewayTraits {
+    fn from_annotations(annotations: &serde_yaml::Mapping) -> Self {
+        let get = |key: &str| {
+            annotations
+                .get(serde_yaml::Value::String(key.to_string()))
+                .and_then(|v| v.as_str())
+                .map(|v| v.trim().to_lowercase())
+        };
+        Self {
+            identity_header: get("kubarr.io/identity-header").as_deref() == Some("true"),
+            app_native_auth: get("kubarr.io/gateway-auth").as_deref() == Some("app-native"),
+        }
+    }
+}
+
 /// App catalog - registry of all available applications
 pub struct AppCatalog {
     apps: HashMap<String, AppConfig>,
+    gateway: HashMap<String, GatewayTraits>,
 }
 
 impl AppCatalog {
@@ -400,6 +430,7 @@ impl AppCatalog {
     pub fn new() -> Self {
         let mut catalog = Self {
             apps: HashMap::new(),
+            gateway: HashMap::new(),
         };
         catalog.load_apps();
         catalog
@@ -407,7 +438,24 @@ impl AppCatalog {
 
     /// Create an app catalog with the given apps (for testing)
     pub fn with_apps(apps: HashMap<String, AppConfig>) -> Self {
-        Self { apps }
+        Self {
+            apps,
+            gateway: HashMap::new(),
+        }
+    }
+
+    /// Set an app's gateway traits (for testing).
+    pub fn with_gateway_traits(mut self, app_name: &str, traits: GatewayTraits) -> Self {
+        self.gateway.insert(app_name.to_string(), traits);
+        self
+    }
+
+    /// How the gateway should treat this app's traffic.
+    pub fn gateway_traits(&self, app_name: &str) -> GatewayTraits {
+        self.gateway
+            .get(&app_name.to_lowercase())
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Load all app definitions from Helm charts
@@ -487,6 +535,9 @@ impl AppCatalog {
                     if let Some(chart_name) = path.file_name().and_then(|n| n.to_str()) {
                         match self.parse_chart(chart_name, &path) {
                             Ok(Some(app)) => {
+                                if let Some(traits) = read_gateway_traits(&path) {
+                                    self.gateway.insert(app.name.clone(), traits);
+                                }
                                 self.apps.insert(app.name.clone(), app);
                             }
                             Ok(None) => {
@@ -769,8 +820,16 @@ impl AppCatalog {
     /// Reload apps from charts directory
     pub fn reload(&mut self) {
         self.apps.clear();
+        self.gateway.clear();
         self.load_apps();
     }
+}
+
+fn read_gateway_traits(chart_dir: &Path) -> Option<GatewayTraits> {
+    let content = std::fs::read_to_string(chart_dir.join("Chart.yaml")).ok()?;
+    let chart: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+    let annotations = chart.get("annotations")?.as_mapping()?;
+    Some(GatewayTraits::from_annotations(annotations))
 }
 
 impl Default for AppCatalog {

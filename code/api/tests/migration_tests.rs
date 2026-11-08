@@ -317,6 +317,7 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
     let expected_tables = [
         "app_audit_outbox",
         "app_domain_assignments",
+        "app_passwords",
         "app_operations",
         "app_states",
         "app_storage_configs",

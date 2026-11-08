@@ -1,5 +1,6 @@
 pub mod app_domain_assignment;
 pub mod app_operation;
+pub mod app_password;
 pub mod app_state;
 pub mod app_storage_config;
 pub mod app_vpn_config;
@@ -33,6 +34,7 @@ pub mod vpn_provider;
 pub mod prelude {
     pub use super::app_domain_assignment::{self, Entity as AppDomainAssignment};
     pub use super::app_operation::{self, Entity as AppOperation};
+    pub use super::app_password::{self, Entity as AppPassword};
     pub use super::app_state::{self, Entity as AppState};
     pub use super::app_storage_config::{self, Entity as AppStorageConfig};
     pub use super::app_vpn_config::{self, Entity as AppVpnConfig};

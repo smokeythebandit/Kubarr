@@ -8,6 +8,7 @@ import { changeOwnPassword, get2FAStatus, getRecoveryCodeCount, setup2FA, enable
 import { oauthApi, type LinkedAccount, type AvailableProvider } from '../api/oauth'
 import { getSessions, revokeSession, type SessionInfo } from '../api/auth'
 import { auditApi, type AuditLog } from '../api/audit'
+import AppPasswordsPanel from '../components/account/AppPasswordsPanel'
 
 export default function AccountPage() {
   const { user, isAdmin, checkAuth, logout } = useAuth()
@@ -877,6 +878,12 @@ export default function AccountPage() {
             </div>
           )}
         </div>
+
+        {/* App Passwords Panel */}
+        <AppPasswordsPanel
+          twoFactorEnabled={!!twoFactorStatus?.enabled}
+          formatRelativeTime={formatRelativeTime}
+        />
 
         {/* Recent Activity Panel */}
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">

@@ -52,6 +52,10 @@ pub fn users_routes(state: AppState) -> Router {
         .route("/{user_id}/approve", post(approve_user))
         .route("/{user_id}/reject", post(reject_user))
         .route("/{user_id}/password", patch(admin_reset_password))
+        .nest(
+            "/me/app-passwords",
+            super::app_passwords::app_password_routes(),
+        )
         .with_state(state)
 }
 

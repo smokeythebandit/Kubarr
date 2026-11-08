@@ -292,3 +292,31 @@ export const deleteOwnAccount = async (data: DeleteOwnAccountRequest): Promise<{
   const response = await apiClient.delete<{ message: string }>('/users/me', { data });
   return response.data;
 };
+
+// App passwords: per-device passwords for clients that cannot complete
+// Kubarr's sign-in, such as Jellyfin's TV and phone apps.
+export interface AppPasswordInfo {
+  id: number;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface CreatedAppPassword extends AppPasswordInfo {
+  /** Shown once; Kubarr keeps only a digest. */
+  password: string;
+}
+
+export const listAppPasswords = async (): Promise<AppPasswordInfo[]> => {
+  const response = await apiClient.get<AppPasswordInfo[]>('/users/me/app-passwords');
+  return response.data;
+};
+
+export const createAppPassword = async (name: string): Promise<CreatedAppPassword> => {
+  const response = await apiClient.post<CreatedAppPassword>('/users/me/app-passwords', { name });
+  return response.data;
+};
+
+export const deleteAppPassword = async (id: number): Promise<void> => {
+  await apiClient.delete(`/users/me/app-passwords/${id}`);
+};
