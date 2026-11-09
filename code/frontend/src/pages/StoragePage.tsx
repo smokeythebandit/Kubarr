@@ -27,7 +27,10 @@ export default function StoragePage() {
   const [editorItem, setEditorItem] = useState<FileInfo | null>(null)
   const [editorContent, setEditorContent] = useState('')
 
-  const { isAdmin } = useAuth()
+  const { hasPermission } = useAuth()
+  const canWrite = hasPermission('storage.write')
+  const canDelete = hasPermission('storage.delete')
+  const canDownload = hasPermission('storage.download')
   const queryClient = useQueryClient()
 
   const {
@@ -191,7 +194,7 @@ export default function StoragePage() {
           <StorageTabs activeTab={activeTab} onChange={setActiveTab} compact />
         </div>
         <div className="flex flex-wrap gap-3">
-          {activeTab === 'browser' && isAdmin && (
+          {activeTab === 'browser' && canWrite && (
             <button
               onClick={() => setShowNewFolderModal(true)}
               className="flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-blue-600/20 transition hover:-translate-y-0.5 hover:bg-blue-700"
@@ -217,7 +220,9 @@ export default function StoragePage() {
             <StorageBrowser
               listing={listing}
               isLoading={listingLoading}
-              isAdmin={isAdmin}
+              canWrite={canWrite}
+              canDelete={canDelete}
+              canDownload={canDownload}
               selectedItem={selectedItem}
               onNavigate={handleNavigate}
               onItemClick={handleItemClick}
@@ -230,7 +235,7 @@ export default function StoragePage() {
               <StorageEditorPane
                 item={editorItem}
                 content={editorContent}
-                isAdmin={isAdmin}
+                canWrite={canWrite}
                 isLoading={editorQuery.isLoading}
                 error={editorQuery.error}
                 isSaving={saveTextMutation.isPending}

@@ -634,6 +634,18 @@ async fn register(
         if updated.rows_affected != 1 {
             return Err(AppError::BadRequest("Invalid or used invite".to_string()));
         }
+        // A role deleted after the invite was made is skipped, not an error:
+        // the account still works and an admin can assign a role later.
+        if let Some(role_id) = invitation.role_id {
+            if Role::find_by_id(role_id).one(&tx).await?.is_some() {
+                user_role::ActiveModel {
+                    user_id: Set(created.id),
+                    role_id: Set(role_id),
+                }
+                .insert(&tx)
+                .await?;
+            }
+        }
         crate::services::audit::log_on_transaction(
             &tx,
             AuditAction::InviteUsed,

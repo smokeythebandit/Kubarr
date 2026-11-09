@@ -138,6 +138,9 @@ interface AppCardComponentProps {
   updateAvailable: boolean
   isOperationPending: boolean
   canInstall: boolean
+  canDelete: boolean
+  /** False when the user's roles do not grant access to this app. */
+  canOpen: boolean
   compact?: boolean
 }
 
@@ -155,6 +158,8 @@ function AppCardComponent({
   updateAvailable,
   isOperationPending,
   canInstall,
+  canDelete,
+  canOpen,
   compact = false
 }: AppCardComponentProps) {
   const colors = useIconColors(app.name)
@@ -261,7 +266,7 @@ function AppCardComponent({
           </svg>
         </button>
       )
-    } else if (effectiveState === 'installed' && app.is_browseable) {
+    } else if (effectiveState === 'installed' && app.is_browseable && canOpen) {
       action = (
         <button onClick={onOpen} aria-label={`Open ${app.display_name}`} title="Open" className={`${iconButton} bg-blue-600 hover:bg-blue-500 text-white`}>
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -409,7 +414,7 @@ function AppCardComponent({
             </button>
           ) : effectiveState === 'installed' ? (
             <>
-              {app.is_browseable && (
+              {app.is_browseable && canOpen && (
                 <button
                   onClick={onOpen}
                   className="flex-1 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
@@ -420,26 +425,26 @@ function AppCardComponent({
                   Open
                 </button>
               )}
-              {updateAvailable && (
+              {updateAvailable && canInstall && (
                 <button
                   onClick={onUpdate}
                   disabled={isOperationPending}
-                  className={`${!app.is_browseable && app.is_system ? 'w-full' : 'flex-1'} bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:cursor-not-allowed text-white disabled:text-gray-500 text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2`}
+                  className={`${!(app.is_browseable && canOpen) && app.is_system ? 'w-full' : 'flex-1'} bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:cursor-not-allowed text-white disabled:text-gray-500 text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2`}
                 >
                   Update
                 </button>
               )}
-              {!app.is_system && (
+              {!app.is_system && canDelete && (
                 <button
                   onClick={onDelete}
                   disabled={isOperationPending}
-                  className={`${!app.is_browseable ? 'w-full' : ''} bg-gray-100 dark:bg-gray-700/50 hover:bg-red-600 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:cursor-not-allowed text-gray-600 dark:text-gray-300 hover:text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2`}
+                  className={`${!(app.is_browseable && canOpen) ? 'w-full' : ''} bg-gray-100 dark:bg-gray-700/50 hover:bg-red-600 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:cursor-not-allowed text-gray-600 dark:text-gray-300 hover:text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2`}
                   title="Uninstall"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                   </svg>
-                  {!app.is_browseable && 'Uninstall'}
+                  {!(app.is_browseable && canOpen) && 'Uninstall'}
                 </button>
               )}
             </>
@@ -599,12 +604,13 @@ function AppDetailPanel({
   onVpnChangeQueued
 }: AppDetailPanelProps) {
   const colors = useIconColors(app?.name || '')
-  const { hasPermission } = useAuth()
+  const { hasPermission, canAccessApp } = useAuth()
   const canViewVpn = hasPermission('vpn.view')
   const canManageVpn = hasPermission('vpn.manage')
   const canRestart = hasPermission('apps.restart')
   const canChangeGpu = hasPermission('apps.install')
   const canInstall = hasPermission('apps.install')
+  const canDelete = hasPermission('apps.delete')
   const queryClient = useQueryClient()
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null)
   const [killSwitchOverride, setKillSwitchOverride] = useState<boolean | null>(null)
@@ -750,7 +756,7 @@ function AppDetailPanel({
 
                 {/* Action buttons */}
                 <div className="flex flex-col gap-2 flex-shrink-0">
-                  {app.is_browseable && (isInstalled || app.is_system) && !app.is_hidden && (
+                  {app.is_browseable && canAccessApp(app.name) && (isInstalled || app.is_system) && !app.is_hidden && (
                     <button
                       onClick={onOpen}
                       className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-2 px-4 rounded-xl transition-colors flex items-center gap-1.5"
@@ -774,7 +780,7 @@ function AppDetailPanel({
                       Restart
                     </button>
                   )}
-                  {isInstalled && effectiveState === 'installed' && updateAvailable && (
+                  {canInstall && isInstalled && effectiveState === 'installed' && updateAvailable && (
                     <button
                       onClick={onUpdate}
                       disabled={isOperationPending}
@@ -783,7 +789,7 @@ function AppDetailPanel({
                       Update
                     </button>
                   )}
-                  {!app.is_system && isInstalled && effectiveState === 'installed' && (
+                  {canDelete && !app.is_system && isInstalled && effectiveState === 'installed' && (
                     <button
                       onClick={onDelete}
                       disabled={isOperationPending}
@@ -1154,7 +1160,7 @@ function operationErrorMessage(error: unknown): string {
 
 export default function AppsPage() {
   const { catalog, installedApps: installed, appStates, appStatuses: globalAppStatuses, refreshAppStatuses } = useMonitoring()
-  const { hasPermission } = useAuth()
+  const { hasPermission, canAccessApp } = useAuth()
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
@@ -1788,6 +1794,8 @@ export default function AppsPage() {
                           (deleteMutation.isPending && deleteMutation.variables === app.name) ||
                            (restartMutation.isPending && restartMutation.variables === app.name)}
                         canInstall={hasPermission('apps.install')}
+                        canDelete={hasPermission('apps.delete')}
+                        canOpen={canAccessApp(app.name)}
                         compact={cardView === 'compact'}
                       />
                     )

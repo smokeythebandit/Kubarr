@@ -500,7 +500,8 @@ function Navigation() {
   const isSystemActive = ['/storage', '/logs', '/resources', '/networking', '/security'].includes(location.pathname)
 
   // Show Settings if user has any settings/users/roles permission
-  const canViewSettings = hasPermission('settings.view') || hasPermission('users.view') || hasPermission('roles.view')
+  // Mirrors SettingsPage's per-section rules: show the link when at least one section opens.
+  const canViewSettings = ['settings.view', 'users.view', 'users.manage', 'roles.view', 'vpn.view', 'audit.view'].some(hasPermission)
 
   // Close mobile menu on navigation
   useEffect(() => {

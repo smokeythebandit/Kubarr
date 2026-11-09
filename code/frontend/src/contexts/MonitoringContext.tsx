@@ -123,7 +123,9 @@ export function MonitoringProvider({ children }: { children: ReactNode }) {
     metricsLoading: metrics.isLoading,
     metricsAvailable,
     catalog: catalog.data ?? [],
-    catalogLoading: catalog.isLoading,
+    // Both lists are needed to know what is installed; an empty installed list
+    // while it is still loading must not read as "No apps installed yet".
+    catalogLoading: catalog.isLoading || installed.isLoading,
     installedApps: installed.data ?? [],
     appStates,
     appStatuses,

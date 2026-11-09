@@ -23,6 +23,8 @@ type GeneralTabProps = {
   setEditingOAuthProvider: Dispatch<SetStateAction<string | null>>;
   setOauthProviderConfig: Dispatch<SetStateAction<OAuthProviderConfig>>;
   getOAuthProviderIcon: (providerId: string) => ReactNode;
+  /** settings.manage: change registration and OAuth settings. */
+  canManage: boolean;
 };
 
 export function GeneralTab({
@@ -39,6 +41,7 @@ export function GeneralTab({
   setEditingOAuthProvider,
   setOauthProviderConfig,
   getOAuthProviderIcon,
+  canManage,
 }: GeneralTabProps) {
   return (
     <SettingsTabLayout
@@ -65,6 +68,7 @@ export function GeneralTab({
               settingsStatus={settingsStatus}
               savingSettings={savingSettings}
               onToggleSetting={onToggleSetting}
+              canManage={canManage}
             />
           </div>
 
@@ -76,6 +80,7 @@ export function GeneralTab({
             settingsStatus={settingsStatus}
             savingSettings={savingSettings}
             onToggleSetting={onToggleSetting}
+            canManage={canManage}
           />
         </div>
       </div>
@@ -110,7 +115,7 @@ export function GeneralTab({
                   aria-label={`${provider.name} OAuth`}
                   aria-checked={provider.enabled}
                   onClick={() => onToggleOAuthProvider(provider.id, !provider.enabled)}
-                  disabled={!provider.client_id && !provider.enabled}
+                  disabled={!canManage || (!provider.client_id && !provider.enabled)}
                   title={!provider.client_id && !provider.enabled ? 'Configure credentials first' : ''}
                   className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                     provider.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
@@ -124,7 +129,7 @@ export function GeneralTab({
                 </button>
               </div>
 
-              {editingOAuthProvider === provider.id ? (
+              {!canManage ? null : editingOAuthProvider === provider.id ? (
                 <div className="mt-4 space-y-3 border-t border-gray-200 dark:border-gray-700 pt-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -210,6 +215,7 @@ type SettingSwitchProps = {
   settingsStatus: SettingsStatus;
   savingSettings: boolean;
   onToggleSetting: (key: string) => void;
+  canManage: boolean;
 };
 
 /** One registration toggle.
@@ -227,10 +233,11 @@ function SettingSwitch({
   settingsStatus,
   savingSettings,
   onToggleSetting,
+  canManage,
 }: SettingSwitchProps) {
   const known = settingsStatus === 'ready';
   const checked = systemSettings[settingKey]?.value === 'true';
-  const disabled = savingSettings || !known;
+  const disabled = !canManage || savingSettings || !known;
 
   return (
     <div className="flex items-center justify-between py-4">

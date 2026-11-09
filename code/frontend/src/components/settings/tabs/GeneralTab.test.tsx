@@ -22,6 +22,7 @@ function props(overrides: Partial<Parameters<typeof GeneralTab>[0]> = {}) {
     setEditingOAuthProvider: vi.fn(),
     setOauthProviderConfig: vi.fn(),
     getOAuthProviderIcon: () => null,
+    canManage: true,
     ...overrides,
   };
 }

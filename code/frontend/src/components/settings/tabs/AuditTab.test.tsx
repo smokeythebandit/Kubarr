@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuditTab } from './AuditTab';
 import SettingsPage from '../../../pages/SettingsPage';
 import type { AuditLog } from '../../../api/audit';
@@ -97,7 +98,7 @@ describe('AuditTab', () => {
   it('blocks requests for reversed dates, shows the range error, and fetches again after clearing', async () => {
     getLogs.mockResolvedValue({ logs: [log], page: 1, total: 45, total_pages: 3, per_page: 20 });
     getStats.mockResolvedValue(null);
-    render(<MemoryRouter initialEntries={['/settings?section=audit']}><SettingsPage /></MemoryRouter>);
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/settings?section=audit']}><SettingsPage /></MemoryRouter></QueryClientProvider>);
     await waitFor(() => expect(getLogs).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     await waitFor(() => expect(getLogs).toHaveBeenCalledTimes(2));

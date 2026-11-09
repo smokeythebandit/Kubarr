@@ -729,19 +729,53 @@ impl<'a> DeploymentManager<'a> {
 
     /// Get list of deployed app names.
     pub async fn get_deployed_apps(&self) -> Vec<String> {
-        let mut deployed_apps = Vec::new();
-        for app in self
+        let candidates: Vec<String> = self
             .catalog
             .get_all_apps()
             .into_iter()
             .filter(|app| !app.is_hidden)
-        {
-            if self.check_app_deployed(&app.name).await {
-                deployed_apps.push(app.name.clone());
-            }
-        }
+            .map(|app| app.name.clone())
+            .collect();
 
-        deployed_apps
+        // One namespace list replaces a GET per catalog app; only apps whose
+        // namespace exists need a workload check.
+        let namespaces: Api<Namespace> = Api::all(self.k8s.client().clone());
+        let existing: Option<std::collections::HashSet<String>> = namespaces
+            .list(&ListParams::default())
+            .await
+            .ok()
+            .map(|list| {
+                list.items
+                    .into_iter()
+                    .filter_map(|ns| ns.metadata.name)
+                    .collect()
+            });
+        let candidates: Vec<String> = match existing {
+            Some(existing) => candidates
+                .into_iter()
+                .filter(|name| existing.contains(&lifecycle_for_app_name(name).namespace))
+                .collect(),
+            None => candidates,
+        };
+
+        // Workload checks are independent K8s GETs; run them together. Helm
+        // metadata never turns a present app into "not_found", so skip the
+        // helm subprocess here.
+        let checks = candidates.iter().map(|name| async move {
+            let deployed = match self
+                .app_health_with_metadata_command(name, |_| Ok(None))
+                .await
+            {
+                Ok(health) => health["status"].as_str() != Some("not_found"),
+                Err(_) => false,
+            };
+            deployed.then(|| name.clone())
+        });
+        futures_util::future::join_all(checks)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     pub async fn check_app_deployed(&self, app_name: &str) -> bool {

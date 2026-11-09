@@ -13,12 +13,15 @@ interface AppVpnAssignmentsProps {
   configs: AppVpnConfig[];
   providers: VpnProvider[];
   onRefresh: () => void;
+  /** vpn.manage: assign and remove app VPNs. */
+  canManage: boolean;
 }
 
 export function AppVpnAssignments({
   configs,
   providers,
   onRefresh,
+  canManage,
 }: AppVpnAssignmentsProps) {
   const [removingApp, setRemovingApp] = useState<string | null>(null);
   const [showAssignForm, setShowAssignForm] = useState(false);
@@ -110,7 +113,7 @@ export function AppVpnAssignments({
         <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
           App VPN Assignments
         </h3>
-        {enabledProviders.length > 0 && (
+        {canManage && enabledProviders.length > 0 && (
           <button
             onClick={() => setShowAssignForm(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
@@ -333,7 +336,7 @@ export function AppVpnAssignments({
                       )}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <button
+                      {canManage && <button
                         onClick={() => handleRemove(config.app_name)}
                         disabled={removingApp === config.app_name}
                         className="p-2 text-gray-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors disabled:opacity-50"
@@ -344,7 +347,7 @@ export function AppVpnAssignments({
                         ) : (
                           <Trash2 size={18} />
                         )}
-                      </button>
+                      </button>}
                     </td>
                   </tr>
                 );

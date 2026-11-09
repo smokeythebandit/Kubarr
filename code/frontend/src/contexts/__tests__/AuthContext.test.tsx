@@ -73,4 +73,18 @@ describe('AuthContext', () => {
     expect(result.current.canAccessApp('sonarr')).toBe(true);
     expect(result.current.canAccessApp('lidarr')).toBe(false);
   });
+
+  it('canAccessApp treats allowed_apps ["*"] (app.* permission) as every app', async () => {
+    mockGetCurrentUser.mockResolvedValue(createMockUser({ allowed_apps: ['*'] }));
+    mockGetAccounts.mockResolvedValue([]);
+
+    const { result } = renderAuthHook();
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.isAdmin).toBe(false);
+    expect(result.current.canAccessApp('lidarr')).toBe(true);
+  });
 });

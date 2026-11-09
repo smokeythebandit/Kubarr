@@ -8,14 +8,16 @@ type UsersTabProps = {
   onEditUser: (user: User) => void;
   onDeleteUser: (user: User) => void;
   onApproveUser: (user: User) => void;
+  /** users.manage: create, edit, approve and delete. */
+  canManage: boolean;
 };
 
-export function UsersTab({ users, onCreateUser, onEditUser, onDeleteUser, onApproveUser }: UsersTabProps) {
+export function UsersTab({ users, onCreateUser, onEditUser, onDeleteUser, onApproveUser, canManage }: UsersTabProps) {
   return (
     <SettingsTabLayout
       title="All Users"
       description="Manage user accounts and access."
-      actions={(
+      actions={canManage && (
         <button
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md font-medium transition-colors"
           onClick={onCreateUser}
@@ -29,7 +31,7 @@ export function UsersTab({ users, onCreateUser, onEditUser, onDeleteUser, onAppr
         onEdit={onEditUser}
         onDelete={onDeleteUser}
         onApprove={onApproveUser}
-        showActions={true}
+        showActions={canManage}
       />
     </SettingsTabLayout>
   );

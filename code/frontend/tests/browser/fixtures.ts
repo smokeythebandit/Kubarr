@@ -35,6 +35,7 @@ export const test = base.extend<{ api: MockApi }>({
     api.get('/api/users', [admin]);
     api.get('/api/users/pending', []);
     api.get('/api/users/invites', []);
+    api.get('/api/domains', []);
     api.get('/api/roles', []);
     api.get('/api/settings', { settings: {} });
     api.get('/api/apps/catalog', []);

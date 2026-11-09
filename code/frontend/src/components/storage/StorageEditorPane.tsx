@@ -5,7 +5,7 @@ import { highlightedHtml } from './storageUtils'
 interface StorageEditorPaneProps {
   item: FileInfo
   content: string
-  isAdmin: boolean
+  canWrite: boolean
   isLoading: boolean
   error: unknown
   isSaving: boolean
@@ -19,7 +19,7 @@ interface StorageEditorPaneProps {
 export function StorageEditorPane({
   item,
   content,
-  isAdmin,
+  canWrite,
   isLoading,
   error,
   isSaving,
@@ -41,7 +41,7 @@ export function StorageEditorPane({
           <p className="mt-1 truncate font-mono text-xs text-slate-400">{item.path}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {isAdmin && (
+          {canWrite && (
             <button
               onClick={onSave}
               disabled={isSaving || isLoading}
@@ -80,7 +80,7 @@ export function StorageEditorPane({
           <textarea
             value={content}
             onChange={(event) => onChange(event.target.value)}
-            readOnly={!isAdmin}
+            readOnly={!canWrite}
             spellCheck={false}
             className="relative z-10 h-full min-h-full w-full resize-none whitespace-pre-wrap break-words bg-transparent p-4 pl-[4.5rem] font-mono text-sm leading-6 text-transparent caret-cyan-300 outline-none selection:bg-cyan-500/30 read-only:cursor-default"
           />

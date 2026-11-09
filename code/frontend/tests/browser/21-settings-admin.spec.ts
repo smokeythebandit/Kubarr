@@ -41,7 +41,7 @@ test('invite create and delete never exposes code in inventory', async ({ page, 
     used_by_username: null, is_used: false, expires_at: null, created_at: timestamp, used_at: null };
   api.on('GET', '/api/users/invites', () => ({ json: invites }));
   api.on('POST', '/api/users/invites', request => {
-    expect(request.postDataJSON()).toEqual({ expires_in_days: 7 });
+    expect(request.postDataJSON()).toEqual({ expires_in_days: 7, role_id: null });
     invites = [invitation]; return { json: invitation };
   });
   api.on('DELETE', '/api/users/invites/301', () => { invites = []; return { json: { message: 'deleted' } }; });
@@ -56,6 +56,32 @@ test('invite create and delete never exposes code in inventory', async ({ page, 
   expect(api.calls.filter(call => !call.startsWith('GET '))).toEqual([
     'POST /api/users/invites', 'DELETE /api/users/invites/301',
   ]);
+});
+
+test('invite links use the primary public domain instead of the admin LAN address', async ({ page, api }) => {
+  const invitation: Invite = { id: 302, code: 'domain-invite', created_by_username: admin.username,
+    used_by_username: null, is_used: false, expires_at: null, created_at: timestamp, used_at: null };
+  api.on('GET', '/api/domains', () => ({ json: [
+    { id: 1, domain: '*.kubarr.example.test', kind: 'wildcard', scope: 'public', primary: false, enabled: true, tls_mode: 'letsencrypt' },
+    { id: 2, domain: 'kubarr.example.test', kind: 'root', scope: 'public', primary: true, enabled: true, tls_mode: 'letsencrypt' },
+  ] }));
+  api.on('POST', '/api/users/invites', () => ({ json: invitation }));
+  await page.goto('/settings?section=invites');
+  await page.getByRole('button', { name: 'Create Invite' }).click();
+  await expect(page.locator('input[readonly]')).toHaveValue('https://kubarr.example.test/login?register=1&invite=domain-invite');
+  await expect(page.getByRole('note')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Copy', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Copied!' })).toBeVisible();
+});
+
+test('invite modal warns when the link falls back to a local network address', async ({ page, api }) => {
+  const invitation: Invite = { id: 303, code: 'lan-invite', created_by_username: admin.username,
+    used_by_username: null, is_used: false, expires_at: null, created_at: timestamp, used_at: null };
+  api.on('POST', '/api/users/invites', () => ({ json: invitation }));
+  await page.goto('/settings?section=invites');
+  await page.getByRole('button', { name: 'Create Invite' }).click();
+  await expect(page.locator('input[readonly]')).toHaveValue('http://127.0.0.1:4174/login?register=1&invite=lan-invite');
+  await expect(page.getByRole('note')).toContainText("won't work outside your network");
 });
 
 test('permission matrix locks admin and persists limited role changes through reload', async ({ page, api }) => {

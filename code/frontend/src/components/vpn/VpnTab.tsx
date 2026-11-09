@@ -1,3 +1,4 @@
+import { useAuth } from '../../contexts/AuthContext';
 import { useState, useEffect } from 'react';
 import { RefreshCw, AlertCircle } from 'lucide-react';
 import { VpnProvider, AppVpnConfig, vpnApi, appVpnApi } from '../../api/vpn';
@@ -6,6 +7,8 @@ import { VpnProviderForm } from './VpnProviderForm';
 import { AppVpnAssignments } from './AppVpnAssignments';
 
 export function VpnTab() {
+  const { hasPermission } = useAuth();
+  const canManage = hasPermission('vpn.manage');
   const [providers, setProviders] = useState<VpnProvider[]>([]);
   const [appConfigs, setAppConfigs] = useState<AppVpnConfig[]>([]);
   const [loading, setLoading] = useState(true);
@@ -108,6 +111,7 @@ export function VpnTab() {
         onRefresh={fetchData}
         onEdit={handleEditProvider}
         onAdd={handleAddProvider}
+        canManage={canManage}
       />
 
       {/* App Assignments */}
@@ -115,10 +119,11 @@ export function VpnTab() {
         configs={appConfigs}
         providers={providers}
         onRefresh={fetchData}
+        canManage={canManage}
       />
 
       {/* Provider Form Modal */}
-      {showForm && (
+      {canManage && showForm && (
         <VpnProviderForm
           provider={editingProvider}
           onClose={handleFormClose}
