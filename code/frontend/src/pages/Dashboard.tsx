@@ -1,5 +1,6 @@
 import { AppIcon, useIconColors } from '../components/AppIcon'
 import { useMonitoring } from '../contexts/MonitoringContext'
+import { useAuth } from '../contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
 import { useMemo, useRef } from 'react'
 import { monitoringApi } from '../api/monitoring'
@@ -150,10 +151,11 @@ export default function Dashboard() {
     appStates,
     appStatuses,
   } = useMonitoring()
+  const { canAccessApp } = useAuth()
 
   const installedApps = useMemo(() => catalog.filter((app) => installedAppNames.includes(app.name)), [catalog, installedAppNames])
-  // Only show apps that can be opened (browseable)
-  const openableApps = useMemo(() => installedApps.filter((app) => app.is_browseable), [installedApps])
+  // Only show apps the user can open: browseable and granted by one of their roles
+  const openableApps = installedApps.filter((app) => app.is_browseable && canAccessApp(app.name))
 
   // Cache the last known app count in localStorage so loading skeletons match
   const skeletonAppCount = useRef(

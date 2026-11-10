@@ -14,6 +14,8 @@ pub struct Model {
     pub expires_at: Option<DateTimeUtc>,
     pub created_at: DateTimeUtc,
     pub used_at: Option<DateTimeUtc>,
+    /// Role granted to the user who redeems this invite.
+    pub role_id: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

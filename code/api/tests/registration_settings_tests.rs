@@ -403,3 +403,128 @@ async fn registration_approval_invitation_and_permissions() {
         .unwrap()
         .contains(&serde_json::json!("storage.download")));
 }
+
+#[tokio::test]
+async fn invite_role_is_granted_on_registration() {
+    let db = create_test_db_with_seed().await;
+    kubarr::services::init_jwt_keys(&db).await.unwrap();
+    // Generated per run so no credential literal lives in the test.
+    let admin_password = uuid::Uuid::new_v4().to_string();
+    create_test_user_with_role(
+        &db,
+        "role_admin",
+        "roleadmin@example.test",
+        &admin_password,
+        "admin",
+    )
+    .await;
+    let state = build_test_app_state_with_db(db.clone()).await;
+    let app = || create_router(state.clone());
+    let (_, _, admin) = send(
+        app(),
+        "POST",
+        "/auth/login",
+        None,
+        serde_json::json!({"username":"role_admin", "password": admin_password}),
+    )
+    .await;
+    let admin = admin.unwrap();
+    let viewer = Role::find()
+        .filter(role::Column::Name.eq("viewer"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Unknown roles are rejected up front instead of producing a dead invite.
+    let (status, _, _) = send(
+        app(),
+        "POST",
+        "/api/users/invites",
+        Some(&admin),
+        serde_json::json!({"role_id": 999_999}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, invite, _) = send(
+        app(),
+        "POST",
+        "/api/users/invites",
+        Some(&admin),
+        serde_json::json!({"role_id": viewer.id}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(invite["role_id"], viewer.id);
+    assert_eq!(invite["role_name"], "viewer");
+
+    let (_, listed, _) = send(
+        app(),
+        "GET",
+        "/api/users/invites",
+        Some(&admin),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(listed[0]["role_name"], "viewer");
+
+    let (status, _, _) = send(
+        app(),
+        "POST",
+        "/auth/register",
+        None,
+        serde_json::json!({"username":"role_invitee", "email":"role_invitee@example.test",
+            "password":"test-only-password", "invite_code": invite["code"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _, cookie) = send(
+        app(),
+        "POST",
+        "/auth/login",
+        None,
+        serde_json::json!({"username":"role_invitee", "password":"test-only-password"}),
+    )
+    .await;
+    let (_, me, _) = send(
+        app(),
+        "GET",
+        "/api/users/me",
+        cookie.as_deref(),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(me["roles"][0]["name"], "viewer");
+    assert!(!me["permissions"].as_array().unwrap().is_empty());
+
+    // A role deleted after the invite was created is skipped, not fatal.
+    let temp = role::ActiveModel {
+        name: Set("temporary".to_string()),
+        description: Set(None),
+        created_at: Set(chrono::Utc::now()),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let (_, invite, _) = send(
+        app(),
+        "POST",
+        "/api/users/invites",
+        Some(&admin),
+        serde_json::json!({"role_id": temp.id}),
+    )
+    .await;
+    Role::delete_by_id(temp.id).exec(&db).await.unwrap();
+    let (status, body, _) = send(
+        app(),
+        "POST",
+        "/auth/register",
+        None,
+        serde_json::json!({"username":"orphan_invitee", "email":"orphan@example.test",
+            "password":"test-only-password", "invite_code": invite["code"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}

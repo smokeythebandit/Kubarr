@@ -1,3 +1,4 @@
+import { useAuth } from '../../../contexts/AuthContext';
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Lock, Pencil, Plus, Trash2, X } from 'lucide-react';
@@ -7,6 +8,7 @@ import { SettingsCard, SettingsTabLayout } from './SettingsTabLayout';
 const inputClass = 'w-full px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent';
 
 export function LetsEncryptTab() {
+  const canManage = useAuth().hasPermission('settings.manage');
   const [profiles, setProfiles] = useState<LetsEncryptProfile[]>([]);
   const [dnsProfiles, setDnsProfiles] = useState<DynamicDnsProfile[]>([]);
   const [editing, setEditing] = useState<LetsEncryptProfile | null>(null);
@@ -40,7 +42,7 @@ export function LetsEncryptTab() {
     <SettingsTabLayout
       title="Let’s Encrypt"
       description="Manage certificate automation profiles. Wildcard certificates require DNS-01 and a DNS profile with TXT support."
-      actions={<button onClick={() => { setEditing(null); setShowForm(true); }} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"><Plus size={18} /> Add Profile</button>}
+      actions={canManage && <button onClick={() => { setEditing(null); setShowForm(true); }} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"><Plus size={18} /> Add Profile</button>}
     >
       {error && <div className="p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded-lg text-sm">{error}</div>}
       {loading ? <div className="py-8 text-center text-gray-500">Loading profiles...</div> : profiles.length === 0 ? (
@@ -64,7 +66,7 @@ export function LetsEncryptTab() {
                       </div>
                     </div>
                   </div>
-                  <div className="flex gap-2"><button onClick={() => { setEditing(profile); setShowForm(true); }} className="p-2 text-gray-500 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg"><Pencil size={18} /></button><button onClick={() => handleDelete(profile)} className="p-2 text-gray-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg"><Trash2 size={18} /></button></div>
+                  {canManage && <div className="flex gap-2"><button onClick={() => { setEditing(profile); setShowForm(true); }} className="p-2 text-gray-500 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg"><Pencil size={18} /></button><button onClick={() => handleDelete(profile)} className="p-2 text-gray-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg"><Trash2 size={18} /></button></div>}
                 </div>
               </SettingsCard>
             );

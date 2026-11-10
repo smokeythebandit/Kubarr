@@ -1,3 +1,4 @@
+import { useAuth } from '../../contexts/AuthContext';
 import React, { useState, useEffect, useCallback } from 'react';
 import { Role, PermissionInfo, getPermissions, getRoles, setRolePermissions } from '../../api/roles';
 import { appsApi } from '../../api/apps';
@@ -12,6 +13,7 @@ interface AppInfo {
 }
 
 const PermissionMatrix: React.FC = () => {
+  const canManage = useAuth().hasPermission('roles.manage');
   const [roles, setRoles] = useState<Role[]>([]);
   const [permissionsByCategory, setPermissionsByCategory] = useState<PermissionsByCategory>({});
   const [rolePermissions, setRolePermissionsState] = useState<{ [roleId: number]: Set<string> }>({});
@@ -117,7 +119,7 @@ const PermissionMatrix: React.FC = () => {
 
   const togglePermission = (roleId: number, permission: string) => {
     const role = roles.find(r => r.id === roleId);
-    if (role && isAdminRole(role)) {
+    if (!canManage || (role && isAdminRole(role))) {
       return; // Cannot modify admin role
     }
 
@@ -137,7 +139,7 @@ const PermissionMatrix: React.FC = () => {
 
   const saveRolePermissions = async (roleId: number) => {
     const role = roles.find(r => r.id === roleId);
-    if (!role || isAdminRole(role)) return;
+    if (!canManage || !role || isAdminRole(role)) return;
 
     const permissionsToSave = pendingChanges[roleId];
     if (!permissionsToSave) return;
@@ -348,7 +350,7 @@ const PermissionMatrix: React.FC = () => {
                               type="checkbox"
                               checked={hasPermission(role.id, permission.key)}
                               onChange={() => togglePermission(role.id, permission.key)}
-                              disabled={isAdminRole(role)}
+                              disabled={!canManage || isAdminRole(role)}
                               className={`w-5 h-5 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500 focus:ring-offset-0 transition-colors ${
                                 isAdminRole(role)
                                   ? 'opacity-50 cursor-not-allowed bg-blue-100 dark:bg-blue-900'

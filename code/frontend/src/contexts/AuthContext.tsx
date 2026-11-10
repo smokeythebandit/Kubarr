@@ -116,7 +116,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const canAccessApp = (appName: string): boolean => {
     if (isAdmin) return true;
     if (allowedApps === null) return true;
-    return allowedApps.has(appName);
+    // `app.*` roles come back from the API as allowed_apps: ["*"].
+    return allowedApps.has('*') || allowedApps.has(appName);
   };
 
   // Get accounts other than the current active one

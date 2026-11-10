@@ -7,9 +7,11 @@ type PendingUsersTabProps = {
   onApproveUser: (user: User) => void;
   onRejectUser: (user: User) => void;
   onDeleteUser: (user: User) => void;
+  /** users.manage: approve, reject and delete. */
+  canManage: boolean;
 };
 
-export function PendingUsersTab({ pendingUsers, onApproveUser, onRejectUser, onDeleteUser }: PendingUsersTabProps) {
+export function PendingUsersTab({ pendingUsers, onApproveUser, onRejectUser, onDeleteUser, canManage }: PendingUsersTabProps) {
   return (
     <SettingsTabLayout
       title="Pending Approval"
@@ -20,7 +22,7 @@ export function PendingUsersTab({ pendingUsers, onApproveUser, onRejectUser, onD
         onApprove={onApproveUser}
         onReject={onRejectUser}
         onDelete={onDeleteUser}
-        showActions={true}
+        showActions={canManage}
       />
     </SettingsTabLayout>
   );

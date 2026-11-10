@@ -79,6 +79,7 @@ vi.mock('../components/vpn/VpnProviderForm', () => ({
 
 vi.mock('../contexts/AuthContext', () => ({
   useAuth: () => ({
+    canAccessApp: () => true,
     hasPermission: (permission: string) => {
       if (permission === 'apps.restart') return mocks.canRestart
       if (permission === 'apps.install') return mocks.canInstall

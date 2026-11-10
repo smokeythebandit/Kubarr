@@ -25,6 +25,8 @@ type NotificationsTabProps = {
   getChannelIcon: (channelType: string) => ReactNode;
   getChannelConfigFields: (channelType: string) => ChannelConfigField[];
   formatAuditAction: (action: string) => string;
+  /** settings.manage: configure channels and event triggers. */
+  canManage: boolean;
 };
 
 export function NotificationsTab({
@@ -48,6 +50,7 @@ export function NotificationsTab({
   getChannelIcon,
   getChannelConfigFields,
   formatAuditAction,
+  canManage,
 }: NotificationsTabProps) {
   return (
     <SettingsTabLayout
@@ -86,6 +89,7 @@ export function NotificationsTab({
                       aria-label={`${channel.channel_type} notifications`}
                       aria-checked={channel.enabled}
                       onClick={() => onToggleChannel(channel.channel_type, !channel.enabled)}
+                      disabled={!canManage}
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                         channel.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
                       }`}
@@ -98,7 +102,7 @@ export function NotificationsTab({
                     </button>
                   </div>
 
-                  {editingChannel === channel.channel_type ? (
+                  {!canManage ? null : editingChannel === channel.channel_type ? (
                     <div className="mt-4 space-y-3 border-t border-gray-200 dark:border-gray-700 pt-4">
                       {getChannelConfigFields(channel.channel_type).map((field) => (
                         <div key={field.key}>
@@ -206,6 +210,7 @@ export function NotificationsTab({
                           aria-label={`${formatAuditAction(event.event_type)} severity`}
                           value={event.severity}
                           onChange={(e) => onUpdateEventSeverity(event.event_type, e.target.value)}
+                          disabled={!canManage}
                           className="px-2 py-1 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                         >
                           <option value="info">Info</option>
@@ -219,6 +224,7 @@ export function NotificationsTab({
                           aria-label={`${formatAuditAction(event.event_type)} notifications`}
                           aria-checked={event.enabled}
                           onClick={() => onToggleEvent(event.event_type, !event.enabled)}
+                          disabled={!canManage}
                           className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                             event.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
                           }`}

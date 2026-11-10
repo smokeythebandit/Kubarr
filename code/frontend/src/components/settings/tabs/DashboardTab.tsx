@@ -13,6 +13,8 @@ type DashboardTabProps = {
   isExpired: (expiresAt: string | null) => boolean;
   formatAuditAction: (action: string) => string;
   onSelectSection: (section: 'users' | 'invites' | 'permissions' | 'audit') => void;
+  /** Which sections the viewer may open; hides quick links they cannot use. */
+  canOpen: (section: 'users' | 'invites' | 'permissions' | 'audit') => boolean;
 };
 
 export function DashboardTab({
@@ -24,6 +26,7 @@ export function DashboardTab({
   isExpired,
   formatAuditAction,
   onSelectSection,
+  canOpen,
 }: DashboardTabProps) {
   const activeInvitesCount = invites.filter(i => !i.is_used && !isExpired(i.expires_at)).length;
 
@@ -56,6 +59,7 @@ export function DashboardTab({
             </div>
           </div>
         </div>
+        {canOpen('invites') && (
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-green-100 dark:bg-green-900/30 rounded-lg">
@@ -67,6 +71,8 @@ export function DashboardTab({
             </div>
           </div>
         </div>
+        )}
+        {canOpen('permissions') && (
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-purple-100 dark:bg-purple-900/30 rounded-lg">
@@ -78,6 +84,7 @@ export function DashboardTab({
             </div>
           </div>
         </div>
+        )}
       </div>
 
       {auditStats && (
@@ -202,34 +209,34 @@ export function DashboardTab({
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
         <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Quick Actions</h4>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <button
+          {canOpen('users') && (<button
             onClick={() => onSelectSection('users')}
             className="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
           >
             <Users className="w-6 h-6 text-blue-600 dark:text-blue-400" />
             <span className="text-sm text-gray-700 dark:text-gray-300">Manage Users</span>
-          </button>
-          <button
+          </button>)}
+          {canOpen('invites') && (<button
             onClick={() => onSelectSection('invites')}
             className="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
           >
             <Link className="w-6 h-6 text-green-600 dark:text-green-400" />
             <span className="text-sm text-gray-700 dark:text-gray-300">Create Invite</span>
-          </button>
-          <button
+          </button>)}
+          {canOpen('permissions') && (<button
             onClick={() => onSelectSection('permissions')}
             className="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
           >
             <Lock className="w-6 h-6 text-purple-600 dark:text-purple-400" />
             <span className="text-sm text-gray-700 dark:text-gray-300">Permissions</span>
-          </button>
-          <button
+          </button>)}
+          {canOpen('audit') && (<button
             onClick={() => onSelectSection('audit')}
             className="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
           >
             <FileText className="w-6 h-6 text-orange-600 dark:text-orange-400" />
             <span className="text-sm text-gray-700 dark:text-gray-300">Audit Logs</span>
-          </button>
+          </button>)}
         </div>
       </div>
     </SettingsTabLayout>

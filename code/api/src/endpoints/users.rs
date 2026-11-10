@@ -174,6 +174,9 @@ pub struct UserResponse {
 pub struct CreateInviteRequest {
     #[serde(default = "default_invite_days")]
     pub expires_in_days: i32,
+    /// Role the redeeming user receives. None leaves them without a role.
+    #[serde(default)]
+    pub role_id: Option<i64>,
 }
 
 fn default_invite_days() -> i32 {
@@ -186,6 +189,8 @@ pub struct InviteResponse {
     pub code: String,
     pub created_by_username: String,
     pub used_by_username: Option<String>,
+    pub role_id: Option<i64>,
+    pub role_name: Option<String>,
     pub is_used: bool,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -1008,6 +1013,10 @@ async fn list_invites(
         } else {
             None
         };
+        let role_name = match inv.role_id {
+            Some(role_id) => Role::find_by_id(role_id).one(&db).await?.map(|r| r.name),
+            None => None,
+        };
 
         responses.push(InviteResponse {
             id: inv.id,
@@ -1016,6 +1025,8 @@ async fn list_invites(
                 .map(|u| u.username)
                 .unwrap_or_else(|| "Unknown".to_string()),
             used_by_username: used_by.map(|u| u.username),
+            role_id: inv.role_id,
+            role_name,
             is_used: inv.is_used,
             expires_at: inv.expires_at,
             created_at: inv.created_at,
@@ -1052,6 +1063,16 @@ async fn create_invite(
         None
     };
     let now = Utc::now();
+    let role_name = match data.role_id {
+        Some(role_id) => Some(
+            Role::find_by_id(role_id)
+                .one(&db)
+                .await?
+                .ok_or_else(|| AppError::BadRequest("Role not found".to_string()))?
+                .name,
+        ),
+        None => None,
+    };
 
     let new_invite = invite::ActiveModel {
         code: Set(code.clone()),
@@ -1059,6 +1080,7 @@ async fn create_invite(
         expires_at: Set(expires_at),
         created_at: Set(now),
         is_used: Set(false),
+        role_id: Set(data.role_id),
         ..Default::default()
     };
 
@@ -1070,7 +1092,9 @@ async fn create_invite(
         AuditAction::InviteCreated,
         ResourceType::Invite,
         created_invite.id,
-        None,
+        created_invite
+            .role_id
+            .map(|role_id| serde_json::json!({ "role_id": role_id })),
     )
     .await?;
     txn.commit().await?;
@@ -1080,6 +1104,8 @@ async fn create_invite(
         code: created_invite.code,
         created_by_username: auth.user().username.clone(),
         used_by_username: None,
+        role_id: created_invite.role_id,
+        role_name,
         is_used: created_invite.is_used,
         expires_at: created_invite.expires_at,
         created_at: created_invite.created_at,
@@ -1744,6 +1770,8 @@ mod tests {
             code: "ABC123".to_string(),
             created_by_username: "admin".to_string(),
             used_by_username: None,
+            role_id: None,
+            role_name: None,
             is_used: false,
             expires_at: None,
             created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),

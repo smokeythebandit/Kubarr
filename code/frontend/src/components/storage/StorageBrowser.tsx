@@ -9,7 +9,9 @@ export type BrowserViewMode = 'table' | 'thumbnail'
 interface StorageBrowserProps {
   listing?: DirectoryListing
   isLoading: boolean
-  isAdmin: boolean
+  canWrite: boolean
+  canDelete: boolean
+  canDownload: boolean
   selectedItem: FileInfo | null
   onNavigate: (path: string) => void
   onItemClick: (item: FileInfo) => void
@@ -22,7 +24,9 @@ interface StorageBrowserProps {
 export function StorageBrowser({
   listing,
   isLoading,
-  isAdmin,
+  canWrite,
+  canDelete,
+  canDownload,
   selectedItem,
   onNavigate,
   onItemClick,
@@ -46,7 +50,9 @@ export function StorageBrowser({
         <ThumbnailView
           listing={listing}
           items={items}
-          isAdmin={isAdmin}
+          canWrite={canWrite}
+          canDelete={canDelete}
+          canDownload={canDownload}
           selectedItem={selectedItem}
           onNavigate={onNavigate}
           onItemClick={onItemClick}
@@ -127,7 +133,7 @@ export function StorageBrowser({
                   </td>
                   <td className="px-5 py-4">
                     <div className="flex justify-end gap-2 opacity-100 transition md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
-                      {item.type === 'file' && (
+                      {canDownload && item.type === 'file' && (
                         <button
                           type="button"
                           onClick={(event) => {
@@ -142,8 +148,7 @@ export function StorageBrowser({
                           <span className="hidden text-xs font-bold lg:inline">Download</span>
                         </button>
                       )}
-                      {isAdmin && (
-                        <>
+                      {canWrite && (
                           <button
                             type="button"
                             onClick={(event) => {
@@ -157,6 +162,8 @@ export function StorageBrowser({
                             <Pencil size={16} />
                             <span className="hidden text-xs font-bold lg:inline">Rename</span>
                           </button>
+                      )}
+                      {canDelete && (
                           <button
                             type="button"
                             onClick={(event) => {
@@ -170,7 +177,6 @@ export function StorageBrowser({
                             <Trash2 size={16} />
                             <span className="hidden text-xs font-bold lg:inline">Delete</span>
                           </button>
-                        </>
                       )}
                     </div>
                   </td>
@@ -198,10 +204,12 @@ export function StorageBrowser({
   )
 }
 
-function ThumbnailView({ listing, items, isAdmin, selectedItem, onNavigate, onItemClick, onDownload, onRename, onDelete }: {
+function ThumbnailView({ listing, items, canWrite, canDelete, canDownload, selectedItem, onNavigate, onItemClick, onDownload, onRename, onDelete }: {
   listing?: DirectoryListing
   items: FileInfo[]
-  isAdmin: boolean
+  canWrite: boolean
+  canDelete: boolean
+  canDownload: boolean
   selectedItem: FileInfo | null
   onNavigate: (path: string) => void
   onItemClick: (item: FileInfo) => void
@@ -230,7 +238,7 @@ function ThumbnailView({ listing, items, isAdmin, selectedItem, onNavigate, onIt
               <p className="mt-3 truncate font-black text-gray-900 dark:text-white" title={item.name}>{item.name}</p>
               <p className="text-xs text-gray-500 dark:text-gray-400">{item.type === 'directory' ? 'Folder' : formatBytes(item.size)}</p>
             </button>
-            <ItemActions item={item} isAdmin={isAdmin} onDownload={onDownload} onRename={onRename} onDelete={onDelete} compact />
+            <ItemActions item={item} canWrite={canWrite} canDelete={canDelete} canDownload={canDownload} onDownload={onDownload} onRename={onRename} onDelete={onDelete} compact />
           </div>
           )
         })}
@@ -240,9 +248,11 @@ function ThumbnailView({ listing, items, isAdmin, selectedItem, onNavigate, onIt
   )
 }
 
-function ItemActions({ item, isAdmin, onDownload, onRename, onDelete, compact = false }: {
+function ItemActions({ item, canWrite, canDelete, canDownload, onDownload, onRename, onDelete, compact = false }: {
   item: FileInfo
-  isAdmin: boolean
+  canWrite: boolean
+  canDelete: boolean
+  canDownload: boolean
   onDownload: (item: FileInfo) => void
   onRename: (item: FileInfo) => void
   onDelete: (item: FileInfo) => void
@@ -250,9 +260,9 @@ function ItemActions({ item, isAdmin, onDownload, onRename, onDelete, compact = 
 }) {
   return (
     <div className={`flex ${compact ? 'mt-3 justify-end' : 'justify-end'} gap-2 opacity-100 transition md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100`}>
-      {item.type === 'file' && <IconAction label="Download" color="emerald" icon={<Download size={compact ? 14 : 16} />} onClick={() => onDownload(item)} compact={compact} />}
-      {isAdmin && <IconAction label="Rename" color="indigo" icon={<Pencil size={compact ? 14 : 16} />} onClick={() => onRename(item)} compact={compact} />}
-      {isAdmin && <IconAction label="Delete" color="red" icon={<Trash2 size={compact ? 14 : 16} />} onClick={() => onDelete(item)} compact={compact} />}
+      {canDownload && item.type === 'file' && <IconAction label="Download" color="emerald" icon={<Download size={compact ? 14 : 16} />} onClick={() => onDownload(item)} compact={compact} />}
+      {canWrite && <IconAction label="Rename" color="indigo" icon={<Pencil size={compact ? 14 : 16} />} onClick={() => onRename(item)} compact={compact} />}
+      {canDelete && <IconAction label="Delete" color="red" icon={<Trash2 size={compact ? 14 : 16} />} onClick={() => onDelete(item)} compact={compact} />}
     </div>
   )
 }

@@ -23,6 +23,8 @@ interface VpnProviderListProps {
   onRefresh: () => void;
   onEdit: (provider: VpnProvider) => void;
   onAdd: () => void;
+  /** vpn.manage: add, edit, test and delete providers. */
+  canManage: boolean;
 }
 
 export function VpnProviderList({
@@ -30,6 +32,7 @@ export function VpnProviderList({
   onRefresh,
   onEdit,
   onAdd,
+  canManage,
 }: VpnProviderListProps) {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [testingId, setTestingId] = useState<number | null>(null);
@@ -81,13 +84,15 @@ export function VpnProviderList({
         <p className="text-gray-500 dark:text-gray-400 mb-4">
           Add a VPN provider to route app traffic through a VPN tunnel.
         </p>
-        <button
-          onClick={onAdd}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-        >
-          <Plus size={18} />
-          Add VPN Provider
-        </button>
+        {canManage && (
+          <button
+            onClick={onAdd}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+          >
+            <Plus size={18} />
+            Add VPN Provider
+          </button>
+        )}
       </div>
     );
   }
@@ -98,13 +103,15 @@ export function VpnProviderList({
         <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
           VPN Providers
         </h3>
-        <button
-          onClick={onAdd}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-        >
-          <Plus size={18} />
-          Add Provider
-        </button>
+        {canManage && (
+          <button
+            onClick={onAdd}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+          >
+            <Plus size={18} />
+            Add Provider
+          </button>
+        )}
       </div>
 
       <div className="grid gap-4">
@@ -151,7 +158,7 @@ export function VpnProviderList({
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
+              {canManage && <div className="flex items-center gap-2">
                 <button
                   onClick={() => handleTest(provider.id)}
                   disabled={testingId === provider.id}
@@ -183,7 +190,7 @@ export function VpnProviderList({
                     <Trash2 size={18} />
                   )}
                 </button>
-              </div>
+              </div>}
             </div>
 
             {/* Test result */}

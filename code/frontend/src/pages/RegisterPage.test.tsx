@@ -35,4 +35,19 @@ describe('registration', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('disabled'));
     expect(screen.getByRole('alert').textContent).not.toContain('test-only-password');
   });
+
+  it('explains a used or expired invite instead of a generic failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 400, json: async () => ({ detail: 'Invalid or used invite' }) }));
+    render(<MemoryRouter initialEntries={['/login?register=1&invite=spent']}><RegisterPage /></MemoryRouter>);
+    await submit();
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('already used'));
+  });
+
+  it('never shows unknown server details verbatim', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 400, json: async () => ({ detail: 'db constraint users_email_key' }) }));
+    render(<MemoryRouter initialEntries={['/login?register=1']}><RegisterPage /></MemoryRouter>);
+    await submit();
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Check the fields'));
+    expect(screen.getByRole('alert').textContent).not.toContain('users_email_key');
+  });
 });

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Invite } from '../../api/users';
+import { buildInviteUrl, copyText, isPrivateHost, useInviteBaseUrl } from '../../utils/inviteLink';
 
 interface InviteLinkModalProps {
   invite: Invite;
@@ -8,18 +9,14 @@ interface InviteLinkModalProps {
 }
 
 const InviteLinkModal: React.FC<InviteLinkModalProps> = ({ invite, onClose }) => {
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
-  const inviteUrl = `${window.location.origin}/login?register=1&invite=${encodeURIComponent(invite.code)}`;
+  const inviteUrl = buildInviteUrl(invite.code, useInviteBaseUrl());
+  const privateLink = isPrivateHost(inviteUrl);
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(inviteUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy:', err);
-    }
+    setCopyState((await copyText(inviteUrl)) ? 'copied' : 'failed');
+    setTimeout(() => setCopyState('idle'), 2000);
   };
 
   const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -63,14 +60,23 @@ const InviteLinkModal: React.FC<InviteLinkModalProps> = ({ invite, onClose }) =>
             <button
               onClick={handleCopy}
               className={`px-4 py-2 rounded-md font-medium transition-colors ${
-                copied
+                copyState === 'copied'
                   ? 'bg-green-600 text-white'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white'
+                  : copyState === 'failed'
+                    ? 'bg-red-600 text-white'
+                    : 'bg-blue-600 hover:bg-blue-700 text-white'
               }`}
             >
-              {copied ? 'Copied!' : 'Copy'}
+              {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
             </button>
           </div>
+          {privateLink && (
+            <p role="note" className="mt-2 text-xs text-yellow-400">
+              This link uses a local network address and won't work outside your network.
+              Open Kubarr through its public address, or set a primary public domain under
+              Settings → Domains.
+            </p>
+          )}
         </div>
 
         <div className="flex flex-col items-center">
@@ -86,7 +92,11 @@ const InviteLinkModal: React.FC<InviteLinkModalProps> = ({ invite, onClose }) =>
           <p className="text-gray-500 text-xs mt-2">Scan to open the registration page</p>
         </div>
 
-        <div className="mt-6 pt-4 border-t border-gray-700">
+        <div className="mt-6 pt-4 border-t border-gray-700 space-y-2">
+          <div className="flex justify-between text-sm text-gray-400">
+            <span>Role:</span>
+            <span>{invite.role_name ?? 'None'}</span>
+          </div>
           <div className="flex justify-between text-sm text-gray-400">
             <span>Expires:</span>
             <span>

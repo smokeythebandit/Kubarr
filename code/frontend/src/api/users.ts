@@ -113,6 +113,9 @@ export interface Invite {
   code: string;
   created_by_username: string;
   used_by_username: string | null;
+  /** Role the redeeming user receives; null means no role. */
+  role_id?: number | null;
+  role_name?: string | null;
   is_used: boolean;
   expires_at: string | null;
   created_at: string;
@@ -121,6 +124,7 @@ export interface Invite {
 
 export interface CreateInviteRequest {
   expires_in_days?: number;
+  role_id?: number | null;
 }
 
 /**

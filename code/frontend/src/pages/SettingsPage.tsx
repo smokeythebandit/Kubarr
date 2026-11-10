@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import UserForm from '../components/users/UserForm';
 import InviteLinkModal from '../components/users/InviteLinkModal';
+import { buildInviteUrl, copyText, useInviteBaseUrl } from '../utils/inviteLink';
 import {
   User,
   Invite,
@@ -50,8 +51,31 @@ type ApiErr = { response?: { data?: { detail?: string; error?: string } } };
 type SettingsSection = 'dashboard' | 'general' | 'users' | 'pending' | 'invites' | 'permissions' | 'audit' | 'notifications' | 'vpn' | 'domains' | 'ddns' | 'letsencrypt';
 
 const SettingsPage: React.FC = () => {
-  const { isAdmin, hasPermission } = useAuth();
-  const canViewAudit = isAdmin || hasPermission('audit.view');
+  const { hasPermission } = useAuth();
+  const canViewAudit = hasPermission('audit.view');
+  const canViewSettings = hasPermission('settings.view');
+  const canManageSettings = hasPermission('settings.manage');
+  const canViewUsers = hasPermission('users.view');
+  const canManageUsers = hasPermission('users.manage');
+  const canViewRoles = hasPermission('roles.view');
+  const canViewVpn = hasPermission('vpn.view');
+  const canViewApps = hasPermission('apps.view');
+  // Each section opens on the permission its own data endpoints require, so
+  // nobody sees a section that would only fail to load.
+  const sectionAllowed: Record<SettingsSection, boolean> = {
+    dashboard: canViewUsers,
+    notifications: canViewSettings,
+    audit: canViewAudit,
+    domains: canViewSettings,
+    ddns: canViewSettings,
+    letsencrypt: canViewSettings,
+    vpn: canViewVpn,
+    general: canViewSettings,
+    users: canViewUsers,
+    pending: canViewUsers,
+    invites: canManageUsers,
+    permissions: canViewRoles,
+  };
   const [searchParams, setSearchParams] = useSearchParams();
   const [users, setUsers] = useState<User[]>([]);
   const [pendingUsers, setPendingUsers] = useState<User[]>([]);
@@ -62,12 +86,16 @@ const SettingsPage: React.FC = () => {
   // Distinct from an empty systemSettings: a failed load must not render as
   // "every setting is off".
   const [settingsStatus, setSettingsStatus] = useState<SettingsStatus>('loading');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(canViewUsers);
   const [savingSettings, setSavingSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Get state from URL params
-  const activeSection = (searchParams.get('section') as SettingsSection) || 'dashboard';
+  // Get state from URL params. A section the viewer may not open falls back
+  // to the first one they can.
+  const requestedSection = (searchParams.get('section') as SettingsSection) || 'dashboard';
+  const sectionOrder: SettingsSection[] = ['dashboard', 'notifications', 'audit', 'domains', 'ddns', 'letsencrypt', 'vpn', 'general', 'users', 'pending', 'invites', 'permissions'];
+  const firstAllowedSection = sectionOrder.find(section => sectionAllowed[section]);
+  const activeSection = sectionAllowed[requestedSection] ? requestedSection : (firstAllowedSection ?? requestedSection);
   const viewMode = (searchParams.get('view') as ViewMode) || 'list';
   const selectedUserId = searchParams.get('user');
 
@@ -100,6 +128,7 @@ const SettingsPage: React.FC = () => {
   };
   const [creatingInvite, setCreatingInvite] = useState(false);
   const [copiedInviteId, setCopiedInviteId] = useState<number | null>(null);
+  const inviteBaseUrl = useInviteBaseUrl();
   const [newInvite, setNewInvite] = useState<Invite | null>(null);
   // Role editing state - commented out until UI is implemented
   // const [newRoleName, setNewRoleName] = useState('');
@@ -138,15 +167,16 @@ const SettingsPage: React.FC = () => {
   const [savingOAuthProvider, setSavingOAuthProvider] = useState(false);
 
   useEffect(() => {
-    if (isAdmin) {
+    if (canViewUsers) {
       loadUsers();
       loadPendingUsers();
-      loadInvites();
-      loadRoles();
-      loadApps();
-      loadSettings();
     }
-  }, [isAdmin]);
+    if (canManageUsers) loadInvites();
+    if (canViewRoles) loadRoles();
+    if (canViewApps && canViewSettings) loadApps();
+    if (canViewSettings) loadSettings();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canViewUsers, canManageUsers, canViewRoles, canViewApps, canViewSettings]);
 
   // Load audit data when section is active
   useEffect(() => {
@@ -154,27 +184,29 @@ const SettingsPage: React.FC = () => {
       loadAuditLogs();
       loadAuditStats();
     }
-    if (isAdmin && activeSection === 'dashboard') {
+    if (canViewAudit && activeSection === 'dashboard') {
       loadAuditStats();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin, canViewAudit, activeSection, auditPage, auditFilter]);
+  }, [canViewAudit, activeSection, auditPage, auditFilter]);
 
   // Load notification data when section is active
   useEffect(() => {
-    if (isAdmin && activeSection === 'notifications') {
+    if (canViewSettings && activeSection === 'notifications') {
       loadNotificationChannels();
       loadNotificationEvents();
-      loadNotificationLogs();
+      if (canViewAudit) loadNotificationLogs();
     }
-  }, [isAdmin, activeSection]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canViewSettings, canViewAudit, activeSection]);
 
   // Load OAuth providers when general section is active
   useEffect(() => {
-    if (isAdmin && activeSection === 'general') {
+    if (canViewSettings && activeSection === 'general') {
       loadOAuthProviders();
     }
-  }, [isAdmin, activeSection]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canViewSettings, activeSection]);
 
   const loadUsers = async () => {
     try {
@@ -569,10 +601,10 @@ const SettingsPage: React.FC = () => {
     setSearchParams({ section: activeSection });
   };
 
-  const handleCreateInvite = async () => {
+  const handleCreateInvite = async (roleId: number | null) => {
     try {
       setCreatingInvite(true);
-      const invite = await createInvite({ expires_in_days: 7 });
+      const invite = await createInvite({ expires_in_days: 7, role_id: roleId });
       setNewInvite(invite);
       await loadInvites();
     } catch (err: unknown) {
@@ -597,10 +629,11 @@ const SettingsPage: React.FC = () => {
     }
   };
 
-  const copyInviteLink = (invite: Invite) => {
-    const baseUrl = window.location.origin;
-    const inviteUrl = `${baseUrl}/login?register=1&invite=${encodeURIComponent(invite.code)}`;
-    navigator.clipboard.writeText(inviteUrl);
+  const copyInviteLink = async (invite: Invite) => {
+    if (!(await copyText(buildInviteUrl(invite.code, inviteBaseUrl)))) {
+      setError('Could not copy the invite link to the clipboard');
+      return;
+    }
     setCopiedInviteId(invite.id);
     setTimeout(() => setCopiedInviteId(null), 2000);
   };
@@ -657,28 +690,28 @@ const SettingsPage: React.FC = () => {
   //   }
   // };
 
-  if (!isAdmin && !(activeSection === 'audit' && canViewAudit && viewMode === 'list')) {
+  if (!firstAllowedSection) {
     return (
       <div className="max-w-7xl mx-auto px-4 py-8">
         <div className="bg-red-100 dark:bg-red-900 border border-red-300 dark:border-red-700 text-red-800 dark:text-white px-4 py-3 rounded">
-          You do not have permission to access this page. Admin privileges required.
+          You do not have permission to access any settings.
         </div>
       </div>
     );
   }
 
-  const systemItems = isAdmin ? [
+  const systemItems = [
     { id: 'dashboard' as SettingsSection, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'notifications' as SettingsSection, label: 'Notifications', icon: Bell },
     { id: 'audit' as SettingsSection, label: 'Audit Logs', icon: FileText },
-  ] : [{ id: 'audit' as SettingsSection, label: 'Audit Logs', icon: FileText }];
+  ].filter(item => sectionAllowed[item.id]);
 
   const networkingItems = [
     { id: 'domains' as SettingsSection, label: 'Domains', icon: Globe },
     { id: 'ddns' as SettingsSection, label: 'Dynamic DNS', icon: Network },
     { id: 'letsencrypt' as SettingsSection, label: "Let's Encrypt", icon: Lock },
     { id: 'vpn' as SettingsSection, label: 'VPN', icon: Shield },
-  ];
+  ].filter(item => sectionAllowed[item.id]);
 
   const accessManagementItems = [
     { id: 'general' as SettingsSection, label: 'General', icon: Sliders },
@@ -686,7 +719,7 @@ const SettingsPage: React.FC = () => {
     { id: 'pending' as SettingsSection, label: 'Pending Approval', icon: UserPlus, count: pendingUsers.length },
     { id: 'invites' as SettingsSection, label: 'Invite Links', icon: Link, count: invites.filter(i => !i.is_used && !isExpired(i.expires_at)).length },
     { id: 'permissions' as SettingsSection, label: 'Permissions', icon: Lock },
-  ];
+  ].filter(item => sectionAllowed[item.id]);
 
   return (
     <div className="flex h-full w-full relative">
@@ -733,7 +766,7 @@ const SettingsPage: React.FC = () => {
         </div>
         <nav className="p-2 flex-1 overflow-auto">
           {/* System Section */}
-          <div className="mb-4">
+          {systemItems.length > 0 && <div className="mb-4">
             <div className="px-3 py-2 text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
               System
             </div>
@@ -756,10 +789,10 @@ const SettingsPage: React.FC = () => {
                 </button>
               );
             })}
-          </div>
+          </div>}
 
           {/* Networking Section */}
-          {isAdmin && <div className="mb-4">
+          {networkingItems.length > 0 && <div className="mb-4">
             <div className="px-3 py-2 text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
               Networking
             </div>
@@ -785,7 +818,7 @@ const SettingsPage: React.FC = () => {
           </div>}
 
           {/* Access Management Section */}
-          {isAdmin && <div className="mb-2">
+          {accessManagementItems.length > 0 && <div className="mb-2">
             <div className="px-3 py-2 text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
               Access Management
             </div>
@@ -848,13 +881,13 @@ const SettingsPage: React.FC = () => {
           </div>
         )}
 
-        {isAdmin && loading ? (
+        {canViewUsers && loading ? (
           <div className="flex justify-center items-center py-12">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
           </div>
         ) : (
           <>
-            {isAdmin && activeSection === 'dashboard' && (
+            {activeSection === 'dashboard' && (
               <DashboardTab
                 usersCount={users.length}
                 pendingUsersCount={pendingUsers.length}
@@ -864,10 +897,11 @@ const SettingsPage: React.FC = () => {
                 isExpired={isExpired}
                 formatAuditAction={formatAuditAction}
                 onSelectSection={setActiveSection}
+                canOpen={section => sectionAllowed[section]}
               />
             )}
 
-            {isAdmin && activeSection === 'general' && (
+            {activeSection === 'general' && (
               <GeneralTab
                 systemSettings={systemSettings}
                 settingsStatus={settingsStatus}
@@ -882,31 +916,35 @@ const SettingsPage: React.FC = () => {
                 setEditingOAuthProvider={setEditingOAuthProvider}
                 setOauthProviderConfig={setOauthProviderConfig}
                 getOAuthProviderIcon={getOAuthProviderIcon}
+                canManage={canManageSettings}
               />
             )}
 
-            {isAdmin && activeSection === 'users' && viewMode === 'list' && (
+            {activeSection === 'users' && viewMode === 'list' && (
               <UsersTab
                 users={users}
                 onCreateUser={() => setViewMode('create')}
                 onEditUser={handleEditUser}
                 onDeleteUser={handleDeleteUser}
                 onApproveUser={handleApproveUser}
+                canManage={canManageUsers}
               />
             )}
 
-            {isAdmin && activeSection === 'pending' && viewMode === 'list' && (
+            {activeSection === 'pending' && viewMode === 'list' && (
               <PendingUsersTab
                 pendingUsers={pendingUsers}
                 onApproveUser={handleApproveUser}
                 onRejectUser={handleRejectUser}
                 onDeleteUser={handleDeleteUser}
+                canManage={canManageUsers}
               />
             )}
 
-            {isAdmin && activeSection === 'invites' && viewMode === 'list' && (
+            {activeSection === 'invites' && viewMode === 'list' && (
               <InvitesTab
                 invites={invites}
+                roles={roles}
                 creatingInvite={creatingInvite}
                 copiedInviteId={copiedInviteId}
                 onCreateInvite={handleCreateInvite}
@@ -917,7 +955,7 @@ const SettingsPage: React.FC = () => {
               />
             )}
 
-            {isAdmin && activeSection === 'permissions' && <PermissionsTab />}
+            {activeSection === 'permissions' && <PermissionsTab />}
 
             {activeSection === 'audit' && (
               <AuditTab
@@ -942,7 +980,7 @@ const SettingsPage: React.FC = () => {
               />
             )}
 
-            {isAdmin && activeSection === 'notifications' && (
+            {activeSection === 'notifications' && (
               <NotificationsTab
                 notificationChannels={notificationChannels}
                 notificationEvents={notificationEvents}
@@ -964,24 +1002,25 @@ const SettingsPage: React.FC = () => {
                 getChannelIcon={getChannelIcon}
                 getChannelConfigFields={getChannelConfigFields}
                 formatAuditAction={formatAuditAction}
+                canManage={canManageSettings}
               />
             )}
 
             {/* VPN Section */}
-            {isAdmin && activeSection === 'vpn' && <VpnTab />}
+            {activeSection === 'vpn' && <VpnTab />}
 
-            {isAdmin && activeSection === 'domains' && (
+            {activeSection === 'domains' && (
               <DomainsTab
                 apps={apps}
               />
             )}
 
-            {isAdmin && activeSection === 'ddns' && <DdnsTab />}
+            {activeSection === 'ddns' && <DdnsTab />}
 
-            {isAdmin && activeSection === 'letsencrypt' && <LetsEncryptTab />}
+            {activeSection === 'letsencrypt' && <LetsEncryptTab />}
 
             {/* Create/Edit User Forms */}
-            {isAdmin && viewMode === 'create' && (
+            {canManageUsers && activeSection === 'users' && viewMode === 'create' && (
               <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
                 <UserForm
                   roles={roles}
@@ -992,7 +1031,7 @@ const SettingsPage: React.FC = () => {
               </div>
             )}
 
-            {isAdmin && viewMode === 'edit' && selectedUser && (
+            {canManageUsers && activeSection === 'users' && viewMode === 'edit' && selectedUser && (
               <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
                 <UserForm
                   user={selectedUser}

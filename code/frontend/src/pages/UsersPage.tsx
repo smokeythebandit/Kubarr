@@ -3,6 +3,7 @@ import { useAuth } from '../contexts/AuthContext';
 import UserList from '../components/users/UserList';
 import UserForm from '../components/users/UserForm';
 import InviteLinkModal from '../components/users/InviteLinkModal';
+import { buildInviteUrl, copyText, useInviteBaseUrl } from '../utils/inviteLink';
 import {
   User,
   Invite,
@@ -100,6 +101,7 @@ const UsersPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('all');
   const [creatingInvite, setCreatingInvite] = useState(false);
   const [copiedInviteId, setCopiedInviteId] = useState<number | null>(null);
+  const inviteBaseUrl = useInviteBaseUrl();
   const [newInvite, setNewInvite] = useState<Invite | null>(null);
   // Role editing state
   const [editingRole, setEditingRole] = useState<Role | null>(null);
@@ -257,10 +259,11 @@ const UsersPage: React.FC = () => {
     }
   };
 
-  const copyInviteLink = (invite: Invite) => {
-    const baseUrl = window.location.origin;
-    const inviteUrl = `${baseUrl}/login?register=1&invite=${encodeURIComponent(invite.code)}`;
-    navigator.clipboard.writeText(inviteUrl);
+  const copyInviteLink = async (invite: Invite) => {
+    if (!(await copyText(buildInviteUrl(invite.code, inviteBaseUrl)))) {
+      setError('Could not copy the invite link to the clipboard');
+      return;
+    }
     setCopiedInviteId(invite.id);
     setTimeout(() => setCopiedInviteId(null), 2000);
   };

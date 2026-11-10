@@ -126,9 +126,20 @@ test('viewer can read text but cannot create, rename, delete, or save', async ({
   await page.getByRole('row').filter({ hasText: file.name }).click();
   await expect(page.getByRole('textbox')).toHaveValue('{}');
   await expect(page.getByRole('textbox')).toHaveAttribute('readonly', '');
-  for (const name of ['New Folder', 'Save', 'Rename settings.json', 'Delete settings.json']) {
+  for (const name of ['New Folder', 'Save', 'Rename settings.json', 'Delete settings.json', 'Download settings.json']) {
     await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
   }
+});
+
+test('a non-admin role gets exactly the storage actions its permissions allow', async ({ page, api }) => {
+  api.get('/api/users/me', { ...admin, roles: [{ id: 3, name: 'downloader' }],
+    permissions: ['storage.view', 'storage.write', 'storage.download'], allowed_apps: [] });
+  await page.goto('/storage');
+  await page.getByRole('row').filter({ hasText: 'config' }).click();
+  await expect(page.getByRole('button', { name: 'New Folder', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Rename settings.json', exact: true })).toBeAttached();
+  await expect(page.getByRole('button', { name: 'Download settings.json', exact: true })).toBeAttached();
+  await expect(page.getByRole('button', { name: 'Delete settings.json', exact: true })).toHaveCount(0);
 });
 
 test('statistics is lazy-loaded and refresh replaces scan warnings', async ({ page, api }) => {
