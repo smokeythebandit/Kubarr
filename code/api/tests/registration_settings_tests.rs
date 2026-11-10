@@ -408,11 +408,13 @@ async fn registration_approval_invitation_and_permissions() {
 async fn invite_role_is_granted_on_registration() {
     let db = create_test_db_with_seed().await;
     kubarr::services::init_jwt_keys(&db).await.unwrap();
+    // Generated per run so no credential literal lives in the test.
+    let admin_password = uuid::Uuid::new_v4().to_string();
     create_test_user_with_role(
         &db,
         "role_admin",
         "roleadmin@example.test",
-        "password123",
+        &admin_password,
         "admin",
     )
     .await;
@@ -423,7 +425,7 @@ async fn invite_role_is_granted_on_registration() {
         "POST",
         "/auth/login",
         None,
-        serde_json::json!({"username":"role_admin", "password":"password123"}),
+        serde_json::json!({"username":"role_admin", "password": admin_password}),
     )
     .await;
     let admin = admin.unwrap();
