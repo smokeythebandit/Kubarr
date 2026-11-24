@@ -39,6 +39,8 @@ pub const OP_DELETE: &str = "delete";
 pub const OP_RESTART: &str = "restart";
 const QUEUED_INSTALL_KEY: &str = "__kubarr_install_choices";
 const QUEUED_STORAGE_KEY: &str = "__kubarr_storage_snapshot";
+/// Chart version an automatic update was queued for; never reaches Helm.
+pub(crate) const AUTO_TARGET_KEY: &str = "__kubarr_auto_target_version";
 
 #[derive(Serialize, Deserialize)]
 struct QueuedInstall {
@@ -405,10 +407,23 @@ impl AppManager {
         install_options::validate_custom_storage_keys(&custom_config)?;
         if custom_config.contains_key(QUEUED_INSTALL_KEY)
             || custom_config.contains_key(QUEUED_STORAGE_KEY)
+            || custom_config.contains_key(AUTO_TARGET_KEY)
         {
             return Err(AppError::BadRequest("Reserved install key".into()));
         }
         self.enqueue_operation_unchecked(app_name, operation, custom_config, created_by)
+            .await
+    }
+
+    /// Queue an update started by the auto-update loop (no actor, trigger
+    /// "auto"). The target version is recorded so a failure can be tied to it.
+    pub async fn enqueue_auto_update(
+        &self,
+        app_name: &str,
+        target_version: &str,
+    ) -> Result<AppOperationResponse> {
+        let config = HashMap::from([(AUTO_TARGET_KEY.to_string(), target_version.to_string())]);
+        self.persist_operation(app_name, OP_UPDATE, config, None, "auto")
             .await
     }
 
@@ -418,6 +433,7 @@ impl AppManager {
         operation: &str,
         mut custom_config: HashMap<String, String>,
         created_by: Option<i64>,
+        trigger: &str,
     ) -> Result<AppOperationResponse> {
         if operation != OP_DELETE {
             let catalog = self.catalog.read().await;
@@ -450,7 +466,7 @@ impl AppManager {
             )?)),
             attempts: Set(0),
             created_by: Set(created_by),
-            trigger: Set(Some("manual".to_string())),
+            trigger: Set(Some(trigger.to_string())),
             diagnostics: Set(None),
             created_at: Set(now),
             started_at: Set(None),
@@ -615,7 +631,7 @@ impl AppManager {
         created_by: Option<i64>,
     ) -> Result<AppOperationResponse> {
         validate_operation(operation)?;
-        self.persist_operation(app_name, operation, custom_config, created_by)
+        self.persist_operation(app_name, operation, custom_config, created_by, "manual")
             .await
     }
 
@@ -905,6 +921,7 @@ impl AppManager {
         let mut public_config = config.clone();
         let mut promoted_config: Option<String> = None;
         public_config.remove(QUEUED_GPU_KEY);
+        public_config.remove(AUTO_TARGET_KEY);
         if let Some(raw) = public_config.remove(QUEUED_STORAGE_KEY) {
             let snapshot: QueuedStorage = serde_json::from_str(&raw)
                 .map_err(|_| AppError::BadRequest("Invalid stored storage snapshot".into()))?;
@@ -1644,6 +1661,7 @@ impl AppManager {
         // A malformed persisted request must fail rather than silently deploying
         // with defaults (which can reset a queued GPU or other chart settings).
         let mut custom_config = parse_queued_config(operation.custom_config.as_deref())?;
+        custom_config.remove(AUTO_TARGET_KEY);
         let gpu: Option<Option<GpuSelection>> = custom_config
             .remove(QUEUED_GPU_KEY)
             .map(|raw| {

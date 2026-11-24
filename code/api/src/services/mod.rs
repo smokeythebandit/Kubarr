@@ -1,6 +1,7 @@
 pub mod app_manager;
 pub mod app_storage;
 pub mod audit;
+pub mod auto_update;
 pub mod auto_update_settings;
 pub mod cadvisor;
 pub mod catalog;

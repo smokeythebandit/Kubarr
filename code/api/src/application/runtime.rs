@@ -155,6 +155,8 @@ async fn run_as_leader(
     if let Err(e) = notifications.init_providers().await {
         tracing::warn!("Failed to initialize worker notification providers: {}", e);
     }
+    let auto_update_db = conn.clone();
+    let auto_update_catalog = catalog.clone();
     let manager = Arc::new(
         AppManager::new(conn, k8s_client, catalog).with_notifications(Arc::new(notifications)),
     );
@@ -162,6 +164,14 @@ async fn run_as_leader(
     // Only aged claims are recovered: a recent claim might belong to a still
     // draining predecessor during deployment. Recovery never invokes Helm again.
     manager.recover_stale_operations().await?;
+
+    // Leader only: picks one eligible app at a time inside the owner's window.
+    tokio::spawn(crate::services::auto_update::run(
+        manager.clone(),
+        auto_update_db,
+        auto_update_catalog,
+        cancellation.clone(),
+    ));
 
     let poll_interval = env_duration("KUBARR_WORKER_POLL_INTERVAL_SECONDS", 5);
     let reconcile_interval = env_duration("KUBARR_WORKER_RECONCILE_INTERVAL_SECONDS", 30);
