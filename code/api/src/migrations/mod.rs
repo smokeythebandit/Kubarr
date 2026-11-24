@@ -32,6 +32,7 @@ mod m20260226_000031_app_operation_stop;
 mod m20260226_000032_create_app_storage_configs;
 mod m20260226_000033_create_pod_status_cache;
 mod m20260226_000034_invite_role;
+mod m20260226_000035_auto_update;
 
 pub struct Migrator;
 
@@ -71,6 +72,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260226_000032_create_app_storage_configs::Migration),
             Box::new(m20260226_000033_create_pod_status_cache::Migration),
             Box::new(m20260226_000034_invite_role::Migration),
+            Box::new(m20260226_000035_auto_update::Migration),
         ]
     }
 }

@@ -52,6 +52,7 @@ async fn database(app_name: &str) -> DatabaseConnection {
         healthy: Set(false),
         available_chart_version: Set(Some(VERSION.into())),
         update_available: Set(false),
+        auto_update: Set(true),
         updated_at: Set(Utc::now()),
         ..Default::default()
     }

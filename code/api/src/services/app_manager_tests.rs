@@ -1302,3 +1302,65 @@ async fn catalog_sync_preserves_queued_operation_intent() {
     assert_eq!(current.last_operation_id, Some(queued.id));
     assert_eq!(current.available_chart_version.as_deref(), Some("2.0.0"));
 }
+
+#[tokio::test]
+async fn test_migration_adds_auto_update_default_true() {
+    let manager = setup().await;
+    manager
+        .db
+        .execute_unprepared(
+            "INSERT INTO app_states (app_name, namespace, desired_state, observed_state, \
+             healthy, update_available, updated_at) \
+             VALUES ('legacy-app', 'ns', 'installed', 'installed', 1, 0, '2026-01-01 00:00:00')",
+        )
+        .await
+        .unwrap();
+    let state = app_state::Entity::find_by_id("legacy-app")
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.auto_update);
+}
+
+#[tokio::test]
+async fn test_notification_events_seeded() {
+    use crate::models::notification_event;
+    let manager = setup().await;
+    for (event, enabled, severity) in [
+        ("app_updated", false, "info"),
+        ("app_update_failed", true, "warning"),
+        ("app_update_rollback_failed", true, "critical"),
+    ] {
+        let row = notification_event::Entity::find()
+            .filter(notification_event::Column::EventType.eq(event))
+            .one(&manager.db)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing seeded event {event}"));
+        assert_eq!((row.enabled, row.severity.as_str()), (enabled, severity));
+    }
+}
+
+#[tokio::test]
+async fn test_auto_update_migration_down_removes_columns_and_events() {
+    use crate::models::notification_event;
+    let manager = setup().await;
+    crate::migrations::Migrator::down(&manager.db, Some(1))
+        .await
+        .unwrap();
+    let seeded = notification_event::Entity::find()
+        .filter(notification_event::Column::EventType.like("app_update%"))
+        .all(&manager.db)
+        .await
+        .unwrap();
+    assert!(seeded.is_empty());
+    assert!(manager
+        .db
+        .execute_unprepared("SELECT auto_update FROM app_states")
+        .await
+        .is_err());
+    crate::migrations::Migrator::up(&manager.db, None)
+        .await
+        .unwrap();
+}

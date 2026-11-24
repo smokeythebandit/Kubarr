@@ -62,6 +62,9 @@ pub enum AuditAction {
     AppRestarted,
     AppConfigured,
     AppAccessed,
+    AppUpdated,
+    AppUpdateFailed,
+    AppUpdateRollbackFailed,
 
     // VPN management
     VpnProviderCreated,
@@ -110,6 +113,9 @@ impl std::fmt::Display for AuditAction {
             AuditAction::AppRestarted => write!(f, "app_restarted"),
             AuditAction::AppConfigured => write!(f, "app_configured"),
             AuditAction::AppAccessed => write!(f, "app_accessed"),
+            AuditAction::AppUpdated => write!(f, "app_updated"),
+            AuditAction::AppUpdateFailed => write!(f, "app_update_failed"),
+            AuditAction::AppUpdateRollbackFailed => write!(f, "app_update_rollback_failed"),
             AuditAction::VpnProviderCreated => write!(f, "vpn_provider_created"),
             AuditAction::VpnProviderUpdated => write!(f, "vpn_provider_updated"),
             AuditAction::VpnProviderDeleted => write!(f, "vpn_provider_deleted"),
@@ -198,6 +204,15 @@ mod tests {
         assert_eq!(AuditAction::AppStopped.to_string(), "app_stopped");
         assert_eq!(AuditAction::AppRestarted.to_string(), "app_restarted");
         assert_eq!(AuditAction::AppConfigured.to_string(), "app_configured");
+        assert_eq!(AuditAction::AppUpdated.to_string(), "app_updated");
+        assert_eq!(
+            AuditAction::AppUpdateFailed.to_string(),
+            "app_update_failed"
+        );
+        assert_eq!(
+            AuditAction::AppUpdateRollbackFailed.to_string(),
+            "app_update_rollback_failed"
+        );
         assert_eq!(AuditAction::AppAccessed.to_string(), "app_accessed");
     }
 

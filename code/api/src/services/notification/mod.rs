@@ -628,6 +628,9 @@ fn format_event_title(action: &AuditAction) -> String {
         AuditAction::AppRestarted => "App Restarted".to_string(),
         AuditAction::AppConfigured => "App Configured".to_string(),
         AuditAction::AppAccessed => "App Accessed".to_string(),
+        AuditAction::AppUpdated => "App Updated".to_string(),
+        AuditAction::AppUpdateFailed => "App Update Failed".to_string(),
+        AuditAction::AppUpdateRollbackFailed => "App Update Rollback Failed".to_string(),
         // VPN management
         AuditAction::VpnProviderCreated => "VPN Provider Created".to_string(),
         AuditAction::VpnProviderUpdated => "VPN Provider Updated".to_string(),
@@ -799,6 +802,28 @@ fn format_event_body(
                 format!("App accessed by {}", user)
             } else {
                 format!("User {} accessed {}", user, detail)
+            }
+        }
+        // Automatic updates: details carry app, from/to version and first diagnostic line.
+        AuditAction::AppUpdated => {
+            if detail.is_empty() {
+                "App updated".to_string()
+            } else {
+                format!("App updated: {}", detail)
+            }
+        }
+        AuditAction::AppUpdateFailed => {
+            if detail.is_empty() {
+                "App update failed and was rolled back".to_string()
+            } else {
+                format!("App update failed and was rolled back: {}", detail)
+            }
+        }
+        AuditAction::AppUpdateRollbackFailed => {
+            if detail.is_empty() {
+                "App update failed and the rollback also failed".to_string()
+            } else {
+                format!("App update failed and the rollback also failed: {}", detail)
             }
         }
         // VPN management: details may contain provider credentials, so never include them.
@@ -1343,6 +1368,20 @@ mod tests {
             Some("editor -> alice"),
         );
         assert_eq!(body, "Role unassigned by admin: editor -> alice");
+    }
+
+    #[test]
+    fn test_update_failed_title_and_body() {
+        let title = format_event_title(&AuditAction::AppUpdateFailed);
+        assert!(title.to_lowercase().contains("update failed"));
+        let body = format_event_body(
+            &AuditAction::AppUpdateFailed,
+            None,
+            Some("sonarr 4.0.1 -> 4.0.2: CrashLoopBackOff"),
+        );
+        assert!(body.contains("sonarr"));
+        assert!(body.contains("4.0.1"));
+        assert!(body.contains("4.0.2"));
     }
 
     #[test]
