@@ -77,6 +77,13 @@ pub(crate) const AUTO_SKIPPED_MESSAGE: &str =
 const STOP_ERROR: &str = "Stop requested; external outcome indeterminate";
 const DEFAULT_UPDATE_HEALTH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const UPDATE_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// An updated app must stay healthy this long (inside the health timeout)
+/// before the update counts as good: readiness alone misses late crashes.
+const UPDATE_SETTLE: Duration = Duration::from_secs(180);
+/// Appended to failure notifications (spec: rollback limits).
+const MIGRATION_NOTE: &str = "A rollback restores the previous chart; it cannot undo a one-way data migration the new version may have run.";
+/// Notification details for an update the worker lost track of.
+const INTERRUPTED_DETAILS: &str = "interrupted during verification; state unknown — check the app";
 /// A container restarting more often than this since the update started fails it.
 const UPDATE_RESTART_LIMIT: i32 = 2;
 /// Longest summary line placed above the captured diagnostics.
@@ -158,9 +165,11 @@ pub enum UpdateOutcome {
     RollbackFailed {
         diagnostics: String,
     },
-    /// Helm failed without creating a new revision: nothing to roll back.
+    /// Helm failed and no rollback was attempted because the app was not
+    /// changed. `confirmed`: Helm history proved no new revision exists.
     NotApplied {
         diagnostics: String,
+        confirmed: bool,
     },
 }
 
@@ -170,7 +179,7 @@ impl UpdateOutcome {
             UpdateOutcome::Healthy => None,
             UpdateOutcome::RolledBack { diagnostics }
             | UpdateOutcome::RollbackFailed { diagnostics }
-            | UpdateOutcome::NotApplied { diagnostics } => Some(diagnostics),
+            | UpdateOutcome::NotApplied { diagnostics, .. } => Some(diagnostics),
         }
     }
 }
@@ -197,9 +206,12 @@ impl UpdateReport {
             UpdateOutcome::RollbackFailed { .. } => {
                 format!("Update to {to} failed; rollback to {from} failed")
             }
-            UpdateOutcome::NotApplied { .. } => {
-                format!("Update to {to} failed; {app} unchanged at {from}")
-            }
+            UpdateOutcome::NotApplied {
+                confirmed: true, ..
+            } => format!("Update to {to} failed; {app} unchanged at {from}"),
+            UpdateOutcome::NotApplied {
+                confirmed: false, ..
+            } => format!("Update to {to} failed; Helm reported an error"),
         }
     }
 
@@ -217,21 +229,39 @@ impl UpdateReport {
     /// already scrubbed.
     fn notification_details(&self, app: &str) -> String {
         let versions = format!("app={app} from={} to={}", self.from, self.to);
-        let what = match self.outcome {
+        let (what, note) = match self.outcome {
             UpdateOutcome::Healthy => return versions,
-            UpdateOutcome::RolledBack { .. } => format!("rolled back to {}; ", self.from),
-            UpdateOutcome::NotApplied { .. } => format!(
-                "Helm reported an error; the app is still running {}; ",
-                self.from
+            UpdateOutcome::RolledBack { .. } => {
+                (format!("rolled back to {}; ", self.from), true)
+            }
+            UpdateOutcome::NotApplied {
+                confirmed: true, ..
+            } => (
+                format!(
+                    "Helm reported an error; the app is still running {}; ",
+                    self.from
+                ),
+                false,
             ),
-            UpdateOutcome::RollbackFailed { .. } => String::new(),
+            UpdateOutcome::NotApplied {
+                confirmed: false, ..
+            } => (
+                "Helm reported an error; the app is healthy but Helm history could not confirm which version is running; "
+                    .to_string(),
+                false,
+            ),
+            UpdateOutcome::RollbackFailed { .. } => (String::new(), true),
         };
         let line = self
             .outcome
             .diagnostics()
             .map(first_line)
             .unwrap_or_default();
-        format!("{versions}; {what}{line}")
+        if note {
+            format!("{versions}; {what}{line}. {MIGRATION_NOTE}")
+        } else {
+            format!("{versions}; {what}{line}")
+        }
     }
 }
 
@@ -370,6 +400,9 @@ pub struct AppManager {
     /// How long an updated app may take to become healthy before rollback.
     /// Fixed override; when absent the owner's setting is read per update.
     update_health_timeout: Option<Duration>,
+    /// Health poll interval and settle period (constants outside tests).
+    update_poll: Duration,
+    update_settle: Duration,
 }
 
 impl AppManager {
@@ -385,7 +418,17 @@ impl AppManager {
             helm_lock: Arc::default(),
             notifications: None,
             update_health_timeout: None,
+            update_poll: UPDATE_HEALTH_POLL_INTERVAL,
+            update_settle: UPDATE_SETTLE,
         }
+    }
+
+    /// Shrink the health poll interval and settle period so tests run fast.
+    #[cfg(test)]
+    fn with_update_timing(mut self, poll: Duration, settle: Duration) -> Self {
+        self.update_poll = poll;
+        self.update_settle = settle;
+        self
     }
 
     /// Announce update outcomes through `notifications`.
@@ -1425,18 +1468,33 @@ impl AppManager {
                     } else {
                         format!("{} failed", operation.operation)
                     };
-                    self.complete_failed(
-                        &operation,
-                        Terminal {
-                            status: STATUS_FAILED,
-                            message: Some(message),
-                            error: Some(error.clone()),
-                            diagnostics: None,
-                            action: None,
-                        },
-                        error,
-                    )
-                    .await?;
+                    let won = self
+                        .complete_failed(
+                            &operation,
+                            Terminal {
+                                status: STATUS_FAILED,
+                                message: Some(message),
+                                error: Some(error.clone()),
+                                diagnostics: None,
+                                action: None,
+                            },
+                            error.clone(),
+                        )
+                        .await?;
+                    // An update that failed before it could be verified (normally
+                    // before Helm ran). A dropped stale auto target stays silent.
+                    if won
+                        && operation.operation == OP_UPDATE
+                        && !error.contains(AUTO_SKIPPED_MESSAGE)
+                    {
+                        let details = format!(
+                            "{}; the update failed before Kubarr could verify it: {}",
+                            update_subject(&operation),
+                            update_diagnostics::scrub_inline(first_line(&error))
+                        );
+                        self.notify_update(&operation, &AuditAction::AppUpdateFailed, &details)
+                            .await;
+                    }
                 }
             }
         }
@@ -1966,8 +2024,10 @@ impl AppManager {
         }))
     }
 
-    /// Wait up to `timeout` for the app to report healthy with no container
-    /// restarted more than twice since `before`. Polls every 10 s.
+    /// Wait up to `timeout` for the app to be healthy continuously for the
+    /// settle period (3 min), with no container restarted more than twice since
+    /// `before`. A restart breach at any point fails at once; a timeout shorter
+    /// than time-to-healthy plus settle fails. Polls every 10 s.
     async fn verify_update(
         &self,
         probe: &dyn UpdateProbe,
@@ -1975,6 +2035,7 @@ impl AppManager {
         timeout: Duration,
     ) -> HealthVerdict {
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut healthy_since: Option<tokio::time::Instant> = None;
         loop {
             let reason = match probe.restart_snapshot().await {
                 Ok(now)
@@ -1989,21 +2050,37 @@ impl AppManager {
                     ));
                 }
                 Ok(_) => match probe.health().await {
-                    Ok((true, _)) => return HealthVerdict::Healthy,
-                    Ok((false, message)) if message.is_empty() => "app health check failing".into(),
-                    Ok((false, message)) => message,
-                    Err(error) => format!("health check error: {error}"),
+                    Ok((true, _)) => {
+                        let now = tokio::time::Instant::now();
+                        let since = *healthy_since.get_or_insert(now);
+                        if now.duration_since(since) >= self.update_settle {
+                            return HealthVerdict::Healthy;
+                        }
+                        None
+                    }
+                    Ok((false, message)) if message.is_empty() => {
+                        Some("app health check failing".to_string())
+                    }
+                    Ok((false, message)) => Some(message),
+                    Err(error) => Some(format!("health check error: {error}")),
                 },
-                Err(error) => format!("restart counts unavailable: {error}"),
+                Err(error) => Some(format!("restart counts unavailable: {error}")),
             };
+            if reason.is_some() {
+                healthy_since = None;
+            }
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                return HealthVerdict::Unhealthy(format!(
-                    "Not healthy within {} min: {reason}",
-                    timeout.as_secs().div_ceil(60)
-                ));
+                let within = describe_duration(timeout);
+                return HealthVerdict::Unhealthy(match reason {
+                    Some(reason) => format!("Not healthy within {within}: {reason}"),
+                    None => format!(
+                        "Not healthy for the {} settle period within {within}",
+                        describe_duration(self.update_settle)
+                    ),
+                });
             }
-            tokio::time::sleep(UPDATE_HEALTH_POLL_INTERVAL.min(deadline - now)).await;
+            tokio::time::sleep(self.update_poll.min(deadline - now)).await;
         }
     }
 
@@ -2042,9 +2119,15 @@ impl AppManager {
                     tracing::warn!(error = %helm_line, "Helm reported an error but the updated app is healthy");
                     return UpdateOutcome::Healthy;
                 }
-                let note = "No new revision is running; nothing to roll back";
+                let confirmed = applied == Some(false);
+                let note = if confirmed {
+                    "No new revision is running; nothing to roll back"
+                } else {
+                    "Helm history unavailable; the app is healthy, so no rollback was attempted"
+                };
                 return UpdateOutcome::NotApplied {
                     diagnostics: self.compose(probe, &[helm_line, note], "").await,
+                    confirmed,
                 };
             }
             (HealthVerdict::Healthy, None) => return UpdateOutcome::Healthy,
@@ -2061,6 +2144,7 @@ impl AppManager {
             let note = "No new Helm revision was created; nothing to roll back";
             return UpdateOutcome::NotApplied {
                 diagnostics: self.compose(probe, &[&reason, note], &captured).await,
+                confirmed: true,
             };
         }
 
@@ -2366,6 +2450,15 @@ impl AppManager {
         .await?;
         transaction.commit().await?;
         tracing::error!(operation_id = %operation.id, "Recovered interrupted app operation with unknown external outcome");
+        // The worker died holding an update: the app may be on a broken new
+        // revision or half rolled back, and nobody else will say so. No
+        // diagnostics are stored, so the failed-version skip ignores it and the
+        // next window re-evaluates the app.
+        if operation.operation == OP_UPDATE && !operation.stop_requested {
+            let details = format!("{}; {INTERRUPTED_DETAILS}", update_subject(&operation));
+            self.notify_update(&operation, &AuditAction::AppUpdateRollbackFailed, &details)
+                .await;
+        }
         Ok(())
     }
 
@@ -2769,6 +2862,27 @@ fn terminal_action(operation: &str, success: bool) -> AuditAction {
         OP_UPDATE if success => AuditAction::AppUpdated,
         OP_UPDATE => AuditAction::AppUpdateFailed,
         _ => AuditAction::AppConfigured,
+    }
+}
+
+/// `app=<app>`, plus `to=<version>` when the operation recorded its target.
+fn update_subject(operation: &app_operation::Model) -> String {
+    let target = parse_queued_config(operation.custom_config.as_deref())
+        .ok()
+        .and_then(|mut config| config.remove(AUTO_TARGET_KEY));
+    match target {
+        Some(target) => format!("app={} to={target}", operation.app_name),
+        None => format!("app={}", operation.app_name),
+    }
+}
+
+/// "10 min" for whole minutes, otherwise seconds ("90 s").
+fn describe_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs > 0 && secs.is_multiple_of(60) {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{secs} s")
     }
 }
 

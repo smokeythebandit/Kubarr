@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::Result;
 use crate::models::{app_operation, app_state};
 use crate::services::app_manager::{
-    AppManager, AUTO_SKIPPED_MESSAGE, AUTO_TARGET_KEY, OBS_INSTALLED, OP_UPDATE, STATUS_FAILED,
-    STATUS_PAUSED, STATUS_QUEUED, STATUS_RUNNING,
+    AppManager, AUTO_TARGET_KEY, OBS_INSTALLED, OP_UPDATE, STATUS_FAILED, STATUS_PAUSED,
+    STATUS_QUEUED, STATUS_RUNNING,
 };
 use crate::services::auto_update_settings;
 use crate::services::catalog::AppCatalog;
@@ -81,9 +81,11 @@ pub async fn candidates<C: ConnectionTrait>(db: &C, catalog: &AppCatalog) -> Res
 }
 
 /// True when the newest update operation for the app, whoever started it,
-/// failed while targeting `version`. Only a newer operation (a success) or a
-/// different available version clears it; a failed manual retry keeps it.
-/// Operations dropped before Helm because the version moved do not count.
+/// failed while targeting `version` after Helm ran. Only a newer operation (a
+/// success) or a different available version clears it; a failed manual retry
+/// keeps it. Only failures that reached Helm count: the worker stores
+/// diagnostics for exactly those. Failures before Helm (a blip, a dropped stale
+/// target) and interrupted operations leave none, so the next night re-evaluates.
 async fn failed_on_version<C: ConnectionTrait>(
     db: &C,
     app_name: &str,
@@ -103,12 +105,7 @@ async fn failed_on_version<C: ConnectionTrait>(
                 serde_json::from_str::<std::collections::HashMap<String, String>>(raw).ok()
             })
             .and_then(|mut config| config.remove(AUTO_TARGET_KEY));
-        op.status == STATUS_FAILED
-            && target.as_deref() == Some(version)
-            && !op
-                .error
-                .as_deref()
-                .is_some_and(|e| e.contains(AUTO_SKIPPED_MESSAGE))
+        op.status == STATUS_FAILED && target.as_deref() == Some(version) && op.diagnostics.is_some()
     }))
 }
 
@@ -173,7 +170,7 @@ pub async fn run<C: ConnectionTrait>(
 mod tests {
     use super::*;
     use crate::models::app_state;
-    use crate::services::app_manager::STATUS_SUCCEEDED;
+    use crate::services::app_manager::{AUTO_SKIPPED_MESSAGE, STATUS_SUCCEEDED};
     use crate::services::auto_update_settings::AutoUpdateSettings;
     use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, Set};
     use sea_orm_migration::MigratorTrait;
@@ -267,6 +264,19 @@ mod tests {
                 .await
                 .unwrap()
         }
+        /// A failure that reached Helm (the worker stores diagnostics for it).
+        async fn fail_after_helm(&self, id: &str) {
+            let op = app_operation::Entity::find_by_id(id.to_string())
+                .one(self.db())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut active: app_operation::ActiveModel = op.into();
+            active.status = Set(STATUS_FAILED.into());
+            active.diagnostics = Set(Some("Not healthy within 10 min".into()));
+            active.update(self.db()).await.unwrap();
+        }
+
         async fn set_status(&self, id: &str, status: &str) {
             let op = app_operation::Entity::find_by_id(id.to_string())
                 .one(self.db())
@@ -433,7 +443,7 @@ mod tests {
             TickResult::Enqueued("alpha".into())
         );
         let op = f.ops("alpha").await.remove(0);
-        f.set_status(&op.id, STATUS_FAILED).await;
+        f.fail_after_helm(&op.id).await;
         f.settle("alpha").await;
         // Same available version: skipped on every later tick.
         assert!(f.candidates().await.is_empty());
@@ -455,12 +465,12 @@ mod tests {
             .enqueue_auto_update("alpha", "1.0.1+1")
             .await
             .unwrap();
-        f.set_status(&queued.id, STATUS_FAILED).await;
+        f.fail_after_helm(&queued.id).await;
         f.settle("alpha").await;
         assert!(f.candidates().await.is_empty());
         // The owner retries through the real retry path; that fails too.
         let retry = f.manager.retry_operation(&queued.id, 1).await.unwrap();
-        f.set_status(&retry.id, STATUS_FAILED).await;
+        f.fail_after_helm(&retry.id).await;
         f.settle("alpha").await;
         assert_eq!(
             f.ops("alpha").await.last().unwrap().trigger.as_deref(),
@@ -474,7 +484,7 @@ mod tests {
             .enqueue_operation("alpha", OP_UPDATE, HashMap::new(), Some(1))
             .await
             .unwrap();
-        f.set_status(&manual.id, STATUS_FAILED).await;
+        f.fail_after_helm(&manual.id).await;
         f.settle("alpha").await;
         assert!(f.candidates().await.is_empty());
     }
@@ -488,7 +498,7 @@ mod tests {
             .enqueue_auto_update("alpha", "1.0.1+1")
             .await
             .unwrap();
-        f.set_status(&queued.id, STATUS_FAILED).await;
+        f.fail_after_helm(&queued.id).await;
         f.settle("alpha").await;
         let manual = f
             .manager
@@ -520,6 +530,21 @@ mod tests {
         active.error = Set(Some(AUTO_SKIPPED_MESSAGE.into()));
         active.update(f.db()).await.unwrap();
         let _ = queued;
+        f.settle("alpha").await;
+        assert_eq!(f.candidates().await, vec!["alpha".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_failure_before_helm_or_interruption_does_not_count() {
+        let f = fixture().await;
+        f.state("alpha", "1.0.0+1", "1.0.1+1").await;
+        let queued = f
+            .manager
+            .enqueue_auto_update("alpha", "1.0.1+1")
+            .await
+            .unwrap();
+        // Failed before Helm (or recovered as interrupted): no diagnostics.
+        f.set_status(&queued.id, STATUS_FAILED).await;
         f.settle("alpha").await;
         assert_eq!(f.candidates().await, vec!["alpha".to_string()]);
     }

@@ -1375,10 +1375,16 @@ async fn test_auto_update_migration_down_removes_columns_and_events() {
 const FROM: &str = "1.0.0";
 const TO: &str = "1.1.0";
 const CAPTURED: &str = "=== pods ===\ncaptured evidence";
+/// Scaled-down verification timing: poll 1 ms, settle 20 ms, timeout 300 ms.
+const TEST_POLL: Duration = Duration::from_millis(1);
+const TEST_SETTLE: Duration = Duration::from_millis(20);
+const TEST_HEALTH_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Scripted cluster: each health/snapshot call consumes the next entry; the last repeats.
 struct StubProbe {
-    health: std::sync::Mutex<Vec<bool>>,
+    /// Health before the rollback (first entry) and after it (last entry).
+    health: Vec<bool>,
+    rolled_back: std::sync::atomic::AtomicBool,
     snapshots: std::sync::Mutex<Vec<RestartSnapshot>>,
     /// `helm history` before Helm, then after (last entry repeats).
     histories: std::sync::Mutex<Vec<Vec<(u32, String)>>>,
@@ -1400,7 +1406,8 @@ impl StubProbe {
 
     fn with_histories(health: &[bool], histories: Vec<Vec<(u32, String)>>) -> Self {
         Self {
-            health: std::sync::Mutex::new(health.to_vec()),
+            health: health.to_vec(),
+            rolled_back: std::sync::atomic::AtomicBool::new(false),
             snapshots: std::sync::Mutex::new(vec![RestartSnapshot::new()]),
             histories: std::sync::Mutex::new(histories),
             history_fails: false,
@@ -1416,6 +1423,15 @@ impl StubProbe {
     fn record(&self, call: String) {
         self.calls.lock().unwrap().push(call);
     }
+}
+
+/// Calls other than the repeated restart/health polls, in order.
+fn key_calls(probe: &StubProbe) -> Vec<String> {
+    probe
+        .calls()
+        .into_iter()
+        .filter(|call| call != "snapshot" && call != "health")
+        .collect()
 }
 
 fn next_scripted<T: Clone>(script: &std::sync::Mutex<Vec<T>>) -> T {
@@ -1436,7 +1452,11 @@ impl UpdateProbe for StubProbe {
 
     async fn health(&self) -> Result<(bool, String)> {
         self.record("health".into());
-        let healthy = next_scripted(&self.health);
+        let healthy = if self.rolled_back.load(Ordering::SeqCst) {
+            self.health[self.health.len() - 1]
+        } else {
+            self.health[0]
+        };
         Ok((
             healthy,
             if healthy { "" } else { "Deployment not ready" }.into(),
@@ -1467,6 +1487,7 @@ impl UpdateProbe for StubProbe {
                 "helm rollback exploded token=rollbacksecret".into(),
             ));
         }
+        self.rolled_back.store(true, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -1478,7 +1499,8 @@ async fn notifying_setup() -> (AppManager, i64) {
     notifications.set_db(manager.db.clone()).await;
     let manager = manager
         .with_notifications(Arc::new(notifications))
-        .with_update_health_timeout(Duration::ZERO);
+        .with_update_health_timeout(TEST_HEALTH_TIMEOUT)
+        .with_update_timing(TEST_POLL, TEST_SETTLE);
     let now = Utc::now();
     let owner = user::ActiveModel {
         username: Set("owner".into()),
@@ -1564,7 +1586,9 @@ async fn test_update_healthy_succeeds_and_notifies_updated() {
     );
     assert_eq!(finished.diagnostics, None);
     assert_eq!(finished.error, None);
-    assert_eq!(probe.calls(), ["snapshot", "history", "snapshot", "health"]);
+    assert_eq!(key_calls(&probe), ["history"]);
+    // Not the first healthy poll: it stayed healthy through the settle period.
+    assert!(probe.calls().iter().filter(|c| *c == "health").count() > 1);
     assert_eq!(audits(&manager).await.last().unwrap().action, "app_updated");
     let sent = notifications(&manager).await;
     assert_eq!(sent.len(), 1);
@@ -1589,27 +1613,26 @@ async fn test_update_unhealthy_rolls_back_and_stores_diagnostics() {
     );
     let diagnostics = finished.diagnostics.unwrap();
     let first = diagnostics.lines().next().unwrap();
-    assert_eq!(first, "Not healthy within 0 min: Deployment not ready");
+    assert!(first.starts_with("Not healthy within "), "{first}");
+    assert!(first.ends_with(": Deployment not ready"), "{first}");
     assert!(diagnostics.contains("Rolled back to revision 3"));
     assert!(diagnostics.contains(CAPTURED));
     assert_eq!(finished.error.as_deref(), Some(first));
     // Evidence is captured before the rollback replaces the failing pods,
     // and health is re-checked afterwards against a fresh restart baseline.
     assert_eq!(
-        probe.calls(),
+        key_calls(&probe),
         [
-            "snapshot",
             "history",
-            "snapshot",
-            "health",
             "history",
             "capture Some(4) Some(3)",
-            "snapshot",
-            "rollback 3",
-            "snapshot",
-            "health"
+            "rollback 3"
         ]
     );
+    let calls = probe.calls();
+    let rollback = calls.iter().position(|c| c == "rollback 3").unwrap();
+    assert_eq!(calls[rollback - 1], "snapshot");
+    assert!(calls[rollback + 1..].contains(&"health".to_string()));
     assert_eq!(
         audits(&manager).await.last().unwrap().action,
         "app_update_failed"
@@ -2092,4 +2115,193 @@ async fn test_auto_op_not_executed_when_chart_moved_since_queued() {
         .guard_auto_target(&op, None, Some("1.30.1"))
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn test_restart_breach_during_settle_rolls_back() {
+    // Ready right away, then a container restarts 3 times before the settle period ends.
+    let (manager, owner) = notifying_setup().await;
+    let probe = StubProbe::new(&[true], Some(3));
+    *probe.snapshots.lock().unwrap() = vec![
+        RestartSnapshot::new(),                      // before Helm
+        RestartSnapshot::new(),                      // healthy poll 1
+        RestartSnapshot::new(),                      // healthy poll 2
+        HashMap::from([("pod/app".to_string(), 3)]), // breach inside settle
+        RestartSnapshot::new(),                      // after rollback
+    ];
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(
+        finished.message.as_deref(),
+        Some("Update to 1.1.0 failed; rolled back to 1.0.0")
+    );
+    assert!(finished
+        .diagnostics
+        .unwrap()
+        .starts_with("A container restarted more than 2 times"));
+    let calls = probe.calls();
+    let rollback = calls.iter().position(|c| c == "rollback 3").unwrap();
+    assert!(calls[..rollback].iter().filter(|c| *c == "health").count() >= 2);
+}
+
+#[tokio::test]
+async fn test_timeout_shorter_than_settle_is_unhealthy() {
+    let (manager, owner) = notifying_setup().await;
+    let manager = manager
+        .with_update_health_timeout(Duration::from_millis(10))
+        .with_update_timing(TEST_POLL, Duration::from_millis(200));
+    let probe = StubProbe::new(&[true], Some(3));
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    let diagnostics = finished.diagnostics.unwrap();
+    assert!(
+        diagnostics
+            .lines()
+            .next()
+            .unwrap()
+            .contains("settle period"),
+        "{diagnostics}"
+    );
+}
+
+#[tokio::test]
+async fn test_failure_notifications_carry_migration_note() {
+    let (manager, owner) = notifying_setup().await;
+    let probe = StubProbe::new(&[false, true], Some(3));
+    run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+    let sent = notifications(&manager).await;
+    assert!(
+        sent[0].message.ends_with(MIGRATION_NOTE),
+        "{}",
+        sent[0].message
+    );
+
+    // Not applied: nothing changed, so no rollback caveat.
+    let (manager, owner) = notifying_setup().await;
+    let unchanged = vec![(3, "deployed".to_string())];
+    let probe = StubProbe::with_histories(&[true], vec![unchanged.clone(), unchanged]);
+    run_update(
+        &manager,
+        Some(owner),
+        &probe,
+        Err(AppError::Internal("chart pull failed".into())),
+    )
+    .await;
+    assert!(!notifications(&manager).await[0]
+        .message
+        .contains(MIGRATION_NOTE));
+}
+
+#[tokio::test]
+async fn test_not_applied_with_unknown_history_does_not_claim_unchanged() {
+    let (manager, owner) = notifying_setup().await;
+    let mut probe = StubProbe::new(&[true], Some(3));
+    probe.history_fails = true;
+
+    let finished = run_update(
+        &manager,
+        Some(owner),
+        &probe,
+        Err(AppError::Internal("post-upgrade hook failed".into())),
+    )
+    .await;
+
+    assert_eq!(
+        finished.message.as_deref(),
+        Some("Update to 1.1.0 failed; Helm reported an error")
+    );
+    let diagnostics = finished.diagnostics.unwrap();
+    assert!(
+        diagnostics.contains("Helm history unavailable"),
+        "{diagnostics}"
+    );
+    assert!(!diagnostics.contains("No new revision is running"));
+    let sent = notifications(&manager).await;
+    assert!(
+        !sent[0].message.contains("still running"),
+        "{}",
+        sent[0].message
+    );
+}
+
+#[tokio::test]
+async fn test_update_failing_before_helm_notifies_neutral_and_skip_stays_silent() {
+    let (manager, owner) = notifying_setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), Some(owner))
+        .await
+        .unwrap();
+    manager
+        .process_next_operation_with(|_| async {
+            Err(AppError::Internal(
+                "restart counts unavailable: password=hunter22".into(),
+            ))
+        })
+        .await
+        .unwrap();
+    let finished = operation(&manager, &queued.id).await;
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(finished.diagnostics, None); // does not count for the failed-version skip
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].event_type.as_deref(), Some("app_update_failed"));
+    assert!(sent[0]
+        .message
+        .contains("the update failed before Kubarr could verify it"));
+    assert!(sent[0].message.contains("password=[redacted]"));
+    assert!(!sent[0].message.contains("hunter22"));
+    assert!(!sent[0].message.contains("rolled back"));
+
+    // A dropped stale auto target stays silent.
+    manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), Some(owner))
+        .await
+        .unwrap();
+    manager
+        .process_next_operation_with(|_| async {
+            Err(AppError::Conflict(AUTO_SKIPPED_MESSAGE.into()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(notifications(&manager).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_interrupted_update_notifies_critical_and_does_not_count() {
+    let (manager, owner) = notifying_setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), Some(owner))
+        .await
+        .unwrap();
+    let claimed = manager
+        .claim_operation(operation(&manager, &queued.id).await)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut stale: app_operation::ActiveModel = claimed.into();
+    stale.updated_at = Set(Utc::now() - chrono::Duration::minutes(16));
+    stale.update(&manager.db).await.unwrap();
+
+    manager.recover_stale_operations().await.unwrap();
+
+    let finished = operation(&manager, &queued.id).await;
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(finished.diagnostics, None); // the next window re-evaluates the app
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].event_type.as_deref(),
+        Some("app_update_rollback_failed")
+    );
+    assert_eq!(sent[0].severity, "critical");
+    assert!(
+        sent[0].message.contains(INTERRUPTED_DETAILS),
+        "{}",
+        sent[0].message
+    );
+    assert!(sent[0].message.contains("app=operation-test-app"));
 }

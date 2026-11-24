@@ -285,6 +285,10 @@ fn scrub(text: &str, secrets: &[String]) -> String {
     if let Ok(re) = Regex::new(r"Bearer\s+\S+") {
         out = re.replace_all(&out, "Bearer [redacted]").into_owned();
     }
+    // Credentials embedded in URLs: scheme://user:pass@host
+    if let Ok(re) = Regex::new(r"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@") {
+        out = re.replace_all(&out, "${1}[redacted]@").into_owned();
+    }
     out
 }
 
@@ -296,7 +300,6 @@ pub async fn scrub_for_namespace(k8s: &K8sClient, ns: &str, text: &str) -> Strin
 }
 
 /// Inline-pattern scrub only, for callers without cluster access.
-#[cfg(test)]
 pub(crate) fn scrub_inline(text: &str) -> String {
     scrub(text, &[])
 }
@@ -428,5 +431,20 @@ mod tests {
         assert!(out.contains("api_key=[redacted]"));
         assert!(out.contains("Bearer [redacted]"));
         assert!(!out.contains("abc123") && !out.contains("eyJ") && !out.contains("s3"));
+    }
+
+    #[test]
+    fn test_url_credentials_masked() {
+        let out = scrub(
+            "pulling https://bot:Sup3rS3cret@registry.example/chart and postgres://app:pw@db:5432/x; plain https://example.com/a@b",
+            &[],
+        );
+        assert!(
+            out.contains("https://[redacted]@registry.example/chart"),
+            "{out}"
+        );
+        assert!(out.contains("postgres://[redacted]@db:5432/x"), "{out}");
+        assert!(out.contains("https://example.com/a@b"), "{out}");
+        assert!(!out.contains("Sup3rS3cret") && !out.contains("app:pw"));
     }
 }
