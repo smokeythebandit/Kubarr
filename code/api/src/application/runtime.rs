@@ -149,7 +149,15 @@ async fn run_as_leader(
         tracing::info!("Pod status watch started");
     }
 
-    let manager = Arc::new(AppManager::new(conn, k8s_client, catalog));
+    // Update outcomes are announced from the worker that runs the operation.
+    let notifications = NotificationService::new();
+    notifications.set_db(conn.clone()).await;
+    if let Err(e) = notifications.init_providers().await {
+        tracing::warn!("Failed to initialize worker notification providers: {}", e);
+    }
+    let manager = Arc::new(
+        AppManager::new(conn, k8s_client, catalog).with_notifications(Arc::new(notifications)),
+    );
 
     // Only aged claims are recovered: a recent claim might belong to a still
     // draining predecessor during deployment. Recovery never invokes Helm again.

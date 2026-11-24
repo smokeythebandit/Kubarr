@@ -56,7 +56,7 @@ pub fn restarts_exceeded(before: &RestartSnapshot, now: &RestartSnapshot, limit:
         .any(|(key, count)| count - before.get(key).copied().unwrap_or(0) > limit)
 }
 
-fn truncate_report(mut report: String) -> String {
+pub(crate) fn truncate_report(mut report: String) -> String {
     if report.len() <= MAX_DIAGNOSTICS_BYTES {
         return report;
     }

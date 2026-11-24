@@ -26,7 +26,9 @@ use crate::services::deployment::{DeploymentManager, DeploymentRequest};
 use crate::services::gpu::{self, GpuSelection, QUEUED_GPU_KEY};
 use crate::services::install_options::{self, InstallStorage};
 use crate::services::k8s::K8sClient;
+use crate::services::notification::NotificationService;
 use crate::services::storage_config;
+use crate::services::update_diagnostics::{self, RestartSnapshot};
 use crate::state::{SharedCatalog, SharedK8sClient};
 
 pub const OP_INSTALL: &str = "install";
@@ -65,6 +67,12 @@ const STALE_RUNNING_AFTER: chrono::Duration = chrono::Duration::minutes(15);
 const RUNNING_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const STOP_ERROR: &str = "Stop requested; external outcome indeterminate";
+const DEFAULT_UPDATE_HEALTH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const UPDATE_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// A container restarting more often than this since the update started fails it.
+const UPDATE_RESTART_LIMIT: i32 = 2;
+/// Longest summary line placed above the captured diagnostics.
+const SUMMARY_LINE_MAX: usize = 300;
 
 pub const DESIRED_INSTALLED: &str = "installed";
 pub const DESIRED_REMOVED: &str = "removed";
@@ -130,6 +138,172 @@ pub struct AppStateResponse {
     pub updated_at: chrono::DateTime<Utc>,
 }
 
+/// What happened to an app after an update was applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    Healthy,
+    RolledBack { diagnostics: String },
+    RollbackFailed { diagnostics: String },
+}
+
+impl UpdateOutcome {
+    fn diagnostics(&self) -> Option<&str> {
+        match self {
+            UpdateOutcome::Healthy => None,
+            UpdateOutcome::RolledBack { diagnostics }
+            | UpdateOutcome::RollbackFailed { diagnostics } => Some(diagnostics),
+        }
+    }
+}
+
+struct UpdateVersions {
+    from: String,
+    to: String,
+}
+
+struct UpdateReport {
+    from: String,
+    to: String,
+    outcome: UpdateOutcome,
+}
+
+impl UpdateReport {
+    fn message(&self, app: &str) -> String {
+        let (from, to) = (&self.from, &self.to);
+        match self.outcome {
+            UpdateOutcome::Healthy => format!("Updated {app} {from} → {to}"),
+            UpdateOutcome::RolledBack { .. } => {
+                format!("Update to {to} failed; rolled back to {from}")
+            }
+            UpdateOutcome::RollbackFailed { .. } => {
+                format!("Update to {to} failed; rollback to {from} failed")
+            }
+        }
+    }
+
+    fn audit_action(&self) -> AuditAction {
+        match self.outcome {
+            UpdateOutcome::Healthy => AuditAction::AppUpdated,
+            UpdateOutcome::RolledBack { .. } => AuditAction::AppUpdateFailed,
+            UpdateOutcome::RollbackFailed { .. } => AuditAction::AppUpdateRollbackFailed,
+        }
+    }
+
+    /// Appended to the event's fixed notification prefix.
+    fn notification_details(&self, app: &str) -> String {
+        let versions = format!("app={app} from={} to={}", self.from, self.to);
+        match self.outcome.diagnostics() {
+            None => versions,
+            Some(diagnostics) => format!("{versions}; {}", first_line(diagnostics)),
+        }
+    }
+}
+
+/// The result an executed operation hands to the worker's completion step.
+enum OperationOutput {
+    Done(String),
+    Update(UpdateReport),
+}
+
+impl From<String> for OperationOutput {
+    fn from(message: String) -> Self {
+        OperationOutput::Done(message)
+    }
+}
+
+/// A terminal write: `action` overrides the audit action derived from the operation.
+struct Terminal {
+    status: &'static str,
+    message: Option<String>,
+    error: Option<String>,
+    diagnostics: Option<String>,
+    action: Option<AuditAction>,
+}
+
+enum HealthVerdict {
+    Healthy,
+    Unhealthy(String),
+}
+
+struct Revisions {
+    current: Option<u32>,
+    previous: Option<u32>,
+}
+
+/// The cluster reads and Helm actions the update verifier needs, behind a seam
+/// so the decision flow is testable without a cluster.
+// async_trait adds #[must_use] to methods that already return Result.
+#[allow(clippy::double_must_use)]
+#[async_trait::async_trait]
+trait UpdateProbe: Send + Sync {
+    async fn restart_snapshot(&self) -> Result<RestartSnapshot>;
+    /// `app_health`'s `healthy` flag and message.
+    async fn health(&self) -> Result<(bool, String)>;
+    fn revisions(&self) -> Result<Revisions>;
+    async fn capture(&self, failed: Option<u32>, previous: Option<u32>) -> String;
+    fn rollback(&self, revision: u32) -> Result<()>;
+}
+
+struct ClusterUpdateProbe<'a, 'm> {
+    k8s: &'a K8sClient,
+    deploy: &'a DeploymentManager<'m>,
+    app: &'a str,
+    namespace: String,
+}
+
+impl<'a, 'm> ClusterUpdateProbe<'a, 'm> {
+    fn new(k8s: &'a K8sClient, deploy: &'a DeploymentManager<'m>, app: &'a str) -> Self {
+        Self {
+            k8s,
+            deploy,
+            app,
+            namespace: crate::services::catalog::lifecycle_for_app_name(app).namespace,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl UpdateProbe for ClusterUpdateProbe<'_, '_> {
+    async fn restart_snapshot(&self) -> Result<RestartSnapshot> {
+        update_diagnostics::restart_snapshot(self.k8s, &self.namespace).await
+    }
+
+    async fn health(&self) -> Result<(bool, String)> {
+        let health = self.deploy.app_health(self.app).await?;
+        Ok((
+            health["healthy"].as_bool().unwrap_or(false),
+            health["message"].as_str().unwrap_or_default().to_string(),
+        ))
+    }
+
+    fn revisions(&self) -> Result<Revisions> {
+        Ok(Revisions {
+            current: self
+                .deploy
+                .release_revisions(self.app)?
+                .last()
+                .map(|(revision, _)| *revision),
+            previous: self.deploy.previous_deployed_revision(self.app)?,
+        })
+    }
+
+    async fn capture(&self, failed: Option<u32>, previous: Option<u32>) -> String {
+        update_diagnostics::capture(
+            self.k8s,
+            self.deploy,
+            self.app,
+            &self.namespace,
+            failed,
+            previous,
+        )
+        .await
+    }
+
+    fn rollback(&self, revision: u32) -> Result<()> {
+        self.deploy.rollback_release(self.app, revision)
+    }
+}
+
 #[derive(Clone)]
 pub struct AppManager {
     pub(super) db: DatabaseConnection,
@@ -137,6 +311,10 @@ pub struct AppManager {
     pub(super) catalog: SharedCatalog,
     /// Serializes Helm writes between queued operations and the HA rescaler.
     pub(super) helm_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Update outcomes are announced here; absent means no notifications.
+    notifications: Option<Arc<NotificationService>>,
+    /// How long an updated app may take to become healthy before rollback.
+    update_health_timeout: Duration,
 }
 
 impl AppManager {
@@ -150,7 +328,21 @@ impl AppManager {
             k8s_client,
             catalog,
             helm_lock: Arc::default(),
+            notifications: None,
+            update_health_timeout: DEFAULT_UPDATE_HEALTH_TIMEOUT,
         }
+    }
+
+    /// Announce update outcomes through `notifications`.
+    pub fn with_notifications(mut self, notifications: Arc<NotificationService>) -> Self {
+        self.notifications = Some(notifications);
+        self
+    }
+
+    /// Override how long an updated app may take to become healthy.
+    pub fn with_update_health_timeout(mut self, timeout: Duration) -> Self {
+        self.update_health_timeout = timeout;
+        self
     }
 
     pub async fn enqueue_operation(
@@ -963,7 +1155,7 @@ impl AppManager {
         execute: F,
     ) where
         F: Fn(app_operation::Model, CancellationToken) -> Fut,
-        Fut: Future<Output = Result<String>>,
+        Fut: Future<Output = Result<OperationOutput>>,
     {
         let mut ticker = tokio::time::interval(poll_interval);
         loop {
@@ -1010,8 +1202,14 @@ impl AppManager {
         F: FnOnce(app_operation::Model) -> Fut,
         Fut: Future<Output = Result<String>>,
     {
-        self.process_next_operation_with_stop(|operation, _| execute(operation), heartbeat_interval)
-            .await
+        self.process_next_operation_with_stop(
+            |operation, _| {
+                let output = execute(operation);
+                async move { output.await.map(OperationOutput::from) }
+            },
+            heartbeat_interval,
+        )
+        .await
     }
 
     async fn process_next_operation_with_stop<F, Fut>(
@@ -1021,7 +1219,7 @@ impl AppManager {
     ) -> Result<()>
     where
         F: FnOnce(app_operation::Model, CancellationToken) -> Fut,
-        Fut: Future<Output = Result<String>>,
+        Fut: Future<Output = Result<OperationOutput>>,
     {
         let Some(operation) = self.claim_next_operation().await? else {
             return Ok(());
@@ -1086,56 +1284,42 @@ impl AppManager {
             }
         } else {
             match result {
-                Ok(message) => {
-                    let won = self
-                        .finish_operation_if_unstopped(
-                            &operation.id,
-                            STATUS_SUCCEEDED,
-                            Some(message.clone()),
-                            None,
-                        )
-                        .await?;
-                    if won && operation.operation != OP_RESTART {
-                        if let Err(error) = self
-                            .upsert_state(
-                                &operation.app_name,
-                                &crate::services::catalog::lifecycle_for_app_name(
-                                    &operation.app_name,
-                                )
-                                .namespace,
-                                desired_state_for_operation(&operation.operation),
-                                if operation.operation == OP_DELETE {
-                                    OBS_NOT_INSTALLED
-                                } else {
-                                    OBS_INSTALLING
+                Ok(OperationOutput::Done(message)) => {
+                    let action = terminal_action(&operation.operation, true);
+                    self.complete_succeeded(&operation, message, action).await?;
+                }
+                Ok(OperationOutput::Update(report)) => {
+                    let message = report.message(&operation.app_name);
+                    let action = report.audit_action();
+                    let won = match report.outcome.diagnostics() {
+                        None => {
+                            self.complete_succeeded(&operation, message.clone(), action.clone())
+                                .await?
+                        }
+                        Some(diagnostics) => {
+                            let summary = first_line(diagnostics).to_string();
+                            self.complete_failed(
+                                &operation,
+                                Terminal {
+                                    status: STATUS_FAILED,
+                                    message: Some(message.clone()),
+                                    error: Some(summary),
+                                    diagnostics: Some(diagnostics.to_string()),
+                                    action: Some(action.clone()),
                                 },
-                                false,
-                                Some(if operation.operation == OP_DELETE {
-                                    "Removed".to_string()
-                                } else {
-                                    message.clone()
-                                }),
-                                Some(operation.id.clone()),
-                                false,
+                                message.clone(),
                             )
-                            .await
-                        {
-                            tracing::error!(operation_id = %operation.id, %error, "App state update failed after external success");
+                            .await?
                         }
-                    }
+                    };
                     if won {
-                        if let Err(error) = self.reconcile_app(&operation.app_name).await {
-                            tracing::error!(operation_id = %operation.id, %error, "App reconcile failed after terminal commit");
-                        }
-                    } else {
-                        self.finish_stopped(&operation).await?;
+                        self.notify_update(
+                            &operation,
+                            &action,
+                            &report.notification_details(&operation.app_name),
+                        )
+                        .await;
                     }
-                    tracing::info!(
-                        operation_id = %operation.id,
-                        app = %operation.app_name,
-                        operation = %operation.operation,
-                        "App operation finished"
-                    );
                 }
                 Err(e) => {
                     let error = e.to_string();
@@ -1144,43 +1328,18 @@ impl AppManager {
                     } else {
                         format!("{} failed", operation.operation)
                     };
-                    let won = self
-                        .finish_operation_if_unstopped(
-                            &operation.id,
-                            STATUS_FAILED,
-                            Some(message),
-                            Some(error.clone()),
-                        )
-                        .await?;
-                    if !won {
-                        self.finish_stopped(&operation).await?;
-                    }
-                    if won {
-                        if let Err(state_error) = self
-                            .upsert_state(
-                                &operation.app_name,
-                                &crate::services::catalog::lifecycle_for_app_name(
-                                    &operation.app_name,
-                                )
-                                .namespace,
-                                desired_state_for_operation(&operation.operation),
-                                OBS_FAILED,
-                                false,
-                                Some(error),
-                                Some(operation.id.clone()),
-                                false,
-                            )
-                            .await
-                        {
-                            tracing::error!(operation_id = %operation.id, %state_error, "App failure state update failed after terminal commit");
-                        }
-                    }
-                    tracing::warn!(
-                        operation_id = %operation.id,
-                        app = %operation.app_name,
-                        operation = %operation.operation,
-                        "App operation failed"
-                    );
+                    self.complete_failed(
+                        &operation,
+                        Terminal {
+                            status: STATUS_FAILED,
+                            message: Some(message),
+                            error: Some(error.clone()),
+                            diagnostics: None,
+                            action: None,
+                        },
+                        error,
+                    )
+                    .await?;
                 }
             }
         }
@@ -1190,6 +1349,135 @@ impl AppManager {
         }
 
         Ok(())
+    }
+
+    /// Record success, then publish state. Returns whether this worker won the terminal write.
+    async fn complete_succeeded(
+        &self,
+        operation: &app_operation::Model,
+        message: String,
+        action: AuditAction,
+    ) -> Result<bool> {
+        let won = self
+            .finish_operation_with(
+                &operation.id,
+                Terminal {
+                    status: STATUS_SUCCEEDED,
+                    message: Some(message.clone()),
+                    error: None,
+                    diagnostics: None,
+                    action: Some(action),
+                },
+            )
+            .await?;
+        if won && operation.operation != OP_RESTART {
+            if let Err(error) = self
+                .upsert_state(
+                    &operation.app_name,
+                    &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
+                        .namespace,
+                    desired_state_for_operation(&operation.operation),
+                    if operation.operation == OP_DELETE {
+                        OBS_NOT_INSTALLED
+                    } else {
+                        OBS_INSTALLING
+                    },
+                    false,
+                    Some(if operation.operation == OP_DELETE {
+                        "Removed".to_string()
+                    } else {
+                        message
+                    }),
+                    Some(operation.id.clone()),
+                    false,
+                )
+                .await
+            {
+                tracing::error!(operation_id = %operation.id, %error, "App state update failed after external success");
+            }
+        }
+        if won {
+            if let Err(error) = self.reconcile_app(&operation.app_name).await {
+                tracing::error!(operation_id = %operation.id, %error, "App reconcile failed after terminal commit");
+            }
+        } else {
+            self.finish_stopped(operation).await?;
+        }
+        tracing::info!(
+            operation_id = %operation.id,
+            app = %operation.app_name,
+            operation = %operation.operation,
+            "App operation finished"
+        );
+        Ok(won)
+    }
+
+    /// Record failure, then publish `state_message` on the app. Returns whether
+    /// this worker won the terminal write.
+    async fn complete_failed(
+        &self,
+        operation: &app_operation::Model,
+        terminal: Terminal,
+        state_message: String,
+    ) -> Result<bool> {
+        let won = self.finish_operation_with(&operation.id, terminal).await?;
+        if won {
+            if let Err(state_error) = self
+                .upsert_state(
+                    &operation.app_name,
+                    &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
+                        .namespace,
+                    desired_state_for_operation(&operation.operation),
+                    OBS_FAILED,
+                    false,
+                    Some(state_message),
+                    Some(operation.id.clone()),
+                    false,
+                )
+                .await
+            {
+                tracing::error!(operation_id = %operation.id, %state_error, "App failure state update failed after terminal commit");
+            }
+        } else {
+            self.finish_stopped(operation).await?;
+        }
+        tracing::warn!(
+            operation_id = %operation.id,
+            app = %operation.app_name,
+            operation = %operation.operation,
+            "App operation failed"
+        );
+        Ok(won)
+    }
+
+    /// Best effort: a notification failure never changes the operation's outcome.
+    async fn notify_update(
+        &self,
+        operation: &app_operation::Model,
+        action: &AuditAction,
+        details: &str,
+    ) {
+        let Some(notifications) = &self.notifications else {
+            return;
+        };
+        let username = match actor(&self.db, operation.created_by).await {
+            Ok((_, username)) => username,
+            Err(error) => {
+                tracing::warn!(operation_id = %operation.id, %error, "Update notification actor lookup failed");
+                None
+            }
+        };
+        if let Err(error) = notifications
+            .notify_event(
+                action,
+                operation.created_by,
+                username.as_deref(),
+                Some(details),
+            )
+            .await
+        {
+            tracing::warn!(operation_id = %operation.id, %error, "Update notification failed");
+        }
     }
 
     async fn claim_next_operation(&self) -> Result<Option<app_operation::Model>> {
@@ -1238,7 +1526,7 @@ impl AppManager {
         &self,
         operation: &app_operation::Model,
         stop: &CancellationToken,
-    ) -> Result<String> {
+    ) -> Result<OperationOutput> {
         check_stop(stop)?;
         let k8s_guard = self.k8s_client.read().await;
         let client = k8s_guard
@@ -1260,12 +1548,12 @@ impl AppManager {
                 manager
                     .remove_app_with_stop(&operation.app_name, Some(stop))
                     .await?;
-                Ok(format!("Removed {}", operation.app_name))
+                Ok(format!("Removed {}", operation.app_name).into())
             }
             OP_RESTART => {
                 check_stop(stop)?;
                 self.restart_app(client, &operation.app_name).await?;
-                Ok(format!("Restarted {}", operation.app_name))
+                Ok(format!("Restarted {}", operation.app_name).into())
             }
             _ => Err(AppError::BadRequest(format!(
                 "Unsupported operation '{}'",
@@ -1292,7 +1580,7 @@ impl AppManager {
         client: &K8sClient,
         catalog: &AppCatalog,
         stop: &CancellationToken,
-    ) -> Result<String> {
+    ) -> Result<OperationOutput> {
         // A malformed persisted request must fail rather than silently deploying
         // with defaults (which can reset a queued GPU or other chart settings).
         let mut custom_config = parse_queued_config(operation.custom_config.as_deref())?;
@@ -1422,37 +1710,214 @@ impl AppManager {
         } else {
             false
         };
-        let status = manager
-            .deploy_install_with_stop(
-                &request,
-                deployment_storage,
-                Some(stop),
-                install
-                    .as_ref()
-                    .map(|choice| {
-                        (
-                            choice.chart_version.as_str(),
-                            &choice.storage,
-                            Some(choice.vpn_provider_id),
-                            choice.fresh_private_config,
-                        )
-                    })
-                    .or_else(|| {
-                        saved_snapshot.as_ref().and_then(|snapshot| {
-                            snapshot
-                                .storage
-                                .as_ref()
-                                .zip(snapshot.chart_version.as_deref())
-                                .map(|(storage, version)| {
-                                    (version, storage, None, snapshot.fresh_private_config)
-                                })
-                        })
-                    }),
-                proven_fresh,
+        // The worker cannot verify its own replacement (it is deployed without --wait).
+        let verify = operation.operation == OP_UPDATE && request.wait;
+        let versions = if verify {
+            Some(
+                self.update_versions(&manager, catalog, &operation.app_name)
+                    .await?,
             )
-            .await?;
+        } else {
+            None
+        };
+        let deploy = manager.deploy_install_with_stop(
+            &request,
+            deployment_storage,
+            Some(stop),
+            install
+                .as_ref()
+                .map(|choice| {
+                    (
+                        choice.chart_version.as_str(),
+                        &choice.storage,
+                        Some(choice.vpn_provider_id),
+                        choice.fresh_private_config,
+                    )
+                })
+                .or_else(|| {
+                    saved_snapshot.as_ref().and_then(|snapshot| {
+                        snapshot
+                            .storage
+                            .as_ref()
+                            .zip(snapshot.chart_version.as_deref())
+                            .map(|(storage, version)| {
+                                (version, storage, None, snapshot.fresh_private_config)
+                            })
+                    })
+                }),
+            proven_fresh,
+        );
 
-        Ok(status.message)
+        let Some(versions) = versions else {
+            return Ok(deploy.await?.message.into());
+        };
+        let probe = ClusterUpdateProbe::new(client, &manager, &operation.app_name);
+        self.run_verified_update(&probe, versions, stop, async {
+            deploy.await.map(|status| status.message)
+        })
+        .await
+    }
+
+    /// The release's deployed chart version (falling back to the recorded one)
+    /// and the catalog version the update installs.
+    async fn update_versions(
+        &self,
+        manager: &DeploymentManager<'_>,
+        catalog: &AppCatalog,
+        app_name: &str,
+    ) -> Result<UpdateVersions> {
+        let from = match manager.installed_chart_version(app_name) {
+            Some(version) => Some(version),
+            None => app_state::Entity::find_by_id(app_name)
+                .one(&self.db)
+                .await?
+                .and_then(|state| state.installed_chart_version),
+        };
+        Ok(UpdateVersions {
+            from: from.unwrap_or_else(|| "unknown".into()),
+            to: catalog
+                .chart_version(app_name)
+                .unwrap_or_else(|| "unknown".into()),
+        })
+    }
+
+    /// Snapshot restarts, run Helm, then verify the app and roll back if it is
+    /// unhealthy. The caller holds `helm_lock` throughout.
+    async fn run_verified_update<H>(
+        &self,
+        probe: &dyn UpdateProbe,
+        versions: UpdateVersions,
+        stop: &CancellationToken,
+        helm: H,
+    ) -> Result<OperationOutput>
+    where
+        H: Future<Output = Result<String>>,
+    {
+        let before = probe.restart_snapshot().await?;
+        let helm_result = helm.await;
+        if stop.is_cancelled() {
+            // A stop wins regardless; do not keep the lock for a verdict nobody records.
+            return helm_result.map(OperationOutput::from);
+        }
+        // A stop during verification abandons it (no rollback); the worker records the stop.
+        let outcome = tokio::select! {
+            outcome = self.verify_or_roll_back(probe, &before, helm_result) => outcome?,
+            _ = stop.cancelled() => return Err(AppError::Internal(STOP_ERROR.into())),
+        };
+        Ok(OperationOutput::Update(UpdateReport {
+            from: versions.from,
+            to: versions.to,
+            outcome,
+        }))
+    }
+
+    /// Wait up to `timeout` for the app to report healthy with no container
+    /// restarted more than twice since `before`. Polls every 10 s.
+    async fn verify_update(
+        &self,
+        probe: &dyn UpdateProbe,
+        before: &RestartSnapshot,
+        timeout: Duration,
+    ) -> HealthVerdict {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let reason = match probe.restart_snapshot().await {
+                Ok(now)
+                    if update_diagnostics::restarts_exceeded(
+                        before,
+                        &now,
+                        UPDATE_RESTART_LIMIT,
+                    ) =>
+                {
+                    return HealthVerdict::Unhealthy(format!(
+                        "A container restarted more than {UPDATE_RESTART_LIMIT} times since the update started"
+                    ));
+                }
+                Ok(_) => match probe.health().await {
+                    Ok((true, _)) => return HealthVerdict::Healthy,
+                    Ok((false, message)) if message.is_empty() => "app health check failing".into(),
+                    Ok((false, message)) => message,
+                    Err(error) => format!("health check error: {error}"),
+                },
+                Err(error) => format!("restart counts unavailable: {error}"),
+            };
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return HealthVerdict::Unhealthy(format!(
+                    "Not healthy within {} min: {reason}",
+                    timeout.as_secs().div_ceil(60)
+                ));
+            }
+            tokio::time::sleep(UPDATE_HEALTH_POLL_INTERVAL.min(deadline - now)).await;
+        }
+    }
+
+    /// `Err` only when Helm failed and the app is still healthy: nothing broke,
+    /// so the Helm error is the outcome and no rollback is attempted.
+    async fn verify_or_roll_back(
+        &self,
+        probe: &dyn UpdateProbe,
+        before: &RestartSnapshot,
+        helm_result: Result<String>,
+    ) -> Result<UpdateOutcome> {
+        let verdict = self
+            .verify_update(probe, before, self.update_health_timeout)
+            .await;
+        let reason = match (verdict, helm_result) {
+            (HealthVerdict::Healthy, Ok(_)) => return Ok(UpdateOutcome::Healthy),
+            (HealthVerdict::Healthy, Err(error)) => return Err(error),
+            (HealthVerdict::Unhealthy(reason), Ok(_)) => reason,
+            (HealthVerdict::Unhealthy(reason), Err(error)) => format!(
+                "Helm upgrade failed: {}; {reason}",
+                first_line(&error.to_string())
+            ),
+        };
+
+        // Evidence first: the rollback replaces the pods whose logs explain the failure.
+        let (failed_revision, previous_revision, history_error) = match probe.revisions() {
+            Ok(revisions) => (revisions.current, revisions.previous, None),
+            Err(error) => (
+                None,
+                None,
+                Some(format!(
+                    "Rollback not attempted: Helm history unavailable: {error}"
+                )),
+            ),
+        };
+        let captured = probe.capture(failed_revision, previous_revision).await;
+
+        let rollback: std::result::Result<u32, String> = match previous_revision {
+            None => Err(history_error
+                .unwrap_or_else(|| "Rollback not attempted: no previous revision".to_string())),
+            Some(revision) => {
+                let before_rollback = probe
+                    .restart_snapshot()
+                    .await
+                    .unwrap_or_else(|_| before.clone());
+                match probe.rollback(revision) {
+                    Err(error) => Err(format!("Rollback to revision {revision} failed: {error}")),
+                    Ok(()) => match self
+                        .verify_update(probe, &before_rollback, self.update_health_timeout)
+                        .await
+                    {
+                        HealthVerdict::Healthy => Ok(revision),
+                        HealthVerdict::Unhealthy(reason) => Err(format!(
+                            "Still unhealthy after rollback to revision {revision}: {reason}"
+                        )),
+                    },
+                }
+            }
+        };
+
+        let rollback_line = match &rollback {
+            Ok(revision) => format!("Rolled back to revision {revision}"),
+            Err(problem) => problem.clone(),
+        };
+        let diagnostics = compose_diagnostics(&reason, &rollback_line, &captured);
+        Ok(match rollback {
+            Ok(_) => UpdateOutcome::RolledBack { diagnostics },
+            Err(_) => UpdateOutcome::RollbackFailed { diagnostics },
+        })
     }
 
     async fn restart_app(&self, client: &K8sClient, app_name: &str) -> Result<()> {
@@ -1470,7 +1935,7 @@ impl AppManager {
     async fn finish_operation(
         &self,
         id: &str,
-        status: &str,
+        status: &'static str,
         message: Option<String>,
         error: Option<String>,
     ) -> Result<()> {
@@ -1503,8 +1968,14 @@ impl AppManager {
             .exec(&transaction)
             .await?;
         if changed.rows_affected == 1 {
-            self.queue_terminal_audit(&transaction, operation, false, "indeterminate")
-                .await?;
+            self.queue_terminal_audit(
+                &transaction,
+                operation,
+                terminal_action(&operation.operation, false),
+                false,
+                "indeterminate",
+            )
+            .await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -1513,10 +1984,31 @@ impl AppManager {
     async fn finish_operation_if_unstopped(
         &self,
         id: &str,
-        status: &str,
+        status: &'static str,
         message: Option<String>,
         error: Option<String>,
     ) -> Result<bool> {
+        self.finish_operation_with(
+            id,
+            Terminal {
+                status,
+                message,
+                error,
+                diagnostics: None,
+                action: None,
+            },
+        )
+        .await
+    }
+
+    async fn finish_operation_with(&self, id: &str, terminal: Terminal) -> Result<bool> {
+        let Terminal {
+            status,
+            message,
+            error,
+            diagnostics,
+            action,
+        } = terminal;
         let transaction = self.db.begin().await?;
         let operation = app_operation::Entity::find_by_id(id.to_string())
             .one(&transaction)
@@ -1535,6 +2027,9 @@ impl AppManager {
             "completed"
         };
         active.error = Set(error);
+        if diagnostics.is_some() {
+            active.diagnostics = Set(diagnostics);
+        }
         active.finished_at = Set(Some(now));
         active.updated_at = Set(now);
         let changed = app_operation::Entity::update_many()
@@ -1547,7 +2042,9 @@ impl AppManager {
         if changed.rows_affected != 1 {
             return Ok(false);
         }
-        self.queue_terminal_audit(&transaction, &operation, status == STATUS_SUCCEEDED, phase)
+        let success = status == STATUS_SUCCEEDED;
+        let action = action.unwrap_or_else(|| terminal_action(&operation.operation, success));
+        self.queue_terminal_audit(&transaction, &operation, action, success, phase)
             .await?;
         transaction.commit().await?;
         Ok(true)
@@ -1557,15 +2054,10 @@ impl AppManager {
         &self,
         transaction: &DatabaseTransaction,
         operation: &app_operation::Model,
+        action: AuditAction,
         success: bool,
         phase: &str,
     ) -> Result<()> {
-        let action = match operation.operation.as_str() {
-            OP_INSTALL => AuditAction::AppInstalled,
-            OP_DELETE => AuditAction::AppUninstalled,
-            OP_RESTART => AuditAction::AppRestarted,
-            _ => AuditAction::AppConfigured,
-        };
         let (_, username) = actor(transaction, operation.created_by).await?;
         audit_outbox::ActiveModel {
             operation_id: Set(operation.id.clone()),
@@ -1669,8 +2161,14 @@ impl AppManager {
         if changed.rows_affected == 0 {
             return Ok(());
         }
-        self.queue_terminal_audit(&transaction, &operation, false, "indeterminate")
-            .await?;
+        self.queue_terminal_audit(
+            &transaction,
+            &operation,
+            terminal_action(&operation.operation, false),
+            false,
+            "indeterminate",
+        )
+        .await?;
         transaction.commit().await?;
         tracing::error!(operation_id = %operation.id, "Recovered interrupted app operation with unknown external outcome");
         Ok(())
@@ -1703,6 +2201,9 @@ impl AppManager {
             "app_uninstalled" => AuditAction::AppUninstalled,
             "app_restarted" => AuditAction::AppRestarted,
             "app_configured" => AuditAction::AppConfigured,
+            "app_updated" => AuditAction::AppUpdated,
+            "app_update_failed" => AuditAction::AppUpdateFailed,
+            "app_update_rollback_failed" => AuditAction::AppUpdateRollbackFailed,
             _ => return Err(AppError::Internal("Invalid app audit outbox action".into())),
         };
         log_on_transaction(
@@ -2063,6 +2564,41 @@ async fn watch_stop(db: DatabaseConnection, id: String, stop: CancellationToken)
             }
         }
     }
+}
+
+fn terminal_action(operation: &str, success: bool) -> AuditAction {
+    match operation {
+        OP_INSTALL => AuditAction::AppInstalled,
+        OP_DELETE => AuditAction::AppUninstalled,
+        OP_RESTART => AuditAction::AppRestarted,
+        OP_UPDATE if success => AuditAction::AppUpdated,
+        OP_UPDATE => AuditAction::AppUpdateFailed,
+        _ => AuditAction::AppConfigured,
+    }
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
+}
+
+/// One line, at most `SUMMARY_LINE_MAX` bytes.
+fn summary_line(text: &str) -> &str {
+    let line = first_line(text);
+    let mut end = line.len().min(SUMMARY_LINE_MAX);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+/// The failure reason leads, so it is the "first diagnostic line" notifications quote.
+fn compose_diagnostics(reason: &str, rollback: &str, captured: &str) -> String {
+    let report = format!(
+        "{}\n{}\n\n{captured}",
+        summary_line(reason),
+        summary_line(rollback)
+    );
+    update_diagnostics::truncate_report(report)
 }
 
 #[cfg(test)]
