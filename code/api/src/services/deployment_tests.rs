@@ -364,7 +364,10 @@ async fn deploy_app_composes_helm4_flags_and_release_workload_namespaces() {
                         // chart adds a values key.
                         assert!(!args.contains(&"--reuse-values"));
                         assert_eq!(args.contains(&"--wait=legacy"), wait);
-                        assert_eq!(args.contains(&"--rollback-on-failure"), wait);
+                        assert_eq!(
+                            args.contains(&"--rollback-on-failure"),
+                            wait && !reuse_values
+                        );
                         assert_eq!(args.contains(&"--timeout"), wait);
                         if wait {
                             assert!(args.windows(2).any(|pair| pair == ["--timeout", "10m"]));
@@ -1701,4 +1704,50 @@ async fn app_namespace_pod_security_follows_vpn_and_precedes_helm() {
             None => assert!(ns_patches.is_empty(), "system app must not be patched"),
         }
     }
+}
+
+#[test]
+fn test_update_args_have_no_rollback_on_failure() {
+    let update = helm_wait_args(true);
+    assert!(update.contains(&"--wait=legacy"));
+    assert!(!update.contains(&"--rollback-on-failure"));
+    assert!(update.windows(2).any(|pair| pair == ["--timeout", "10m"]));
+    let install = helm_wait_args(false);
+    assert_eq!(
+        install,
+        ["--wait=legacy", "--rollback-on-failure", "--timeout", "10m"]
+    );
+}
+
+#[test]
+fn test_previous_deployed_revision() {
+    let history = br#"[
+        {"revision":1,"status":"superseded","chart":"x-1"},
+        {"revision":2,"status":"failed"},
+        {"revision":3,"status":"superseded"},
+        {"revision":4,"status":"superseded"},
+        {"revision":5,"status":"failed"}]"#;
+    let revisions = parse_history(history).unwrap();
+    assert_eq!(revisions.len(), 5);
+    assert_eq!(previous_deployed(&revisions), Some(4));
+    assert_eq!(previous_deployed(&revisions[..1]), None);
+    assert_eq!(previous_deployed(&[]), None);
+    assert!(parse_history(b"nope").is_err());
+}
+
+#[test]
+fn test_rollback_args() {
+    assert_eq!(
+        rollback_args("plex", "4", "plex-ns"),
+        [
+            "rollback",
+            "plex",
+            "4",
+            "-n",
+            "plex-ns",
+            "--wait",
+            "--timeout",
+            "10m"
+        ]
+    );
 }

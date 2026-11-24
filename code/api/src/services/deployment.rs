@@ -200,6 +200,50 @@ impl<'a> DeploymentManager<'a> {
             .transpose()
     }
 
+    /// Helm history of an app's release as `(revision, status)`, ascending.
+    pub fn release_revisions(&self, app_name: &str) -> Result<Vec<(u32, String)>> {
+        let lifecycle = lifecycle_for_app_name(app_name);
+        let output = self.run_helm_command(&[
+            "history",
+            lifecycle.release_name.as_str(),
+            "-n",
+            lifecycle.release_namespace.as_str(),
+            "-o",
+            "json",
+        ])?;
+        parse_history(output.as_bytes())
+    }
+
+    /// Highest revision below the current one that was deployed or superseded.
+    pub fn previous_deployed_revision(&self, app_name: &str) -> Result<Option<u32>> {
+        Ok(previous_deployed(&self.release_revisions(app_name)?))
+    }
+
+    pub fn rollback_release(&self, app_name: &str, revision: u32) -> Result<()> {
+        let lifecycle = lifecycle_for_app_name(app_name);
+        let revision = revision.to_string();
+        self.run_helm_command(&rollback_args(
+            lifecycle.release_name.as_str(),
+            &revision,
+            lifecycle.release_namespace.as_str(),
+        ))?;
+        Ok(())
+    }
+
+    pub fn values_at(&self, app_name: &str, revision: u32) -> Result<String> {
+        let lifecycle = lifecycle_for_app_name(app_name);
+        let revision = revision.to_string();
+        self.run_helm_command(&[
+            "get",
+            "values",
+            lifecycle.release_name.as_str(),
+            "-n",
+            lifecycle.release_namespace.as_str(),
+            "--revision",
+            &revision,
+        ])
+    }
+
     /// Deploy an application using Helm
     pub async fn deploy_app(
         &self,
@@ -400,7 +444,7 @@ impl<'a> DeploymentManager<'a> {
             helm_args.push("--reset-then-reuse-values");
         }
         if request.wait {
-            helm_args.extend(["--wait=legacy", "--rollback-on-failure", "--timeout", "10m"]);
+            helm_args.extend(helm_wait_args(request.reuse_values));
         }
 
         // Collect --set arguments
@@ -1264,6 +1308,60 @@ fn value_injects_managed_helm_assignment(value: &str, root: &str) -> bool {
         };
         is_managed_helm_key(key.trim(), root)
     })
+}
+
+/// Wait flags for install/update. Updates omit `--rollback-on-failure`: Kubarr
+/// captures diagnostics first and then rolls back itself.
+fn helm_wait_args(update: bool) -> Vec<&'static str> {
+    let mut args = vec!["--wait=legacy"];
+    if !update {
+        args.push("--rollback-on-failure");
+    }
+    args.extend(["--timeout", "10m"]);
+    args
+}
+
+fn rollback_args<'a>(release: &'a str, revision: &'a str, namespace: &'a str) -> Vec<&'a str> {
+    vec![
+        "rollback",
+        release,
+        revision,
+        "-n",
+        namespace,
+        "--wait",
+        "--timeout",
+        "10m",
+    ]
+}
+
+#[derive(Deserialize)]
+struct HistoryEntry {
+    revision: u32,
+    status: String,
+}
+
+/// Parse `helm history -o json` into `(revision, status)` ascending.
+fn parse_history(bytes: &[u8]) -> Result<Vec<(u32, String)>> {
+    let entries: Vec<HistoryEntry> = serde_json::from_slice(bytes)
+        .map_err(|error| AppError::Internal(format!("Invalid Helm history: {error}")))?;
+    let mut revisions: Vec<_> = entries
+        .into_iter()
+        .map(|e| (e.revision, e.status))
+        .collect();
+    revisions.sort_by_key(|(revision, _)| *revision);
+    Ok(revisions)
+}
+
+/// Highest revision below the current (last) one that was deployed or superseded.
+fn previous_deployed(revisions: &[(u32, String)]) -> Option<u32> {
+    let current = revisions.last()?.0;
+    revisions
+        .iter()
+        .rev()
+        .find(|(revision, status)| {
+            *revision < current && matches!(status.as_str(), "deployed" | "superseded")
+        })
+        .map(|(revision, _)| *revision)
 }
 
 fn helm_upgrade_install_args<'a>(

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use k8s_openapi::api::core::v1::{
-    ContainerStatus as K8sContainerStatus, NFSVolumeSource, Namespace, PersistentVolume,
+    ContainerStatus as K8sContainerStatus, Event, NFSVolumeSource, Namespace, PersistentVolume,
     PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeSpec, Pod, PodSpec,
     PodStatus as K8sPodStatus, Secret, Service, VolumeResourceRequirements,
 };
@@ -16,6 +16,15 @@ use serde::Deserialize;
 
 use crate::config::CONFIG;
 use crate::error::{AppError, Result};
+
+fn event_time(event: &Event) -> Option<k8s_openapi::jiff::Timestamp> {
+    event
+        .last_timestamp
+        .as_ref()
+        .map(|t| t.0)
+        .or_else(|| event.event_time.as_ref().map(|t| t.0))
+        .or_else(|| event.metadata.creation_timestamp.as_ref().map(|t| t.0))
+}
 
 /// Kubernetes client manager
 pub struct K8sClient {
@@ -224,6 +233,15 @@ impl K8sClient {
         Ok(pod_list.items)
     }
 
+    /// Events in a namespace, oldest first, keeping only the newest `limit`.
+    pub async fn list_events(&self, namespace: &str, limit: usize) -> Result<Vec<Event>> {
+        let events: Api<Event> = Api::namespaced(self.client.clone(), namespace);
+        let mut items = events.list(&ListParams::default()).await?.items;
+        items.sort_by_key(event_time);
+        let skip = items.len().saturating_sub(limit);
+        Ok(items.split_off(skip))
+    }
+
     /// Get a specific pod by name
     pub async fn get_pod(&self, namespace: &str, pod_name: &str) -> Result<Pod> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
@@ -254,6 +272,26 @@ impl K8sClient {
 
         let logs = pods.logs(pod_name, &log_params).await?;
         Ok(logs)
+    }
+
+    /// Logs of the previous (crashed) instance of a container.
+    pub async fn get_previous_pod_logs(
+        &self,
+        pod_name: &str,
+        namespace: &str,
+        container: &str,
+        tail_lines: i32,
+    ) -> Result<String> {
+        use kube::api::LogParams;
+
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        let log_params = LogParams {
+            tail_lines: Some(tail_lines as i64),
+            container: Some(container.to_string()),
+            previous: true,
+            ..Default::default()
+        };
+        Ok(pods.logs(pod_name, &log_params).await?)
     }
 
     /// Get a secret from a namespace
