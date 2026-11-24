@@ -8,6 +8,8 @@ import { MiniSparkline } from './MonitoringPage'
 import { Cpu, MemoryStick, Container, HardDrive, Activity, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { appsApi } from '../api/apps'
+import { updatesApi } from '../api/updates'
+import { autoUpdateStatus } from './autoUpdateStatus'
 import { CLASSES_WITH_FLOW_COUNTS, formatBandwidth, totalByteRate } from '../api/networking'
 import { useFlowClasses } from '../hooks/useFlowClasses'
 import { FlowSplitBar } from '../components/networking/FlowSplitBar'
@@ -151,7 +153,7 @@ export default function Dashboard() {
     appStates,
     appStatuses,
   } = useMonitoring()
-  const { canAccessApp } = useAuth()
+  const { canAccessApp, hasPermission } = useAuth()
 
   const installedApps = useMemo(() => catalog.filter((app) => installedAppNames.includes(app.name)), [catalog, installedAppNames])
   // Only show apps the user can open: browseable and granted by one of their roles
@@ -180,6 +182,18 @@ export default function Dashboard() {
     () => Object.values(appStates).filter((state) => state.update_available),
     [appStates]
   )
+  const majorUpdateCount = useMemo(
+    () => availableUpdates.filter((state) => state.available_update_kind === 'major').length,
+    [availableUpdates]
+  )
+  const canViewSettings = hasPermission('settings.view')
+  const { data: updateSettings } = useQuery({
+    queryKey: ['updates', 'settings'],
+    queryFn: updatesApi.getSettings,
+    enabled: canViewSettings,
+    staleTime: 60000,
+  })
+  const autoUpdateLine = autoUpdateStatus(updateSettings)
   const availableUpdateApps = useMemo(
     () => availableUpdates
       .map((state) => catalog.find((app) => app.name === state.app_name))
@@ -518,6 +532,14 @@ export default function Dashboard() {
                           <CheckCircle2 className="w-5 h-5 text-emerald-500 dark:text-emerald-400" />
                           <span className="text-sm font-semibold text-emerald-600 dark:text-emerald-400">All apps current</span>
                         </div>
+                      )}
+                      {majorUpdateCount > 0 && (
+                        <div className="text-xs font-medium text-amber-700 dark:text-amber-300">
+                          {majorUpdateCount} major update{majorUpdateCount === 1 ? '' : 's'} need{majorUpdateCount === 1 ? 's' : ''} review
+                        </div>
+                      )}
+                      {autoUpdateLine && (
+                        <div className="text-xs text-gray-500 dark:text-gray-400">{autoUpdateLine}</div>
                       )}
                     </div>
                     {availableUpdates.length > 0 && (

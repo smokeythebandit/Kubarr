@@ -97,6 +97,10 @@ export interface AppState {
   installed_chart_version: string | null;
   available_chart_version: string | null;
   update_available: boolean;
+  /** Whether the nightly job may update this app on its own. */
+  auto_update: boolean;
+  /** How big the pending update is; null when none is pending. */
+  available_update_kind: 'revision' | 'patch' | 'minor' | 'major' | 'downgrade' | 'unknown' | null;
   last_operation_id: string | null;
   last_checked_at: string | null;
   updated_at: string;

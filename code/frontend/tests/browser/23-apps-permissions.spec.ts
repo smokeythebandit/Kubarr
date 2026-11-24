@@ -9,7 +9,7 @@ const app: AppConfig = {
 };
 const state: AppState = {
   app_name: 'radarr', namespace: 'radarr', desired_state: 'installed', observed_state: 'installed', healthy: true,
-  message: null, installed_chart_version: '1.0.0', available_chart_version: '1.1.0', update_available: true,
+  message: null, installed_chart_version: '1.0.0', available_chart_version: '1.1.0', update_available: true, auto_update: true, available_update_kind: 'minor',
   last_operation_id: null, last_checked_at: timestamp, updated_at: timestamp,
 };
 

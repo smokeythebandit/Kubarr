@@ -13,7 +13,7 @@ import { InstallWizard } from '../components/InstallWizard'
 import type { GpuSelection } from '../types'
 import { useAuth } from '../contexts/AuthContext'
 import { useMonitoring } from '../contexts/MonitoringContext'
-import type { AppConfig, AppOperation, DeploymentRequest } from '../types'
+import type { AppConfig, AppOperation, AppState, DeploymentRequest } from '../types'
 import type { ServiceEndpoint } from '../types/monitoring'
 
 type FilterType = 'all' | 'installed' | 'healthy' | 'unhealthy' | 'available' | 'updates'
@@ -581,6 +581,8 @@ interface AppDetailPanelProps {
   updateAvailable: boolean
   currentVersion?: string | null
   newVersion?: string | null
+  autoUpdate?: boolean
+  updateKind?: AppState['available_update_kind']
   isOperationPending: boolean
   onVpnChangeQueued: () => void
 }
@@ -600,6 +602,8 @@ function AppDetailPanel({
   updateAvailable,
   currentVersion,
   newVersion,
+  autoUpdate = true,
+  updateKind = null,
   isOperationPending,
   onVpnChangeQueued
 }: AppDetailPanelProps) {
@@ -687,6 +691,13 @@ function AppDetailPanel({
       setKillSwitchOverride(null)
       setPortForwarding(false)
       onVpnChangeQueued()
+    },
+  })
+
+  const autoUpdateMutation = useMutation({
+    mutationFn: ({ appName, enabled }: { appName: string; enabled: boolean }) => appsApi.setAutoUpdate(appName, enabled),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['apps', 'states'] })
     },
   })
 
@@ -866,6 +877,35 @@ function AppDetailPanel({
             <p className="text-gray-600 dark:text-gray-400 leading-relaxed">{app.description}</p>
           </div>
 
+          {isInstalled && !app.is_system && (
+            <div className="mt-6 flex items-center justify-between gap-3 rounded-xl border border-gray-200 p-4 dark:border-gray-700">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Automatic updates</h3>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Update this app overnight; major updates always wait for you.</p>
+                {autoUpdateMutation.isError && (
+                  <p role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">Could not change automatic updates.</p>
+                )}
+              </div>
+              {(() => {
+                const checked = autoUpdateMutation.isPending ? autoUpdateMutation.variables.enabled : autoUpdate
+                const switchDisabled = !canInstall || autoUpdateMutation.isPending
+                return (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-label="Automatic updates"
+                    aria-checked={checked}
+                    disabled={switchDisabled}
+                    onClick={() => autoUpdateMutation.mutate({ appName: app.name, enabled: !checked })}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${checked ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'} ${switchDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${checked ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                )
+              })()}
+            </div>
+          )}
+
           {updateAvailable && (
             <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900/60 dark:bg-emerald-950/30">
               <div className="flex items-center justify-between gap-3">
@@ -873,7 +913,11 @@ function AppDetailPanel({
                   <h3 className="text-sm font-semibold text-emerald-900 dark:text-emerald-100">Update available</h3>
                   <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-300">Review the version change before updating.</p>
                 </div>
-                <span className="rounded-full bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white">New</span>
+                {updateKind === 'major' ? (
+                  <span className="rounded-full bg-amber-500 px-2.5 py-1 text-xs font-semibold text-white">Major update — review before updating</span>
+                ) : (
+                  <span className="rounded-full bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white">New</span>
+                )}
               </div>
               <div className="mt-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3">
                 <div className="rounded-lg bg-white p-3 dark:bg-gray-900/80">
@@ -1830,6 +1874,8 @@ export default function AppsPage() {
             updateAvailable={updateAvailable}
             currentVersion={selectedAppState?.installed_chart_version}
             newVersion={selectedAppState?.available_chart_version}
+            autoUpdate={selectedAppState?.auto_update}
+            updateKind={selectedAppState?.available_update_kind}
             isOperationPending={operationsLoading || Boolean(activeOperationsByApp[selectedApp.name]) ||
                (installMutation.isPending && installMutation.variables?.app_name === selectedApp.name) ||
               (updateMutation.isPending && updateMutation.variables === selectedApp.name) ||
