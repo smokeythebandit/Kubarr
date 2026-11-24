@@ -1,10 +1,12 @@
 //! Evidence capture for failed app updates: restart accounting and a
 //! diagnostics report taken before Kubarr rolls the Helm release back.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Pod, Secret};
+use kube::api::{Api, ListParams};
+use regex::Regex;
 
 use crate::error::Result;
 use crate::services::deployment::DeploymentManager;
@@ -150,21 +152,158 @@ async fn logs_section(k8s: &K8sClient, ns: &str, pods: &[Pod]) -> String {
     out
 }
 
-fn values_section(
-    deploy: &DeploymentManager<'_>,
-    app: &str,
-    label: &str,
-    rev: Option<u32>,
-) -> String {
-    match rev {
-        None => format!("=== values ({label}): revision unknown ===\n"),
-        Some(rev) => match deploy.values_at(app, rev) {
-            Ok(values) => format!("=== values ({label}, revision {rev}) ===\n{values}\n"),
-            Err(error) => {
-                format!("=== values ({label}, revision {rev}) ===\nunavailable: {error}\n")
+const REDACTED: &str = "[redacted]";
+const MIN_SECRET_LEN: usize = 6;
+
+fn sensitive_key(key: &str) -> bool {
+    let key = key.to_lowercase();
+    ["pass", "secret", "token", "key", "credential", "auth"]
+        .iter()
+        .any(|needle| key.contains(needle))
+}
+
+fn flatten_yaml(
+    value: &serde_yaml::Value,
+    path: &str,
+    sensitive: bool,
+    out: &mut BTreeMap<String, (String, bool)>,
+) {
+    use serde_yaml::Value;
+    match value {
+        Value::Mapping(map) => {
+            for (key, child) in map {
+                let name = match key {
+                    Value::String(s) => s.clone(),
+                    other => serde_yaml::to_string(other)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
+                };
+                let child_path = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path}.{name}")
+                };
+                flatten_yaml(child, &child_path, sensitive || sensitive_key(&name), out);
             }
-        },
+        }
+        Value::Sequence(items) => {
+            for (i, child) in items.iter().enumerate() {
+                flatten_yaml(child, &format!("{path}[{i}]"), sensitive, out);
+            }
+        }
+        Value::Null => {}
+        Value::String(s) => {
+            out.insert(path.to_string(), (s.clone(), sensitive));
+        }
+        scalar => {
+            let text = serde_yaml::to_string(scalar)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            out.insert(path.to_string(), (text, sensitive));
+        }
     }
+}
+
+fn flatten_values(yaml: &str) -> std::result::Result<BTreeMap<String, (String, bool)>, String> {
+    let value: serde_yaml::Value = serde_yaml::from_str(yaml).map_err(|e| e.to_string())?;
+    let mut out = BTreeMap::new();
+    flatten_yaml(&value, "", false, &mut out);
+    Ok(out)
+}
+
+/// Diff of redacted values between the previous and failed revision, plus the
+/// raw secret values that were redacted (for scrubbing the rest of the report).
+fn values_diff(previous: Option<&str>, failed: Option<&str>) -> (String, Vec<String>) {
+    let mut out = String::from("=== values diff (previous -> failed) ===\n");
+    let (Some(previous), Some(failed)) = (previous, failed) else {
+        out.push_str("unavailable: revision values could not be read\n");
+        return (out, Vec::new());
+    };
+    let (prev, fail) = match (flatten_values(previous), flatten_values(failed)) {
+        (Ok(p), Ok(f)) => (p, f),
+        (Err(e), _) | (_, Err(e)) => {
+            let _ = writeln!(out, "unavailable: cannot parse values: {e}");
+            return (out, Vec::new());
+        }
+    };
+    let mut secrets = Vec::new();
+    for (value, sensitive) in prev.values().chain(fail.values()) {
+        if *sensitive && value.len() >= MIN_SECRET_LEN {
+            secrets.push(value.clone());
+        }
+    }
+    let show = |entry: &(String, bool)| {
+        if entry.1 {
+            REDACTED.to_string()
+        } else {
+            entry.0.clone()
+        }
+    };
+    let keys: BTreeSet<_> = prev.keys().chain(fail.keys()).collect();
+    let mut changed = false;
+    for key in keys {
+        match (prev.get(key), fail.get(key)) {
+            (Some(p), Some(f)) if p.0 != f.0 => {
+                changed = true;
+                let _ = writeln!(out, "~ {key}: {} -> {}", show(p), show(f));
+            }
+            (None, Some(f)) => {
+                changed = true;
+                let _ = writeln!(out, "+ {key}: {}", show(f));
+            }
+            (Some(p), None) => {
+                changed = true;
+                let _ = writeln!(out, "- {key}: {}", show(p));
+            }
+            _ => {}
+        }
+    }
+    if !changed {
+        out.push_str("no differences\n");
+    }
+    (out, secrets)
+}
+
+/// Replace known secret values, then mask common inline secret patterns.
+fn scrub(text: &str, secrets: &[String]) -> String {
+    let mut sorted: Vec<&String> = secrets
+        .iter()
+        .filter(|s| s.len() >= MIN_SECRET_LEN)
+        .collect();
+    sorted.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let mut out = text.to_string();
+    for secret in sorted {
+        out = out.replace(secret.as_str(), REDACTED);
+    }
+    let inline =
+        Regex::new(r#"(?i)(password|passwd|token|apikey|api_key|secret)("?\s*[=:]\s*)\S+"#);
+    if let Ok(re) = inline {
+        out = re.replace_all(&out, "${1}${2}[redacted]").into_owned();
+    }
+    if let Ok(re) = Regex::new(r"Bearer\s+\S+") {
+        out = re.replace_all(&out, "Bearer [redacted]").into_owned();
+    }
+    out
+}
+
+/// Decoded Secret values (>= 6 chars) in the namespace. `None` when listing fails.
+async fn namespace_secret_values(k8s: &K8sClient, ns: &str) -> Option<Vec<String>> {
+    let api: Api<Secret> = Api::namespaced(k8s.client().clone(), ns);
+    let list = api.list(&ListParams::default()).await.ok()?;
+    let mut values = Vec::new();
+    for secret in list.items {
+        for bytes in secret.data.iter().flat_map(|d| d.values()) {
+            if let Ok(text) = String::from_utf8(bytes.0.clone()) {
+                let text = text.trim().to_string();
+                if text.len() >= MIN_SECRET_LEN {
+                    values.push(text);
+                }
+            }
+        }
+    }
+    Some(values)
 }
 
 /// Build the diagnostics report. Never fails: a section that cannot be
@@ -198,10 +337,17 @@ pub async fn capture(
     }
 
     report.push('\n');
-    report.push_str(&values_section(deploy, app, "failed", failed_rev));
-    report.push_str(&values_section(deploy, app, "previous", previous_rev));
+    let read = |rev: Option<u32>| rev.and_then(|r| deploy.values_at(app, r).ok());
+    let (diff, mut secrets) =
+        values_diff(read(previous_rev).as_deref(), read(failed_rev).as_deref());
+    report.push_str(&diff);
 
-    truncate_report(report)
+    match namespace_secret_values(k8s, ns).await {
+        Some(values) => secrets.extend(values),
+        None => report.push_str("\nsecret scrub: limited\n"),
+    }
+
+    truncate_report(scrub(&report, &secrets))
 }
 
 #[cfg(test)]
@@ -230,5 +376,44 @@ mod tests {
         assert!(out.ends_with("[truncated]"));
         let small = truncate_report("ok".into());
         assert_eq!(small, "ok");
+    }
+
+    #[test]
+    fn test_values_redacted_and_diffed() {
+        let prev = "image:\n  tag: 1.0\napiKey: oldsecretvalue\nauth:\n  user: bob\nsame: x\n";
+        let fail =
+            "image:\n  tag: 2.0\napiKey: newsecretvalue\nauth:\n  user: bob\nsame: x\nextra: 1\n";
+        let (diff, secrets) = values_diff(Some(prev), Some(fail));
+        assert!(diff.contains("~ image.tag: 1.0 -> 2.0"));
+        assert!(diff.contains("~ apiKey: [redacted] -> [redacted]"));
+        assert!(diff.contains("+ extra: 1"));
+        assert!(!diff.contains("secretvalue"));
+        assert!(!diff.contains("same"));
+        assert!(!diff.contains("bob -> "));
+        assert!(secrets.contains(&"oldsecretvalue".to_string()));
+        assert!(secrets.contains(&"newsecretvalue".to_string()));
+        assert!(values_diff(None, Some(fail)).0.contains("unavailable"));
+    }
+
+    #[test]
+    fn test_logs_scrub_known_secret_values() {
+        let out = scrub(
+            "connecting with hunter2hunter2 ok; short abc",
+            &["hunter2hunter2".to_string(), "abc".to_string()],
+        );
+        assert_eq!(out, "connecting with [redacted] ok; short abc");
+    }
+
+    #[test]
+    fn test_inline_secret_patterns_masked() {
+        let out = scrub(
+            "password=abc123 token: xyz api_key=k1 Authorization: Bearer eyJ.a.b {\"secret\":\"s3\"}",
+            &[],
+        );
+        assert!(out.contains("password=[redacted]"));
+        assert!(out.contains("token: [redacted]"));
+        assert!(out.contains("api_key=[redacted]"));
+        assert!(out.contains("Bearer [redacted]"));
+        assert!(!out.contains("abc123") && !out.contains("eyJ") && !out.contains("s3"));
     }
 }

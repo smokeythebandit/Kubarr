@@ -2218,6 +2218,7 @@ dependencies = [
  "parking_lot",
  "pastey",
  "rand 0.10.1",
+ "regex",
  "reqwest",
  "rsa",
  "sea-orm",

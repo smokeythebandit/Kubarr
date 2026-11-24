@@ -1731,6 +1731,13 @@ fn test_previous_deployed_revision() {
     assert_eq!(revisions.len(), 5);
     assert_eq!(previous_deployed(&revisions), Some(4));
     assert_eq!(previous_deployed(&revisions[..1]), None);
+    let pending = [
+        (3, "superseded".to_string()),
+        (4, "pending-upgrade".to_string()),
+        (5, "pending-rollback".to_string()),
+        (6, "failed".to_string()),
+    ];
+    assert_eq!(previous_deployed(&pending), Some(3));
     assert_eq!(previous_deployed(&[]), None);
     assert!(parse_history(b"nope").is_err());
 }
