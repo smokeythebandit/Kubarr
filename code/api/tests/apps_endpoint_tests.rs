@@ -709,3 +709,132 @@ async fn test_get_apps_by_category_with_seeded_catalog() {
     let apps_arr: Vec<serde_json::Value> = serde_json::from_str(&body).expect("must be JSON array");
     assert_eq!(apps_arr.len(), 2, "only media apps should be returned");
 }
+
+// ============================================================================
+// Per-app auto-update toggle and update kind on app state
+// ============================================================================
+
+async fn seed_app_state(
+    db: &DatabaseConnection,
+    name: &str,
+    installed: &str,
+    available: &str,
+    update_available: bool,
+) {
+    use sea_orm::{ActiveModelTrait, Set};
+    kubarr::models::app_state::ActiveModel {
+        app_name: Set(name.into()),
+        namespace: Set(name.into()),
+        desired_state: Set("running".into()),
+        observed_state: Set("installed".into()),
+        healthy: Set(true),
+        installed_chart_version: Set(Some(installed.into())),
+        available_chart_version: Set(Some(available.into())),
+        update_available: Set(update_available),
+        auto_update: Set(true),
+        updated_at: Set(chrono::Utc::now()),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .unwrap();
+}
+
+async fn router_with_user(
+    db: DatabaseConnection,
+    username: &str,
+    role: &str,
+) -> (axum::Router, String) {
+    ensure_jwt_keys().await;
+    create_test_user_with_role(
+        &db,
+        username,
+        &format!("{username}@test.com"),
+        "pass123",
+        role,
+    )
+    .await;
+    let app = create_router(build_test_app_state_with_db(db).await);
+    let cookie = do_login(app.clone(), username, "pass123").await.unwrap();
+    (app, cookie)
+}
+
+#[tokio::test]
+async fn test_toggle_auto_update_requires_apps_install() {
+    let db = create_test_db_with_seed().await;
+    seed_app_state(&db, "sonarr", "1.0.0+1", "1.0.1+2", true).await;
+    let (app, cookie) = router_with_user(db, "viewer_toggle", "viewer").await;
+    let (status, _) = make_request(
+        app,
+        "PUT",
+        "/api/apps/sonarr/auto-update",
+        Some(&cookie),
+        Some(serde_json::json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (app, _) = make_admin("admin_toggle_anon", "admin_toggle_anon@test.com").await;
+    let (status, _) = make_request(
+        app,
+        "PUT",
+        "/api/apps/sonarr/auto-update",
+        None,
+        Some(serde_json::json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_toggle_auto_update_updates_state() {
+    let db = create_test_db_with_seed().await;
+    seed_app_state(&db, "sonarr", "1.0.0+1", "1.0.1+2", true).await;
+    let (app, cookie) = router_with_user(db, "admin_toggle", "admin").await;
+    let (status, body) = make_request(
+        app.clone(),
+        "PUT",
+        "/api/apps/sonarr/auto-update",
+        Some(&cookie),
+        Some(serde_json::json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["auto_update"], false);
+
+    let (status, _) = make_request(
+        app,
+        "PUT",
+        "/api/apps/ghost/auto-update",
+        Some(&cookie),
+        Some(serde_json::json!({"enabled": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_state_exposes_update_kind() {
+    let db = create_test_db_with_seed().await;
+    seed_app_state(&db, "minor-app", "1.29.2+5", "1.30.1+6", true).await;
+    seed_app_state(&db, "major-app", "6.4.4+25", "7.0.3+26", true).await;
+    seed_app_state(&db, "rev-app", "1.30.1+3", "1.30.1+4", true).await;
+    seed_app_state(&db, "current-app", "1.0.0+1", "1.0.0+1", false).await;
+    let (app, cookie) = router_with_user(db, "viewer_kind", "viewer").await;
+    let (status, body) = make_request(app, "GET", "/api/apps/states", Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let states: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let kind = |name: &str| {
+        states
+            .iter()
+            .find(|s| s["app_name"] == name)
+            .map(|s| s["available_update_kind"].clone())
+            .unwrap()
+    };
+    assert_eq!(kind("minor-app"), "minor");
+    assert_eq!(kind("major-app"), "major");
+    assert_eq!(kind("rev-app"), "revision");
+    assert!(kind("current-app").is_null());
+    assert!(states[0]["auto_update"].is_boolean());
+}

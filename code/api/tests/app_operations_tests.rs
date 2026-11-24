@@ -194,7 +194,9 @@ async fn permitted_endpoints_persist_exact_queued_operation_and_linked_state() {
 
         auth.permissions = vec!["apps.view".into()];
         let expected_operation = serde_json::to_value(response).unwrap();
-        let expected_state = serde_json::to_value(state).unwrap();
+        // The response adds the derived update kind, which the raw row lacks.
+        let mut expected_state = serde_json::to_value(state).unwrap();
+        expected_state["available_update_kind"] = serde_json::Value::Null;
         for (uri, expected) in [
             (
                 format!("/operations/{}", row.id),

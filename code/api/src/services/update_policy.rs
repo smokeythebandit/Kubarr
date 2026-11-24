@@ -4,7 +4,9 @@
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateKind {
     /// Same semver core, higher build number.
@@ -77,7 +79,7 @@ pub struct UpdateWindow {
 
 /// Resolve a local wall-clock time to UTC. A time skipped by a DST jump
 /// resolves to one hour later (the first valid instant after the gap).
-fn resolve_local(tz: Tz, date: NaiveDate, time: NaiveTime) -> Option<DateTime<Utc>> {
+pub(crate) fn resolve_local(tz: Tz, date: NaiveDate, time: NaiveTime) -> Option<DateTime<Utc>> {
     let naive = NaiveDateTime::new(date, time);
     tz.from_local_datetime(&naive)
         .earliest()

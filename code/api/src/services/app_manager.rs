@@ -21,6 +21,7 @@ use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::models::{app_operation, app_state, app_vpn_config, audit_outbox, user};
 use crate::services::app_storage;
 use crate::services::audit::log_on_transaction;
+use crate::services::auto_update_settings;
 use crate::services::catalog::AppCatalog;
 use crate::services::deployment::{DeploymentManager, DeploymentRequest};
 use crate::services::gpu::{self, GpuSelection, QUEUED_GPU_KEY};
@@ -29,6 +30,7 @@ use crate::services::k8s::K8sClient;
 use crate::services::notification::NotificationService;
 use crate::services::storage_config;
 use crate::services::update_diagnostics::{self, RestartSnapshot};
+use crate::services::update_policy::{update_kind, UpdateKind};
 use crate::state::{SharedCatalog, SharedK8sClient};
 
 pub const OP_INSTALL: &str = "install";
@@ -133,6 +135,8 @@ pub struct AppStateResponse {
     pub available_chart_version: Option<String>,
     pub update_available: bool,
     pub auto_update: bool,
+    /// Classification of the pending update; `None` when none is available.
+    pub available_update_kind: Option<UpdateKind>,
     pub last_operation_id: Option<String>,
     pub last_checked_at: Option<chrono::DateTime<Utc>>,
     pub updated_at: chrono::DateTime<Utc>,
@@ -358,7 +362,8 @@ pub struct AppManager {
     /// Update outcomes are announced here; absent means no notifications.
     notifications: Option<Arc<NotificationService>>,
     /// How long an updated app may take to become healthy before rollback.
-    update_health_timeout: Duration,
+    /// Fixed override; when absent the owner's setting is read per update.
+    update_health_timeout: Option<Duration>,
 }
 
 impl AppManager {
@@ -373,7 +378,7 @@ impl AppManager {
             catalog,
             helm_lock: Arc::default(),
             notifications: None,
-            update_health_timeout: DEFAULT_UPDATE_HEALTH_TIMEOUT,
+            update_health_timeout: None,
         }
     }
 
@@ -385,7 +390,7 @@ impl AppManager {
 
     /// Override how long an updated app may take to become healthy.
     pub fn with_update_health_timeout(mut self, timeout: Duration) -> Self {
-        self.update_health_timeout = timeout;
+        self.update_health_timeout = Some(timeout);
         self
     }
 
@@ -1054,6 +1059,17 @@ impl AppManager {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("State for '{}' not found", app_name)))?;
         Ok(state.into())
+    }
+
+    /// Turn automatic updates on or off for one app.
+    pub async fn set_auto_update(&self, app_name: &str, enabled: bool) -> Result<AppStateResponse> {
+        let state = app_state::Entity::find_by_id(app_name.to_string())
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("State for '{}' not found", app_name)))?;
+        let mut active: app_state::ActiveModel = state.into();
+        active.auto_update = Set(enabled);
+        Ok(active.update(&self.db).await?.into())
     }
 
     /// Refresh the catalog version fields without waiting for a worker reconcile.
@@ -1825,6 +1841,20 @@ impl AppManager {
         })
     }
 
+    /// The configured health timeout, or the default when settings cannot be read.
+    async fn health_timeout(&self) -> Duration {
+        if let Some(timeout) = self.update_health_timeout {
+            return timeout;
+        }
+        match auto_update_settings::load(&self.db).await {
+            Ok(settings) => settings.health_timeout(),
+            Err(error) => {
+                tracing::warn!(%error, "Auto-update settings unavailable; using the default health timeout");
+                DEFAULT_UPDATE_HEALTH_TIMEOUT
+            }
+        }
+    }
+
     /// Snapshot restarts, run Helm, then verify the app and roll back if it is
     /// unhealthy. The caller holds `helm_lock` throughout.
     async fn run_verified_update<H>(
@@ -1837,6 +1867,8 @@ impl AppManager {
     where
         H: Future<Output = Result<String>>,
     {
+        // Read per operation so a settings change applies without a restart.
+        let timeout = self.health_timeout().await;
         let before = probe.restart_snapshot().await?;
         // The only safe rollback target is what was live before this update.
         let before_revisions = probe
@@ -1850,7 +1882,7 @@ impl AppManager {
         }
         // A stop during verification abandons it (no rollback); the worker records the stop.
         let outcome = tokio::select! {
-            outcome = self.verify_or_roll_back(probe, &before, before_revisions, helm_result) => outcome,
+            outcome = self.verify_or_roll_back(probe, &before, before_revisions, helm_result, timeout) => outcome,
             _ = stop.cancelled() => return Err(AppError::Internal(STOP_ERROR.into())),
         };
         Ok(OperationOutput::Update(UpdateReport {
@@ -1909,10 +1941,9 @@ impl AppManager {
         before: &RestartSnapshot,
         before_revisions: std::result::Result<ReleaseRevisions, String>,
         helm_result: Result<String>,
+        timeout: Duration,
     ) -> UpdateOutcome {
-        let verdict = self
-            .verify_update(probe, before, self.update_health_timeout)
-            .await;
+        let verdict = self.verify_update(probe, before, timeout).await;
         let helm_error = helm_result.err().map(|error| error.to_string());
         if matches!(verdict, HealthVerdict::Healthy) && helm_error.is_none() {
             return UpdateOutcome::Healthy;
@@ -1980,10 +2011,7 @@ impl AppManager {
                 };
                 match probe.rollback(revision) {
                     Err(error) => Err(format!("Rollback to revision {revision} failed: {error}")),
-                    Ok(()) => match self
-                        .verify_update(probe, &before_rollback, self.update_health_timeout)
-                        .await
-                    {
+                    Ok(()) => match self.verify_update(probe, &before_rollback, timeout).await {
                         HealthVerdict::Healthy => Ok(revision),
                         HealthVerdict::Unhealthy(reason) => Err(format!(
                             "Still unhealthy after rollback to revision {revision}: {reason}"
@@ -2811,6 +2839,14 @@ impl From<app_operation::Model> for AppOperationResponse {
 
 impl From<app_state::Model> for AppStateResponse {
     fn from(model: app_state::Model) -> Self {
+        let available_update_kind = match (
+            model.update_available,
+            model.installed_chart_version.as_deref(),
+            model.available_chart_version.as_deref(),
+        ) {
+            (true, Some(installed), Some(available)) => Some(update_kind(installed, available)),
+            _ => None,
+        };
         Self {
             app_name: model.app_name,
             namespace: model.namespace,
@@ -2822,6 +2858,7 @@ impl From<app_state::Model> for AppStateResponse {
             available_chart_version: model.available_chart_version,
             update_available: model.update_available,
             auto_update: model.auto_update,
+            available_update_kind,
             last_operation_id: model.last_operation_id,
             last_checked_at: model.last_checked_at,
             updated_at: model.updated_at,

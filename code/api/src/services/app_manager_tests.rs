@@ -2018,3 +2018,19 @@ async fn test_auto_update_outcome_reaches_settings_managers() {
         Some("app_update_rollback_failed")
     );
 }
+
+#[tokio::test]
+async fn test_health_timeout_follows_settings_unless_overridden() {
+    let manager = setup().await;
+    assert_eq!(manager.health_timeout().await, Duration::from_secs(600));
+    let settings = auto_update_settings::AutoUpdateSettings {
+        health_timeout_minutes: 25,
+        ..Default::default()
+    };
+    auto_update_settings::save(&manager.db, &settings, None)
+        .await
+        .unwrap();
+    assert_eq!(manager.health_timeout().await, Duration::from_secs(25 * 60));
+    let fixed = manager.with_update_health_timeout(Duration::from_secs(1));
+    assert_eq!(fixed.health_timeout().await, Duration::from_secs(1));
+}
