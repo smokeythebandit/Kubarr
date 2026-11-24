@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::Result;
 use crate::models::{app_operation, app_state};
 use crate::services::app_manager::{
-    AppManager, AUTO_TARGET_KEY, OBS_INSTALLED, OP_UPDATE, STATUS_FAILED, STATUS_PAUSED,
-    STATUS_QUEUED, STATUS_RUNNING,
+    AppManager, AUTO_SKIPPED_MESSAGE, AUTO_TARGET_KEY, OBS_INSTALLED, OP_UPDATE, STATUS_FAILED,
+    STATUS_PAUSED, STATUS_QUEUED, STATUS_RUNNING,
 };
 use crate::services::auto_update_settings;
 use crate::services::catalog::AppCatalog;
@@ -80,9 +80,10 @@ pub async fn candidates<C: ConnectionTrait>(db: &C, catalog: &AppCatalog) -> Res
     Ok(out)
 }
 
-/// True when the latest update operation for the app was an automatic one that
-/// failed while targeting `version`. Any newer operation (such as an owner's
-/// manual retry) supersedes it, as does a different available version.
+/// True when the newest update operation for the app, whoever started it,
+/// failed while targeting `version`. Only a newer operation (a success) or a
+/// different available version clears it; a failed manual retry keeps it.
+/// Operations dropped before Helm because the version moved do not count.
 async fn failed_on_version<C: ConnectionTrait>(
     db: &C,
     app_name: &str,
@@ -102,9 +103,12 @@ async fn failed_on_version<C: ConnectionTrait>(
                 serde_json::from_str::<std::collections::HashMap<String, String>>(raw).ok()
             })
             .and_then(|mut config| config.remove(AUTO_TARGET_KEY));
-        op.trigger.as_deref() == Some("auto")
-            && op.status == STATUS_FAILED
+        op.status == STATUS_FAILED
             && target.as_deref() == Some(version)
+            && !op
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains(AUTO_SKIPPED_MESSAGE))
     }))
 }
 
@@ -443,7 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manual_retry_not_blocked() {
+    async fn test_failed_manual_retry_keeps_skip() {
         let f = fixture().await;
         f.state("alpha", "1.0.0+1", "1.0.1+1").await;
         let queued = f
@@ -454,16 +458,68 @@ mod tests {
         f.set_status(&queued.id, STATUS_FAILED).await;
         f.settle("alpha").await;
         assert!(f.candidates().await.is_empty());
-        // The owner retries manually: it is accepted despite the skip, and as
-        // the newest update operation it clears the skip for automatic picks.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        f.manager
+        // The owner retries through the real retry path; that fails too.
+        let retry = f.manager.retry_operation(&queued.id, 1).await.unwrap();
+        f.set_status(&retry.id, STATUS_FAILED).await;
+        f.settle("alpha").await;
+        assert_eq!(
+            f.ops("alpha").await.last().unwrap().trigger.as_deref(),
+            Some("manual")
+        );
+        assert!(f.candidates().await.is_empty());
+        assert_eq!(f.tick(in_window()).await, TickResult::Nothing);
+        // A plain manual update (records its target) that fails also keeps it.
+        let manual = f
+            .manager
             .enqueue_operation("alpha", OP_UPDATE, HashMap::new(), Some(1))
             .await
             .unwrap();
-        let manual = f.ops("alpha").await.into_iter().last().unwrap();
-        assert_eq!(manual.trigger.as_deref(), Some("manual"));
         f.set_status(&manual.id, STATUS_FAILED).await;
+        f.settle("alpha").await;
+        assert!(f.candidates().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_successful_manual_update_makes_next_version_eligible() {
+        let f = fixture().await;
+        f.state("alpha", "1.0.0+1", "1.0.1+1").await;
+        let queued = f
+            .manager
+            .enqueue_auto_update("alpha", "1.0.1+1")
+            .await
+            .unwrap();
+        f.set_status(&queued.id, STATUS_FAILED).await;
+        f.settle("alpha").await;
+        let manual = f
+            .manager
+            .enqueue_operation("alpha", OP_UPDATE, HashMap::new(), Some(1))
+            .await
+            .unwrap();
+        f.set_status(&manual.id, STATUS_SUCCEEDED).await;
+        f.patch_state("alpha", |s| {
+            s.installed_chart_version = Set(Some("1.0.1+1".into()));
+            s.available_chart_version = Set(Some("1.0.2+1".into()));
+        })
+        .await;
+        f.settle("alpha").await;
+        assert_eq!(f.candidates().await, vec!["alpha".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_dropped_stale_auto_op_does_not_count_as_failure() {
+        let f = fixture().await;
+        f.state("alpha", "1.0.0+1", "1.0.1+1").await;
+        let queued = f
+            .manager
+            .enqueue_auto_update("alpha", "1.0.1+1")
+            .await
+            .unwrap();
+        let op = f.ops("alpha").await.remove(0);
+        let mut active: app_operation::ActiveModel = op.into();
+        active.status = Set(STATUS_FAILED.into());
+        active.error = Set(Some(AUTO_SKIPPED_MESSAGE.into()));
+        active.update(f.db()).await.unwrap();
+        let _ = queued;
         f.settle("alpha").await;
         assert_eq!(f.candidates().await, vec!["alpha".to_string()]);
     }

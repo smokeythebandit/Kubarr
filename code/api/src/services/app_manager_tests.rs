@@ -2034,3 +2034,62 @@ async fn test_health_timeout_follows_settings_unless_overridden() {
     let fixed = manager.with_update_health_timeout(Duration::from_secs(1));
     assert_eq!(fixed.health_timeout().await, Duration::from_secs(1));
 }
+
+#[tokio::test]
+async fn test_auto_op_not_executed_when_chart_moved_since_queued() {
+    let manager = setup().await;
+    // Installed 1.30.0, the loop vetted 1.30.1; the chart on disk is now 2.0.0.
+    manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), None)
+        .await
+        .unwrap();
+    app_operation::Entity::delete_many()
+        .exec(&manager.db)
+        .await
+        .unwrap();
+    let mut row: app_state::ActiveModel = state(&manager).await.into();
+    row.installed_chart_version = Set(Some("1.30.0".into()));
+    row.update(&manager.db).await.unwrap();
+    manager.enqueue_auto_update(APP, "1.30.1").await.unwrap();
+    let helm_calls = AtomicUsize::new(0);
+    let calls = &helm_calls;
+    let manager_ref = &manager;
+    manager
+        .process_next_operation_with_stop(
+            |op, _stop| async move {
+                manager_ref
+                    .guard_auto_target(&op, Some("1.30.1"), Some("2.0.0"))
+                    .await?;
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(OperationOutput::Done("deployed".into()))
+            },
+            RUNNING_HEARTBEAT_INTERVAL,
+        )
+        .await
+        .unwrap();
+    assert_eq!(helm_calls.load(Ordering::SeqCst), 0);
+    let op = app_operation::Entity::find()
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(op.status, STATUS_FAILED);
+    assert!(op.error.as_deref().unwrap().contains(AUTO_SKIPPED_MESSAGE));
+    let mut row: app_state::ActiveModel = state(&manager).await.into();
+    row.installed_chart_version = Set(Some("1.30.0".into()));
+    row.update(&manager.db).await.unwrap();
+    // Still vetted: same chart on disk and an eligible minor update passes.
+    manager
+        .guard_auto_target(&op, Some("1.30.1"), Some("1.30.1"))
+        .await
+        .unwrap();
+    // A major or an unknown target is refused.
+    assert!(manager
+        .guard_auto_target(&op, Some("2.0.0"), Some("2.0.0"))
+        .await
+        .is_err());
+    assert!(manager
+        .guard_auto_target(&op, None, Some("1.30.1"))
+        .await
+        .is_err());
+}

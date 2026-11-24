@@ -39,7 +39,8 @@ pub const OP_DELETE: &str = "delete";
 pub const OP_RESTART: &str = "restart";
 const QUEUED_INSTALL_KEY: &str = "__kubarr_install_choices";
 const QUEUED_STORAGE_KEY: &str = "__kubarr_storage_snapshot";
-/// Chart version an automatic update was queued for; never reaches Helm.
+/// Chart version an update operation was queued for (recorded on every update,
+/// whoever started it); never reaches Helm.
 pub(crate) const AUTO_TARGET_KEY: &str = "__kubarr_auto_target_version";
 
 #[derive(Serialize, Deserialize)]
@@ -70,6 +71,9 @@ const INTERRUPTED_LABEL: &str = "outcome_indeterminate_after_worker_interruption
 const STALE_RUNNING_AFTER: chrono::Duration = chrono::Duration::minutes(15);
 const RUNNING_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Why an automatic update was dropped before Helm ran.
+pub(crate) const AUTO_SKIPPED_MESSAGE: &str =
+    "Skipped: available version changed since it was queued";
 const STOP_ERROR: &str = "Stop requested; external outcome indeterminate";
 const DEFAULT_UPDATE_HEALTH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const UPDATE_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -443,6 +447,18 @@ impl AppManager {
                     app_name
                 )));
             }
+            if operation == OP_UPDATE && !custom_config.contains_key(AUTO_TARGET_KEY) {
+                let version = match catalog.chart_version(app_name) {
+                    Some(version) => Some(version),
+                    None => app_state::Entity::find_by_id(app_name.to_string())
+                        .one(&self.db)
+                        .await?
+                        .and_then(|row| row.available_chart_version),
+                };
+                if let Some(version) = version {
+                    custom_config.insert(AUTO_TARGET_KEY.into(), version);
+                }
+            }
         }
 
         let transaction = self.db.begin().await?;
@@ -494,6 +510,7 @@ impl AppManager {
         install_options::validate_custom_storage_keys(&custom_config)?;
         if custom_config.contains_key(QUEUED_INSTALL_KEY)
             || custom_config.contains_key(QUEUED_STORAGE_KEY)
+            || custom_config.contains_key(AUTO_TARGET_KEY)
         {
             return Err(AppError::BadRequest("Reserved install key".into()));
         }
@@ -678,6 +695,9 @@ impl AppManager {
         let id = Uuid::new_v4().to_string();
         let snapshot = self.storage_snapshot(transaction, app_name).await?;
         let mut queued_config = HashMap::new();
+        if let Some(version) = &available_chart_version {
+            queued_config.insert(AUTO_TARGET_KEY.to_string(), version.clone());
+        }
         if snapshot.storage.is_some() {
             queued_config.insert(
                 QUEUED_STORAGE_KEY.to_string(),
@@ -1651,6 +1671,34 @@ impl AppManager {
         outcome
     }
 
+    /// An automatic update only deploys the version the loop vetted: the chart
+    /// on disk must still be that version and the update still auto-eligible.
+    pub(super) async fn guard_auto_target(
+        &self,
+        operation: &app_operation::Model,
+        target: Option<&str>,
+        current: Option<&str>,
+    ) -> Result<()> {
+        let installed = app_state::Entity::find_by_id(operation.app_name.clone())
+            .one(&self.db)
+            .await?
+            .and_then(|row| row.installed_chart_version);
+        let still_vetted = match (target, current, installed.as_deref()) {
+            (Some(target), Some(current), Some(installed)) => {
+                target == current
+                    && crate::services::update_policy::auto_eligible(
+                        crate::services::update_policy::update_kind(installed, target),
+                    )
+            }
+            _ => false,
+        };
+        if still_vetted {
+            Ok(())
+        } else {
+            Err(AppError::Conflict(AUTO_SKIPPED_MESSAGE.into()))
+        }
+    }
+
     async fn execute_install_or_update(
         &self,
         operation: &app_operation::Model,
@@ -1661,7 +1709,15 @@ impl AppManager {
         // A malformed persisted request must fail rather than silently deploying
         // with defaults (which can reset a queued GPU or other chart settings).
         let mut custom_config = parse_queued_config(operation.custom_config.as_deref())?;
-        custom_config.remove(AUTO_TARGET_KEY);
+        let queued_target = custom_config.remove(AUTO_TARGET_KEY);
+        if operation.operation == OP_UPDATE && operation.trigger.as_deref() == Some("auto") {
+            self.guard_auto_target(
+                operation,
+                queued_target.as_deref(),
+                catalog.chart_version(&operation.app_name).as_deref(),
+            )
+            .await?;
+        }
         let gpu: Option<Option<GpuSelection>> = custom_config
             .remove(QUEUED_GPU_KEY)
             .map(|raw| {
