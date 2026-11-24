@@ -21,6 +21,7 @@ pub mod pod_watch;
 pub mod scheduler;
 pub mod security;
 pub mod storage_config;
+pub mod update_policy;
 pub mod vpn;
 
 pub use app_manager::*;
