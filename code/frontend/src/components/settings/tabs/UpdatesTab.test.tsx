@@ -26,13 +26,14 @@ const defaults = {
   timezone: 'UTC',
   health_timeout_minutes: 10,
   next_window_start: null,
+  timezone_saved: false,
 };
 
 describe('UpdatesTab', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mocks.getSettings.mockReset().mockResolvedValue(defaults);
-    mocks.saveSettings.mockReset().mockImplementation(async (s) => ({ ...s, next_window_start: null }));
+    mocks.saveSettings.mockReset().mockImplementation(async (s) => ({ ...s, next_window_start: null, timezone_saved: true }));
     mocks.canManage = true;
     vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(
       () => ({ resolvedOptions: () => ({ timeZone: 'Europe/Amsterdam' }) }) as unknown as Intl.DateTimeFormat,
@@ -40,7 +41,7 @@ describe('UpdatesTab', () => {
   });
 
   it('renders the server values', async () => {
-    mocks.getSettings.mockResolvedValue({ ...defaults, timezone: 'America/New_York', window_start: '23:00', window_minutes: 180 });
+    mocks.getSettings.mockResolvedValue({ ...defaults, timezone: 'America/New_York', timezone_saved: true, window_start: '23:00', window_minutes: 180 });
     render(<UpdatesTab />);
     expect(await screen.findByLabelText('Window start')).toHaveValue('23:00');
     expect(screen.getByLabelText('Window length (minutes)')).toHaveValue(180);
@@ -49,9 +50,17 @@ describe('UpdatesTab', () => {
     expect(screen.getByRole('switch', { name: 'Automatic updates' })).toHaveAttribute('aria-checked', 'true');
   });
 
-  it('preselects the browser timezone when the server still reports UTC', async () => {
+  it('preselects the browser timezone and hints while no zone is saved', async () => {
     render(<UpdatesTab />);
     expect(await screen.findByLabelText('Timezone')).toHaveValue('Europe/Amsterdam');
+    expect(screen.getByText('Not saved yet — Kubarr uses UTC until you save.')).toBeVisible();
+  });
+
+  it('keeps a deliberately saved UTC', async () => {
+    mocks.getSettings.mockResolvedValue({ ...defaults, timezone_saved: true });
+    render(<UpdatesTab />);
+    expect(await screen.findByLabelText('Timezone')).toHaveValue('UTC');
+    expect(screen.queryByText(/Not saved yet/)).not.toBeInTheDocument();
   });
 
   it('saves the edited window and timezone', async () => {

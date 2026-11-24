@@ -56,9 +56,9 @@ export function UpdatesTab() {
     setWindowStart(s.window_start);
     setWindowMinutes(String(s.window_minutes));
     setHealthTimeout(String(s.health_timeout_minutes));
-    // The server reports UTC until an owner saves a zone, so UTC means
-    // "never chosen": start from the zone this browser is in.
-    setTimezone(preselectBrowserZone && s.timezone === 'UTC' ? browserTimezone() ?? 'UTC' : s.timezone);
+    // Until an owner saves a zone the server's UTC is only a default:
+    // start from the zone this browser is in.
+    setTimezone(preselectBrowserZone && !s.timezone_saved ? browserTimezone() ?? 'UTC' : s.timezone);
   };
 
   useEffect(() => {
@@ -147,6 +147,9 @@ export function UpdatesTab() {
                 <select id="update-timezone" value={timezone} onChange={(e) => setTimezone(e.target.value)} disabled={disabled} className={inputClass}>
                   {zones.map((name) => <option key={name} value={name}>{name}</option>)}
                 </select>
+                {!saved.timezone_saved && (
+                  <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">Not saved yet — Kubarr uses UTC until you save.</p>
+                )}
               </div>
               <div>
                 <label htmlFor="update-health-timeout" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Health check timeout (minutes)</label>

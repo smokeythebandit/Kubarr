@@ -130,6 +130,15 @@ pub async fn load<C: ConnectionTrait>(db: &C) -> Result<AutoUpdateSettings> {
     Ok(settings)
 }
 
+/// Whether an owner has ever saved a timezone (the stored default is only a
+/// placeholder until then).
+pub async fn timezone_saved<C: ConnectionTrait>(db: &C) -> Result<bool> {
+    Ok(system_setting::Entity::find_by_id(KEY_TIMEZONE)
+        .one(db)
+        .await?
+        .is_some())
+}
+
 /// Validate and persist all settings in one transaction, recording who changed them.
 pub async fn save(
     db: &impl TransactionTrait,
@@ -213,6 +222,16 @@ mod tests {
         assert_eq!(settings.window_minutes, 120);
         assert_eq!(settings.timezone, "UTC");
         assert_eq!(settings.health_timeout_minutes, 10);
+    }
+
+    #[tokio::test]
+    async fn test_timezone_saved_false_until_saved() {
+        let db = db().await;
+        assert!(!timezone_saved(&db).await.unwrap());
+        save(&db, &AutoUpdateSettings::default(), None)
+            .await
+            .unwrap();
+        assert!(timezone_saved(&db).await.unwrap());
     }
 
     #[tokio::test]

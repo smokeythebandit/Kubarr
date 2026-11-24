@@ -8,10 +8,10 @@ export function autoUpdateStatus(settings: UpdateSettingsResponse | undefined): 
   let time: string
   try {
     time = new Date(settings.next_window_start).toLocaleTimeString([], {
-      hour: '2-digit', minute: '2-digit', hour12: false, timeZone: settings.timezone,
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: settings.timezone,
     })
   } catch {
     time = settings.window_start
   }
-  return `Auto-update tonight at ${time}`
+  return `Auto-update tonight at ${time} (${settings.timezone})`
 }

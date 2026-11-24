@@ -13,6 +13,8 @@ export interface UpdateSettings {
 export interface UpdateSettingsResponse extends UpdateSettings {
   /** Start (UTC ISO) of the running or next window, or null. */
   next_window_start: string | null;
+  /** False until an owner saves a timezone; the reported one is then a default. */
+  timezone_saved: boolean;
 }
 
 export const updatesApi = {

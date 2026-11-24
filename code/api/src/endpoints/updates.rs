@@ -24,11 +24,14 @@ pub struct AutoUpdateSettingsResponse {
     pub settings: AutoUpdateSettings,
     /// Start (UTC) of the running or next update window.
     pub next_window_start: Option<DateTime<Utc>>,
+    /// False until an owner has saved a timezone; the reported one is then a default.
+    pub timezone_saved: bool,
 }
 
-fn respond(settings: AutoUpdateSettings) -> Json<AutoUpdateSettingsResponse> {
+fn respond(settings: AutoUpdateSettings, timezone_saved: bool) -> Json<AutoUpdateSettingsResponse> {
     Json(AutoUpdateSettingsResponse {
         next_window_start: settings.next_window_start(Utc::now()),
+        timezone_saved,
         settings,
     })
 }
@@ -45,7 +48,9 @@ pub async fn get_update_settings(
     _auth: Authorized<SettingsView>,
 ) -> Result<Json<AutoUpdateSettingsResponse>> {
     let db = state.get_db().await?;
-    Ok(respond(auto_update_settings::load(&db).await?))
+    let settings = auto_update_settings::load(&db).await?;
+    let saved = auto_update_settings::timezone_saved(&db).await?;
+    Ok(respond(settings, saved))
 }
 
 /// Replace the automatic update settings
@@ -71,5 +76,5 @@ pub async fn put_update_settings(
         Some((auth.user_id(), auth.user().username.clone())),
     )
     .await?;
-    Ok(respond(settings))
+    Ok(respond(settings, true))
 }
