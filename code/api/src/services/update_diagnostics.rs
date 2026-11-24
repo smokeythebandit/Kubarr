@@ -288,6 +288,19 @@ fn scrub(text: &str, secrets: &[String]) -> String {
     out
 }
 
+/// Scrub text that did not come from `capture` (e.g. Helm error lines) with
+/// the namespace's Secret values and the inline patterns.
+pub async fn scrub_for_namespace(k8s: &K8sClient, ns: &str, text: &str) -> String {
+    let secrets = namespace_secret_values(k8s, ns).await.unwrap_or_default();
+    scrub(text, &secrets)
+}
+
+/// Inline-pattern scrub only, for callers without cluster access.
+#[cfg(test)]
+pub(crate) fn scrub_inline(text: &str) -> String {
+    scrub(text, &[])
+}
+
 /// Decoded Secret values (>= 6 chars) in the namespace. `None` when listing fails.
 async fn namespace_secret_values(k8s: &K8sClient, ns: &str) -> Option<Vec<String>> {
     let api: Api<Secret> = Api::namespaced(k8s.client().clone(), ns);

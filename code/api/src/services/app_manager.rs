@@ -142,8 +142,16 @@ pub struct AppStateResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateOutcome {
     Healthy,
-    RolledBack { diagnostics: String },
-    RollbackFailed { diagnostics: String },
+    RolledBack {
+        diagnostics: String,
+    },
+    RollbackFailed {
+        diagnostics: String,
+    },
+    /// Helm failed without creating a new revision: nothing to roll back.
+    NotApplied {
+        diagnostics: String,
+    },
 }
 
 impl UpdateOutcome {
@@ -151,7 +159,8 @@ impl UpdateOutcome {
         match self {
             UpdateOutcome::Healthy => None,
             UpdateOutcome::RolledBack { diagnostics }
-            | UpdateOutcome::RollbackFailed { diagnostics } => Some(diagnostics),
+            | UpdateOutcome::RollbackFailed { diagnostics }
+            | UpdateOutcome::NotApplied { diagnostics } => Some(diagnostics),
         }
     }
 }
@@ -178,24 +187,41 @@ impl UpdateReport {
             UpdateOutcome::RollbackFailed { .. } => {
                 format!("Update to {to} failed; rollback to {from} failed")
             }
+            UpdateOutcome::NotApplied { .. } => {
+                format!("Update to {to} failed; {app} unchanged at {from}")
+            }
         }
     }
 
     fn audit_action(&self) -> AuditAction {
         match self.outcome {
             UpdateOutcome::Healthy => AuditAction::AppUpdated,
-            UpdateOutcome::RolledBack { .. } => AuditAction::AppUpdateFailed,
+            UpdateOutcome::RolledBack { .. } | UpdateOutcome::NotApplied { .. } => {
+                AuditAction::AppUpdateFailed
+            }
             UpdateOutcome::RollbackFailed { .. } => AuditAction::AppUpdateRollbackFailed,
         }
     }
 
-    /// Appended to the event's fixed notification prefix.
+    /// Appended to the event's fixed notification prefix. Diagnostics are
+    /// already scrubbed.
     fn notification_details(&self, app: &str) -> String {
         let versions = format!("app={app} from={} to={}", self.from, self.to);
-        match self.outcome.diagnostics() {
-            None => versions,
-            Some(diagnostics) => format!("{versions}; {}", first_line(diagnostics)),
-        }
+        let what = match self.outcome {
+            UpdateOutcome::Healthy => return versions,
+            UpdateOutcome::RolledBack { .. } => format!("rolled back to {}; ", self.from),
+            UpdateOutcome::NotApplied { .. } => format!(
+                "Helm reported an error; the app is still running {}; ",
+                self.from
+            ),
+            UpdateOutcome::RollbackFailed { .. } => String::new(),
+        };
+        let line = self
+            .outcome
+            .diagnostics()
+            .map(first_line)
+            .unwrap_or_default();
+        format!("{versions}; {what}{line}")
     }
 }
 
@@ -225,9 +251,26 @@ enum HealthVerdict {
     Unhealthy(String),
 }
 
-struct Revisions {
-    current: Option<u32>,
-    previous: Option<u32>,
+/// Helm history reduced to what verification needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReleaseRevisions {
+    /// Highest revision, whatever its status.
+    latest: Option<u32>,
+    /// Highest revision Helm reports as `deployed` (the live one).
+    deployed: Option<u32>,
+}
+
+impl ReleaseRevisions {
+    fn from_history(history: &[(u32, String)]) -> Self {
+        Self {
+            latest: history.iter().map(|(revision, _)| *revision).max(),
+            deployed: history
+                .iter()
+                .filter(|(_, status)| status == "deployed")
+                .map(|(revision, _)| *revision)
+                .max(),
+        }
+    }
 }
 
 /// The cluster reads and Helm actions the update verifier needs, behind a seam
@@ -239,9 +282,13 @@ trait UpdateProbe: Send + Sync {
     async fn restart_snapshot(&self) -> Result<RestartSnapshot>;
     /// `app_health`'s `healthy` flag and message.
     async fn health(&self) -> Result<(bool, String)>;
-    fn revisions(&self) -> Result<Revisions>;
+    /// `helm history` as (revision, status).
+    fn history(&self) -> Result<Vec<(u32, String)>>;
     async fn capture(&self, failed: Option<u32>, previous: Option<u32>) -> String;
     fn rollback(&self, revision: u32) -> Result<()>;
+    /// Mask secrets (namespace Secret values and inline patterns) in text that
+    /// leaves the worker.
+    async fn scrub(&self, text: &str) -> String;
 }
 
 struct ClusterUpdateProbe<'a, 'm> {
@@ -276,15 +323,12 @@ impl UpdateProbe for ClusterUpdateProbe<'_, '_> {
         ))
     }
 
-    fn revisions(&self) -> Result<Revisions> {
-        Ok(Revisions {
-            current: self
-                .deploy
-                .release_revisions(self.app)?
-                .last()
-                .map(|(revision, _)| *revision),
-            previous: self.deploy.previous_deployed_revision(self.app)?,
-        })
+    fn history(&self) -> Result<Vec<(u32, String)>> {
+        self.deploy.release_revisions(self.app)
+    }
+
+    async fn scrub(&self, text: &str) -> String {
+        update_diagnostics::scrub_for_namespace(self.k8s, &self.namespace, text).await
     }
 
     async fn capture(&self, failed: Option<u32>, previous: Option<u32>) -> String {
@@ -1794,6 +1838,11 @@ impl AppManager {
         H: Future<Output = Result<String>>,
     {
         let before = probe.restart_snapshot().await?;
+        // The only safe rollback target is what was live before this update.
+        let before_revisions = probe
+            .history()
+            .map(|history| ReleaseRevisions::from_history(&history))
+            .map_err(|error| error.to_string());
         let helm_result = helm.await;
         if stop.is_cancelled() {
             // A stop wins regardless; do not keep the lock for a verdict nobody records.
@@ -1801,7 +1850,7 @@ impl AppManager {
         }
         // A stop during verification abandons it (no rollback); the worker records the stop.
         let outcome = tokio::select! {
-            outcome = self.verify_or_roll_back(probe, &before, helm_result) => outcome?,
+            outcome = self.verify_or_roll_back(probe, &before, before_revisions, helm_result) => outcome,
             _ = stop.cancelled() => return Err(AppError::Internal(STOP_ERROR.into())),
         };
         Ok(OperationOutput::Update(UpdateReport {
@@ -1852,48 +1901,83 @@ impl AppManager {
         }
     }
 
-    /// `Err` only when Helm failed and the app is still healthy: nothing broke,
-    /// so the Helm error is the outcome and no rollback is attempted.
+    /// Decide the outcome after Helm returned. Rolls back only to the revision
+    /// that was deployed before the update, and only when Helm created a newer one.
     async fn verify_or_roll_back(
         &self,
         probe: &dyn UpdateProbe,
         before: &RestartSnapshot,
+        before_revisions: std::result::Result<ReleaseRevisions, String>,
         helm_result: Result<String>,
-    ) -> Result<UpdateOutcome> {
+    ) -> UpdateOutcome {
         let verdict = self
             .verify_update(probe, before, self.update_health_timeout)
             .await;
-        let reason = match (verdict, helm_result) {
-            (HealthVerdict::Healthy, Ok(_)) => return Ok(UpdateOutcome::Healthy),
-            (HealthVerdict::Healthy, Err(error)) => return Err(error),
-            (HealthVerdict::Unhealthy(reason), Ok(_)) => reason,
-            (HealthVerdict::Unhealthy(reason), Err(error)) => format!(
-                "Helm upgrade failed: {}; {reason}",
-                first_line(&error.to_string())
-            ),
+        let helm_error = helm_result.err().map(|error| error.to_string());
+        if matches!(verdict, HealthVerdict::Healthy) && helm_error.is_none() {
+            return UpdateOutcome::Healthy;
+        }
+        let after_revisions = probe
+            .history()
+            .map(|history| ReleaseRevisions::from_history(&history))
+            .map_err(|error| error.to_string());
+        // `None` when either side of the comparison is unknown.
+        let applied = match (&before_revisions, &after_revisions) {
+            (Ok(before), Ok(after)) => Some(after.latest > before.latest),
+            _ => None,
+        };
+        let helm_line = helm_error
+            .as_deref()
+            .map(|error| format!("Helm upgrade failed: {}", first_line(error)));
+
+        let reason = match (verdict, &helm_line) {
+            (HealthVerdict::Healthy, Some(helm_line)) => {
+                if applied == Some(true) {
+                    // A new revision is deployed and healthy; Helm's error was spurious.
+                    tracing::warn!(error = %helm_line, "Helm reported an error but the updated app is healthy");
+                    return UpdateOutcome::Healthy;
+                }
+                let note = "No new revision is running; nothing to roll back";
+                return UpdateOutcome::NotApplied {
+                    diagnostics: self.compose(probe, &[helm_line, note], "").await,
+                };
+            }
+            (HealthVerdict::Healthy, None) => return UpdateOutcome::Healthy,
+            (HealthVerdict::Unhealthy(reason), None) => reason,
+            (HealthVerdict::Unhealthy(reason), Some(helm_line)) => format!("{helm_line}; {reason}"),
         };
 
+        let failed_revision = after_revisions.as_ref().ok().and_then(|r| r.latest);
+        let target = before_revisions.as_ref().ok().and_then(|r| r.deployed);
         // Evidence first: the rollback replaces the pods whose logs explain the failure.
-        let (failed_revision, previous_revision, history_error) = match probe.revisions() {
-            Ok(revisions) => (revisions.current, revisions.previous, None),
-            Err(error) => (
-                None,
-                None,
-                Some(format!(
-                    "Rollback not attempted: Helm history unavailable: {error}"
-                )),
-            ),
-        };
-        let captured = probe.capture(failed_revision, previous_revision).await;
+        let captured = probe.capture(failed_revision, target).await;
 
-        let rollback: std::result::Result<u32, String> = match previous_revision {
-            None => Err(history_error
-                .unwrap_or_else(|| "Rollback not attempted: no previous revision".to_string())),
-            Some(revision) => {
-                let before_rollback = probe
-                    .restart_snapshot()
-                    .await
-                    .unwrap_or_else(|_| before.clone());
+        if applied == Some(false) {
+            let note = "No new Helm revision was created; nothing to roll back";
+            return UpdateOutcome::NotApplied {
+                diagnostics: self.compose(probe, &[&reason, note], &captured).await,
+            };
+        }
+
+        let rollback: std::result::Result<u32, String> = match (applied, target) {
+            (None, _) => Err(format!(
+                "Rollback not attempted: Helm history unavailable: {}",
+                before_revisions
+                    .err()
+                    .or(after_revisions.err())
+                    .unwrap_or_default()
+            )),
+            (_, None) => {
+                Err("Rollback not attempted: no deployed revision before the update".into())
+            }
+            (_, Some(revision)) => {
+                let before_rollback = match probe.restart_snapshot().await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        tracing::warn!(%error, "Restart snapshot before rollback failed; using the pre-update baseline");
+                        before.clone()
+                    }
+                };
                 match probe.rollback(revision) {
                     Err(error) => Err(format!("Rollback to revision {revision} failed: {error}")),
                     Ok(()) => match self
@@ -1913,11 +1997,20 @@ impl AppManager {
             Ok(revision) => format!("Rolled back to revision {revision}"),
             Err(problem) => problem.clone(),
         };
-        let diagnostics = compose_diagnostics(&reason, &rollback_line, &captured);
-        Ok(match rollback {
+        let diagnostics = self
+            .compose(probe, &[&reason, &rollback_line], &captured)
+            .await;
+        match rollback {
             Ok(_) => UpdateOutcome::RolledBack { diagnostics },
             Err(_) => UpdateOutcome::RollbackFailed { diagnostics },
-        })
+        }
+    }
+
+    /// Summary lines (scrubbed, one line each) above the already-scrubbed capture.
+    async fn compose(&self, probe: &dyn UpdateProbe, lines: &[&str], captured: &str) -> String {
+        let summary: Vec<&str> = lines.iter().map(|line| first_line(line)).collect();
+        let scrubbed = probe.scrub(&summary.join("\n")).await;
+        compose_diagnostics(&scrubbed, captured)
     }
 
     async fn restart_app(&self, client: &K8sClient, app_name: &str) -> Result<()> {
@@ -2591,13 +2684,18 @@ fn summary_line(text: &str) -> &str {
     &line[..end]
 }
 
-/// The failure reason leads, so it is the "first diagnostic line" notifications quote.
-fn compose_diagnostics(reason: &str, rollback: &str, captured: &str) -> String {
-    let report = format!(
-        "{}\n{}\n\n{captured}",
-        summary_line(reason),
-        summary_line(rollback)
-    );
+/// The scrubbed summary lines lead, so the first one is the "first diagnostic
+/// line" notifications quote. Each is capped at `SUMMARY_LINE_MAX` bytes.
+fn compose_diagnostics(summary: &str, captured: &str) -> String {
+    let mut report = summary
+        .lines()
+        .map(summary_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !captured.is_empty() {
+        report.push_str("\n\n");
+        report.push_str(captured);
+    }
     update_diagnostics::truncate_report(report)
 }
 
