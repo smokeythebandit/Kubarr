@@ -964,6 +964,40 @@ async fn test_update_settings_rejects_invalid_with_field_message() {
 }
 
 #[tokio::test]
+async fn test_update_settings_malformed_types_are_400_with_field() {
+    let (app, cookie) = login_as("admin", "updadmintypes").await;
+    for (patch, field) in [
+        (serde_json::json!({"schedule": "nightly"}), "schedule"),
+        (
+            serde_json::json!({"schedule": vec![vec!["yes"; 24]; 7]}),
+            "schedule",
+        ),
+        (serde_json::json!({"enabled": "on"}), "enabled"),
+        (
+            serde_json::json!({"health_timeout_minutes": "ten"}),
+            "health_timeout_minutes",
+        ),
+    ] {
+        let mut body = settings_body(default_schedule());
+        body.as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let (status, text) = authenticated_put(
+            app.clone(),
+            "/api/updates/settings",
+            &cookie,
+            &body.to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {text}");
+        assert!(text.contains(field), "{field}: {text}");
+    }
+    let (status, text) =
+        authenticated_put(app, "/api/updates/settings", &cookie, "{not json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+}
+
+#[tokio::test]
 async fn test_update_settings_permissions() {
     let (app, cookie) = login_as("viewer", "updviewer").await;
     let (status, _) = authenticated_get(app.clone(), "/api/updates/settings", &cookie).await;

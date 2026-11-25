@@ -5,7 +5,7 @@ import { updatesApi } from '../../../api/updates';
 import type { UpdateSettingsResponse } from '../../../api/updates';
 import { SettingsCard, SettingsTabLayout } from './SettingsTabLayout';
 import { WeekScheduleGrid } from '../WeekScheduleGrid';
-import { countHours, normalizeSchedule, presetSchedule } from '../weekSchedule';
+import { countHours, normalizeSchedule, nowInZone, presetSchedule, untilLabel, validZone, windowPosition } from '../weekSchedule';
 import type { WeekSchedule } from '../weekSchedule';
 
 const inputClass = 'w-full px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-60';
@@ -37,6 +37,17 @@ function formatNextWindow(iso: string, timezone: string): string {
   } catch {
     return date.toLocaleString();
   }
+}
+
+/** The saved schedule's state: "Open now, until 06:00" or the next window's start. */
+function nextWindowText(saved: UpdateSettingsResponse, now: Date): string {
+  if (!saved.enabled) return 'Automatic updates are off';
+  const zone = validZone(saved.timezone);
+  const pos = windowPosition(saved.schedule ?? [], nowInZone(zone, now));
+  if (pos.kind === 'empty' || !saved.next_window_start) return 'No update hours selected';
+  if (pos.kind === 'always') return 'Open now, any time';
+  if (pos.kind === 'open') return `Open now, until ${untilLabel(pos)}`;
+  return `Next window: ${formatNextWindow(saved.next_window_start, saved.timezone)}`;
 }
 
 export function UpdatesTab() {
@@ -115,9 +126,7 @@ export function UpdatesTab() {
               <div>
                 <div className="font-medium text-gray-900 dark:text-white">Automatic updates</div>
                 <div className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                  {saved.enabled && saved.next_window_start
-                    ? `Next window: ${formatNextWindow(saved.next_window_start, saved.timezone)}`
-                    : saved.enabled ? 'No update hours selected' : 'Automatic updates are off'}
+                  {nextWindowText(saved, new Date())}
                 </div>
               </div>
               <button

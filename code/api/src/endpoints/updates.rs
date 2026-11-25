@@ -1,10 +1,14 @@
 //! Settings for scheduled automatic app updates (`/api/updates`).
 
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{
+    extract::{rejection::JsonRejection, State},
+    routing::get,
+    Json, Router,
+};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::middleware::permissions::{Authorized, SettingsManage, SettingsView};
 use crate::services::auto_update_settings::{self, AutoUpdateSettings};
 use crate::state::AppState;
@@ -68,8 +72,11 @@ pub async fn get_update_settings(
 pub async fn put_update_settings(
     State(state): State<AppState>,
     auth: Authorized<SettingsManage>,
-    Json(settings): Json<AutoUpdateSettings>,
+    body: std::result::Result<Json<AutoUpdateSettings>, JsonRejection>,
 ) -> Result<Json<AutoUpdateSettingsResponse>> {
+    // A body of the wrong shape is a 400 naming the field, like the
+    // validation errors, instead of axum's default 422.
+    let Json(settings) = body.map_err(|e| AppError::BadRequest(e.body_text()))?;
     let db = state.get_db().await?;
     auto_update_settings::save(
         &db,
