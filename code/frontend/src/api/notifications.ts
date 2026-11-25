@@ -48,6 +48,17 @@ export interface NotificationEvent {
   severity: string;
 }
 
+/** External channels an event can be routed to. The bell is not routed. */
+export type RouteChannel = 'telegram' | 'email' | 'messagebird';
+
+export const ROUTE_CHANNELS: RouteChannel[] = ['telegram', 'email', 'messagebird'];
+
+/** Which external channels an event is delivered to. */
+export interface NotificationRoute {
+  event_type: string;
+  channels: Record<RouteChannel, boolean>;
+}
+
 export interface UserNotificationPref {
   channel_type: string;
   enabled: boolean;
@@ -177,6 +188,25 @@ export const notificationsApi = {
     data: { enabled?: boolean; severity?: string }
   ): Promise<NotificationEvent> => {
     const response = await apiClient.put(`/notifications/events/${eventType}`, data);
+    return response.data;
+  },
+
+  // ============================================================================
+  // Admin: Routing (which channels each event goes to)
+  // ============================================================================
+
+  // Get every event's external channel routes (admin)
+  getRoutes: async (): Promise<NotificationRoute[]> => {
+    const response = await apiClient.get('/notifications/routes');
+    return response.data;
+  },
+
+  // Change some of an event's routes; channels left out keep their route (admin)
+  updateRoute: async (
+    eventType: string,
+    channels: Partial<Record<RouteChannel, boolean>>
+  ): Promise<NotificationRoute> => {
+    const response = await apiClient.put(`/notifications/routes/${eventType}`, { channels });
     return response.data;
   },
 

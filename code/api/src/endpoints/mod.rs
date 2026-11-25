@@ -141,6 +141,8 @@ use crate::state::AppState;
         notifications::test_channel,
         notifications::list_events,
         notifications::update_event,
+        notifications::routing::list_routes,
+        notifications::routing::update_route,
         notifications::get_preferences,
         notifications::update_preference,
         notifications::start_verification,

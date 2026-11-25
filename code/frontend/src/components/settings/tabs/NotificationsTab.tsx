@@ -1,6 +1,6 @@
 import { useRef, useState, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction } from 'react';
 import { Bell } from 'lucide-react';
-import type { NotificationChannel, NotificationEvent, NotificationLog } from '../../../api/notifications';
+import { ROUTE_CHANNELS, type NotificationChannel, type NotificationEvent, type NotificationLog, type NotificationRoute, type RouteChannel } from '../../../api/notifications';
 import { CountBadge } from '../../notifications/NotificationParts';
 import { CATEGORY_LABELS, CATEGORY_ORDER, categoryOf, eventLabel } from '../../notifications/notificationModel';
 import { channelStatus, CHANNEL_NAMES, unresolvedFailures, type ChannelStatus, type ChannelTestResult } from './notificationChannelStatus';
@@ -24,6 +24,9 @@ type NotificationsTabProps = {
   onToggleChannel: (channelType: string, enabled: boolean) => void;
   onToggleEvent: (eventType: string, enabled: boolean) => void;
   onUpdateEventSeverity: (eventType: string, severity: string) => void;
+  /** Which external channels each event is sent to; a missing entry is off. */
+  notificationRoutes?: NotificationRoute[];
+  onToggleRoute?: (eventType: string, channel: RouteChannel, enabled: boolean) => void;
   onTestChannel: (channelType: string) => void;
   onSaveChannelConfig: (channelType: string) => void;
   getChannelIcon: (channelType: string) => ReactNode;
@@ -51,6 +54,13 @@ const focusRing = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-bl
 const btn = `rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-1.5 text-[0.82rem] font-semibold text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`;
 const btnPrimary = `rounded-lg border border-blue-600 bg-blue-600 px-3 py-1.5 text-[0.82rem] font-semibold text-white hover:bg-blue-700 ${focusRing}`;
 const input = `w-full rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-3 py-1.5 text-sm text-gray-900 dark:text-white placeholder-gray-500 ${focusRing}`;
+/** Short column headers for the routing matrix. */
+const ROUTE_COLUMN_NAMES: Record<RouteChannel, string> = { telegram: 'Telegram', email: 'Email', messagebird: 'SMS' };
+const SET_UP_FIRST = 'Set up this channel first';
+const BELL_ALWAYS_ON = 'The bell always shows every enabled event';
+const BELL_EVENT_OFF = 'Turn the event on to show it in the bell';
+const checkbox = `h-4 w-4 rounded border-gray-300 text-blue-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-600 ${focusRing}`;
+
 const th = 'px-3 py-2 text-left font-mono text-[0.7rem] font-semibold uppercase tracking-[0.05em] text-gray-500 dark:text-gray-400';
 
 function StatusPill({ className, children, wrap }: { className: string; children: ReactNode; wrap?: boolean }) {
@@ -99,6 +109,8 @@ export function NotificationsTab({
   onToggleChannel,
   onToggleEvent,
   onUpdateEventSeverity,
+  notificationRoutes = [],
+  onToggleRoute,
   onTestChannel,
   onSaveChannelConfig,
   getChannelIcon,
@@ -119,9 +131,18 @@ export function NotificationsTab({
   // Failures that a later success on the same channel has not cleared.
   const failed = unresolvedFailures(notificationLogs);
 
+  // A channel can be routed to once it has saved settings.
+  const available = (channel: RouteChannel) => statuses.some((s) => s.channel.channel_type === channel && s.status !== 'unset');
+  const routeOn = (eventType: string, channel: RouteChannel) =>
+    available(channel) && !!notificationRoutes.find((r) => r.event_type === eventType)?.channels[channel];
+  // Only routes that can fire: the event is on and the channel is set up.
+  const routeCount = notificationEvents
+    .filter((e) => e.enabled)
+    .reduce((n, e) => n + ROUTE_CHANNELS.filter((c) => routeOn(e.event_type, c)).length, 0);
+
   const tabs: { id: TabId; label: string; badge: number; badgeTitle: string }[] = [
     { id: 'channels', label: 'Channels', badge: problems, badgeTitle: `${problems} with a problem` },
-    { id: 'rules', label: 'What you get', badge: 0, badgeTitle: '' },
+    { id: 'rules', label: 'What you get', badge: routeCount, badgeTitle: `${routeCount} routes to Telegram, email or SMS` },
     ...(canViewHistory ? [{ id: 'history' as TabId, label: 'Delivery history', badge: failed, badgeTitle: `${failed} failed since the last successful delivery` }] : []),
   ];
 
@@ -172,7 +193,7 @@ export function NotificationsTab({
                 }`}
               >
                 {t.label}
-                {t.badge > 0 && <CountBadge value={t.badge} kind="crit" label={t.badgeTitle} />}
+                {t.badge > 0 && <CountBadge value={t.badge} kind={t.id === 'rules' ? 'neutral' : 'crit'} label={t.badgeTitle} />}
               </button>
             ))}
           </div>
@@ -303,16 +324,27 @@ export function NotificationsTab({
               <div>
                 <h4 className="text-lg font-semibold text-gray-900 dark:text-white">What you get</h4>
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                  Turn an event on to notify about it in the bell and on every enabled channel. Severity sets the icon and whether it counts as needing attention.
+                  Turn an event on to show it in the bell, then tick a channel to also send it there. Severity sets the icon and whether it counts as needing attention.
                 </p>
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[480px] border-collapse text-sm">
+                <table className="w-full min-w-[640px] border-collapse text-sm">
                   <thead>
                     <tr className="border-b border-gray-200 dark:border-gray-700">
                       <th className={th}>Event</th>
                       <th className={th}>Severity</th>
                       <th className={`${th} text-center`}>On</th>
+                      <th className={`${th} text-center`}>Bell</th>
+                      {ROUTE_CHANNELS.map((c) => (
+                        <th key={c} className={`${th} text-center`}>
+                          {ROUTE_COLUMN_NAMES[c]}
+                          {!available(c) && (
+                            <span title={SET_UP_FIRST} aria-label={SET_UP_FIRST}>
+                              {' ·'}
+                            </span>
+                          )}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
@@ -345,6 +377,33 @@ export function NotificationsTab({
                                   onChange={() => onToggleEvent(event.event_type, !event.enabled)}
                                 />
                               </td>
+                              <td className="px-3 py-2 text-center">
+                                <input
+                                  type="checkbox"
+                                  className={checkbox}
+                                  checked={event.enabled}
+                                  readOnly
+                                  disabled
+                                  aria-label={`${label} in the bell`}
+                                  title={event.enabled ? BELL_ALWAYS_ON : BELL_EVENT_OFF}
+                                />
+                              </td>
+                              {ROUTE_CHANNELS.map((c) => {
+                                const on = routeOn(event.event_type, c);
+                                return (
+                                  <td key={c} className="px-3 py-2 text-center">
+                                    <input
+                                      type="checkbox"
+                                      className={checkbox}
+                                      checked={on}
+                                      disabled={!canManage || !available(c) || !onToggleRoute}
+                                      title={available(c) ? undefined : SET_UP_FIRST}
+                                      aria-label={`${label} via ${ROUTE_COLUMN_NAMES[c]}`}
+                                      onChange={() => onToggleRoute?.(event.event_type, c, !on)}
+                                    />
+                                  </td>
+                                );
+                              })}
                             </tr>
                           );
                         })}
@@ -424,7 +483,7 @@ function CategoryRows({ label, children }: { label: string; children: ReactNode 
       <tr>
         <td
           data-testid="category-row"
-          colSpan={3}
+          colSpan={3 + 1 + ROUTE_CHANNELS.length}
           className="bg-gray-50 dark:bg-gray-900/40 px-3 py-2 text-left font-mono text-[0.72rem] font-bold uppercase tracking-[0.07em] text-gray-500 dark:text-gray-400"
         >
           {label}

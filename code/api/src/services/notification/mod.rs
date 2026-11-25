@@ -1,5 +1,6 @@
 mod email;
 mod messagebird;
+pub mod routing;
 mod telegram;
 pub mod verification;
 
@@ -341,13 +342,22 @@ impl NotificationService {
         // Create notification title and body
         let title = format_event_title(action);
         let body = format_event_body(action, username, details);
+        // External channels this event is routed to. A failed lookup must not
+        // cost the bell, so it only skips the external channels.
+        let routed = match routing::routed_channels(db, &event_type).await {
+            Ok(routed) => routed,
+            Err(e) => {
+                tracing::warn!(event_type = %event_type, "Notification route lookup failed: {}", e);
+                std::collections::HashSet::new()
+            }
+        };
 
         let Some(uid) = user_id else {
             // System-wide events go to everyone who manages settings. One failing
             // recipient must not stop the others.
             for uid in settings_managers(db).await? {
                 if let Err(e) = self
-                    .notify_user(db, uid, &title, &body, &event_type, severity)
+                    .notify_user(db, uid, &title, &body, &event_type, severity, &routed)
                     .await
                 {
                     tracing::warn!(user_id = uid, "System notification failed: {}", e);
@@ -355,11 +365,12 @@ impl NotificationService {
             }
             return Ok(());
         };
-        self.notify_user(db, uid, &title, &body, &event_type, severity)
+        self.notify_user(db, uid, &title, &body, &event_type, severity, &routed)
             .await
     }
 
-    /// In-app notification plus the user's verified external channels.
+    /// In-app notification plus the user's verified destinations on `routed` channels.
+    #[allow(clippy::too_many_arguments)]
     async fn notify_user(
         &self,
         db: &DatabaseConnection,
@@ -368,11 +379,20 @@ impl NotificationService {
         body: &str,
         event_type: &str,
         severity: NotificationSeverity,
+        routed: &std::collections::HashSet<ChannelType>,
     ) -> Result<()> {
         self.create_user_notification(db, user_id, title, body, event_type, severity)
             .await?;
-        self.send_external_notifications(db, Some(user_id), title, body, event_type, severity)
-            .await
+        self.send_external_notifications(
+            db,
+            Some(user_id),
+            title,
+            body,
+            event_type,
+            severity,
+            routed,
+        )
+        .await
     }
 
     /// Create an in-app notification for a user
@@ -399,7 +419,8 @@ impl NotificationService {
         Ok(())
     }
 
-    /// Send notifications through external channels
+    /// Send notifications through the external channels in `routed`.
+    #[allow(clippy::too_many_arguments)]
     async fn send_external_notifications(
         &self,
         db: &DatabaseConnection,
@@ -408,6 +429,7 @@ impl NotificationService {
         body: &str,
         event_type: &str,
         severity: NotificationSeverity,
+        routed: &std::collections::HashSet<ChannelType>,
     ) -> Result<()> {
         // If we have a specific user, check their preferences
         if let Some(uid) = user_id {
@@ -417,8 +439,9 @@ impl NotificationService {
                 .filter(user_notification_pref::Column::Verified.eq(true))
                 .all(db)
                 .await?;
-
-            for pref in prefs {
+            for pref in prefs.into_iter().filter(|pref| {
+                ChannelType::parse(&pref.channel_type).is_some_and(|c| routed.contains(&c))
+            }) {
                 if let Some(destination) = &pref.destination {
                     let message = NotificationMessage {
                         recipient: destination.clone(),
@@ -2375,6 +2398,17 @@ mod tests {
     // init_providers — with actual channel records in DB
     // -------------------------------------------------------------------------
 
+    /// Route the `login` event to `channel` so external sends are attempted.
+    async fn route_login(db: &sea_orm::DatabaseConnection, channel: ChannelType) {
+        routing::set_routes(
+            db,
+            "login",
+            &std::collections::HashMap::from([(channel, true)]),
+        )
+        .await
+        .expect("route login");
+    }
+
     async fn insert_channel(
         db: &sea_orm::DatabaseConnection,
         channel_type: &str,
@@ -2587,6 +2621,7 @@ mod tests {
 
         // Add a user pref for email (enabled + verified + with destination)
         insert_user_pref(&db, 20, "email", Some("to@example.com"), true, true).await;
+        route_login(&db, ChannelType::Email).await;
 
         // Add email channel so init_providers can load it
         let email_config = serde_json::json!({
@@ -2679,6 +2714,7 @@ mod tests {
 
         // User pref for telegram with destination, but no provider loaded
         insert_user_pref(&db, 40, "telegram", Some("123456789"), true, true).await;
+        route_login(&db, ChannelType::Telegram).await;
 
         svc.set_db(db.clone()).await;
         // Do NOT call init_providers, so telegram provider stays None
@@ -2713,6 +2749,7 @@ mod tests {
 
         // Add user pref for telegram with a destination (chat ID)
         insert_user_pref(&db, 30, "telegram", Some("987654321"), true, true).await;
+        route_login(&db, ChannelType::Telegram).await;
 
         // Add telegram channel so init_providers loads the TelegramProvider
         let telegram_config = serde_json::json!({
@@ -2755,6 +2792,7 @@ mod tests {
 
         // Add user pref for messagebird with a phone number destination
         insert_user_pref(&db, 31, "messagebird", Some("+15550001234"), true, true).await;
+        route_login(&db, ChannelType::MessageBird).await;
 
         // Add messagebird channel so init_providers loads the MessageBirdProvider
         let mb_config = serde_json::json!({

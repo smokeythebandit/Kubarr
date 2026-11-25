@@ -20,6 +20,8 @@ use crate::models::{
 use crate::services::notification::{verification, ChannelType};
 use crate::state::AppState;
 
+pub(crate) mod routing;
+
 pub fn notifications_routes(state: AppState) -> Router {
     Router::new()
         // User inbox endpoints
@@ -36,6 +38,9 @@ pub fn notifications_routes(state: AppState) -> Router {
         // Admin: Event settings
         .route("/events", get(list_events))
         .route("/events/{event_type}", put(update_event))
+        // Admin: per-event channel routing
+        .route("/routes", get(routing::list_routes))
+        .route("/routes/{event_type}", put(routing::update_route))
         // User preferences
         .route("/preferences", get(get_preferences))
         .route("/preferences/{channel_type}", put(update_preference))
@@ -555,6 +560,7 @@ async fn update_event(
         .filter(notification_event::Column::EventType.eq(&event_type))
         .one(&db)
         .await?;
+    let created = existing.is_none();
 
     let event = if let Some(existing) = existing {
         let mut active: notification_event::ActiveModel = existing.into();
@@ -576,6 +582,17 @@ async fn update_event(
         };
         new_event.insert(&db).await?
     };
+
+    // A new event, or one turned on before it had routes, gets the defaults for
+    // its severity. Later severity changes leave existing routes alone.
+    if created || event.enabled {
+        crate::services::notification::routing::seed_defaults_if_unrouted(
+            &db,
+            &event.event_type,
+            crate::services::notification::NotificationSeverity::parse(&event.severity),
+        )
+        .await?;
+    }
 
     Ok(Json(EventSettingDto {
         event_type: event.event_type,
