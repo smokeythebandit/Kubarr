@@ -25,7 +25,9 @@ const KEY_TIMEZONE: &str = "auto_update.timezone";
 const KEY_HEALTH_TIMEOUT: &str = "auto_update.health_timeout_minutes";
 
 const WINDOW_MINUTES_RANGE: std::ops::RangeInclusive<u32> = 30..=720;
-const HEALTH_TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 2..=60;
+/// At least 5 minutes: verification needs time to become healthy plus the
+/// worker's 3-minute settle period, or every update would fail.
+const HEALTH_TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 5..=60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AutoUpdateSettings {
@@ -300,7 +302,7 @@ mod tests {
             ),
             (
                 AutoUpdateSettings {
-                    health_timeout_minutes: 1,
+                    health_timeout_minutes: 4,
                     ..base.clone()
                 },
                 "health_timeout_minutes",

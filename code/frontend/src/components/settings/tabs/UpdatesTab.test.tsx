@@ -47,6 +47,9 @@ describe('UpdatesTab', () => {
     expect(screen.getByLabelText('Window length (minutes)')).toHaveValue(180);
     expect(screen.getByLabelText('Timezone')).toHaveValue('America/New_York');
     expect(screen.getByLabelText('Health check timeout (minutes)')).toHaveValue(10);
+    // The worker needs time to become healthy plus a 3-minute settle period.
+    expect(screen.getByLabelText('Health check timeout (minutes)')).toHaveAttribute('min', '5');
+    expect(screen.getByLabelText('Health check timeout (minutes)')).toHaveAttribute('max', '60');
     expect(screen.getByRole('switch', { name: 'Automatic updates' })).toHaveAttribute('aria-checked', 'true');
   });
 

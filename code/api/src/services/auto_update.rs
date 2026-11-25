@@ -6,14 +6,16 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 use crate::models::{app_operation, app_state};
 use crate::services::app_manager::{
     AppManager, AUTO_TARGET_KEY, OBS_INSTALLED, OP_UPDATE, STATUS_FAILED, STATUS_PAUSED,
-    STATUS_QUEUED, STATUS_RUNNING,
+    STATUS_QUEUED, STATUS_RETRIED, STATUS_RUNNING, STATUS_SUCCEEDED,
 };
 use crate::services::auto_update_settings;
 use crate::services::catalog::AppCatalog;
@@ -80,12 +82,13 @@ pub async fn candidates<C: ConnectionTrait>(db: &C, catalog: &AppCatalog) -> Res
     Ok(out)
 }
 
-/// True when the newest update operation for the app, whoever started it,
-/// failed while targeting `version` after Helm ran. Only a newer operation (a
-/// success) or a different available version clears it; a failed manual retry
-/// keeps it. Only failures that reached Helm count: the worker stores
-/// diagnostics for exactly those. Failures before Helm (a blip, a dropped stale
-/// target) and interrupted operations leave none, so the next night re-evaluates.
+/// True when the deciding update operation for the app, whoever started it,
+/// failed while targeting `version`. The deciding operation is the newest one
+/// that either succeeded or failed (or was retried) after Helm ran (the worker stores
+/// diagnostics for exactly those). Failures without diagnostics (before Helm,
+/// a dropped stale target, an interrupted worker) are ignored entirely: they
+/// neither set nor lift the skip. A success or a different available version
+/// clears it; a failed manual retry that reached Helm keeps it.
 async fn failed_on_version<C: ConnectionTrait>(
     db: &C,
     app_name: &str,
@@ -94,6 +97,16 @@ async fn failed_on_version<C: ConnectionTrait>(
     let latest = app_operation::Entity::find()
         .filter(app_operation::Column::AppName.eq(app_name))
         .filter(app_operation::Column::Operation.eq(OP_UPDATE))
+        .filter(
+            Condition::any()
+                .add(app_operation::Column::Status.eq(STATUS_SUCCEEDED))
+                .add(
+                    Condition::all()
+                        // A retried operation is a failure the owner retried.
+                        .add(app_operation::Column::Status.is_in([STATUS_FAILED, STATUS_RETRIED]))
+                        .add(app_operation::Column::Diagnostics.is_not_null()),
+                ),
+        )
         .order_by_desc(app_operation::Column::CreatedAt)
         .one(db)
         .await?;
@@ -105,7 +118,7 @@ async fn failed_on_version<C: ConnectionTrait>(
                 serde_json::from_str::<std::collections::HashMap<String, String>>(raw).ok()
             })
             .and_then(|mut config| config.remove(AUTO_TARGET_KEY));
-        op.status == STATUS_FAILED && target.as_deref() == Some(version) && op.diagnostics.is_some()
+        op.status != STATUS_SUCCEEDED && target.as_deref() == Some(version)
     }))
 }
 
@@ -170,7 +183,7 @@ pub async fn run<C: ConnectionTrait>(
 mod tests {
     use super::*;
     use crate::models::app_state;
-    use crate::services::app_manager::{AUTO_SKIPPED_MESSAGE, STATUS_SUCCEEDED};
+    use crate::services::app_manager::AUTO_SKIPPED_MESSAGE;
     use crate::services::auto_update_settings::AutoUpdateSettings;
     use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, Set};
     use sea_orm_migration::MigratorTrait;
@@ -545,6 +558,35 @@ mod tests {
             .unwrap();
         // Failed before Helm (or recovered as interrupted): no diagnostics.
         f.set_status(&queued.id, STATUS_FAILED).await;
+        f.settle("alpha").await;
+        assert_eq!(f.candidates().await, vec!["alpha".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_failed_before_helm_retry_does_not_lift_skip() {
+        let f = fixture().await;
+        f.state("alpha", "1.0.0+1", "1.0.1+1").await;
+        let queued = f
+            .manager
+            .enqueue_auto_update("alpha", "1.0.1+1")
+            .await
+            .unwrap();
+        f.fail_after_helm(&queued.id).await;
+        f.settle("alpha").await;
+        assert!(f.candidates().await.is_empty());
+        // A manual retry fails before Helm (no diagnostics): it is ignored, so
+        // the earlier failure that reached Helm still decides.
+        let retry = f.manager.retry_operation(&queued.id, 1).await.unwrap();
+        f.set_status(&retry.id, STATUS_FAILED).await;
+        f.settle("alpha").await;
+        assert!(f.candidates().await.is_empty());
+        // A later success lifts it.
+        let manual = f
+            .manager
+            .enqueue_operation("alpha", OP_UPDATE, HashMap::new(), Some(1))
+            .await
+            .unwrap();
+        f.set_status(&manual.id, STATUS_SUCCEEDED).await;
         f.settle("alpha").await;
         assert_eq!(f.candidates().await, vec!["alpha".to_string()]);
     }

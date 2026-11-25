@@ -153,7 +153,7 @@ export function UpdatesTab() {
               </div>
               <div>
                 <label htmlFor="update-health-timeout" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Health check timeout (minutes)</label>
-                <input id="update-health-timeout" type="number" required min={2} max={60} value={healthTimeout} onChange={(e) => setHealthTimeout(e.target.value)} disabled={disabled} className={inputClass} />
+                <input id="update-health-timeout" type="number" required min={5} max={60} value={healthTimeout} onChange={(e) => setHealthTimeout(e.target.value)} disabled={disabled} className={inputClass} />
               </div>
             </div>
 
