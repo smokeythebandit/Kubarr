@@ -44,6 +44,61 @@ export function categoryOf(eventType: string | null | undefined): NotificationCa
   return 'system';
 }
 
+/**
+ * Display names for every event type `GET /api/notifications/events` returns
+ * (the backend derives that list from its AuditAction enum). Unknown types fall
+ * back to a title-cased version of the identifier.
+ */
+export const EVENT_LABELS: Record<string, string> = {
+  // Security: sign-in and account
+  login: 'Login Successful',
+  login_failed: 'Login Failed',
+  logout: 'Logged Out',
+  '2fa_enabled': '2FA Enabled',
+  '2fa_disabled': '2FA Disabled',
+  '2fa_verified': '2FA Verification Successful',
+  '2fa_failed': '2FA Verification Failed',
+  password_changed: 'Password Changed',
+  // Security: users, roles, invites
+  user_created: 'User Created',
+  user_updated: 'User Updated',
+  user_deleted: 'User Deleted',
+  user_approved: 'User Approved',
+  user_deactivated: 'User Deactivated',
+  user_activated: 'User Activated',
+  role_created: 'Role Created',
+  role_updated: 'Role Updated',
+  role_deleted: 'Role Deleted',
+  role_assigned: 'Role Assigned',
+  role_unassigned: 'Role Unassigned',
+  invite_created: 'Invite Link Created',
+  invite_used: 'Invite Link Used',
+  invite_deleted: 'Invite Link Deleted',
+  // Apps
+  app_installed: 'App Installed',
+  app_uninstalled: 'App Uninstalled',
+  app_started: 'App Started',
+  app_stopped: 'App Stopped',
+  app_restarted: 'App Restarted',
+  app_configured: 'App Configured',
+  // Updates
+  app_updated: 'App Updated',
+  app_update_failed: 'App Update Failed',
+  app_update_rollback_failed: 'App Update Rollback Failed',
+  // System
+  vpn_provider_created: 'VPN Provider Created',
+  vpn_provider_updated: 'VPN Provider Updated',
+  vpn_provider_deleted: 'VPN Provider Deleted',
+  vpn_assigned: 'VPN Assigned to App',
+  vpn_removed: 'VPN Removed from App',
+  system_setting_changed: 'System Setting Changed',
+};
+
+/** Human-readable name for an event type. */
+export function eventLabel(eventType: string): string {
+  return EVENT_LABELS[eventType] ?? eventType.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 /** Unread warnings and criticals: pinned as "Needs you" and counted as Attention. */
 export function needsAttention(n: Notification): boolean {
   return !n.read && (n.severity === 'warning' || n.severity === 'critical');

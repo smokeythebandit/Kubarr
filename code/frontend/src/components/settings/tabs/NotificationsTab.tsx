@@ -2,7 +2,7 @@ import { useRef, useState, type Dispatch, type KeyboardEvent, type ReactNode, ty
 import { Bell } from 'lucide-react';
 import type { NotificationChannel, NotificationEvent, NotificationLog } from '../../../api/notifications';
 import { CountBadge } from '../../notifications/NotificationParts';
-import { CATEGORY_LABELS, CATEGORY_ORDER, categoryOf } from '../../notifications/notificationModel';
+import { CATEGORY_LABELS, CATEGORY_ORDER, categoryOf, eventLabel } from '../../notifications/notificationModel';
 import { channelStatus, CHANNEL_NAMES, unresolvedFailures, type ChannelStatus, type ChannelTestResult } from './notificationChannelStatus';
 import { SettingsTabLayout } from './SettingsTabLayout';
 
@@ -319,7 +319,7 @@ export function NotificationsTab({
                     {eventsByCategory.map(({ cat, events }) => (
                       <CategoryRows key={cat} label={CATEGORY_LABELS[cat]}>
                         {events.map((event) => {
-                          const label = formatAuditAction(event.event_type);
+                          const label = eventLabel(event.event_type);
                           return (
                             <tr key={event.event_type} className="border-b border-gray-200 dark:border-gray-700">
                               <td className="px-3 py-2 font-semibold text-gray-900 dark:text-white">{label}</td>
