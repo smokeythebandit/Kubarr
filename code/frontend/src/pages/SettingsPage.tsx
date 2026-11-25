@@ -1006,6 +1006,7 @@ const SettingsPage: React.FC = () => {
                 getChannelConfigFields={getChannelConfigFields}
                 formatAuditAction={formatAuditAction}
                 canManage={canManageSettings}
+                canViewHistory={canViewAudit}
               />
             )}
 

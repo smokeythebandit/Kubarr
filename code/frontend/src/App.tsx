@@ -12,6 +12,7 @@ import AccountPage from './pages/AccountPage'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import NotFoundPage from './pages/NotFoundPage'
+import NotificationsPage from './pages/NotificationsPage'
 import AppErrorPage from './pages/AppErrorPage'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
@@ -19,8 +20,10 @@ import { MonitoringProvider, useMonitoring } from './contexts/MonitoringContext'
 import { PageTransition } from './components/PageTransition'
 import { InstallAppButton } from './components/InstallAppButton'
 import { sessionLogout } from './api/auth'
-import { Grid3X3, HardDrive, FileText, Activity, Settings, User, LogOut, Ship, ChevronDown, Sun, Moon, Monitor, Network, Menu, X, Shield, Bell, Check, Trash2, AlertCircle, Info, AlertTriangle } from 'lucide-react'
-import { notificationsApi, Notification } from './api/notifications'
+import { Grid3X3, HardDrive, FileText, Activity, Settings, User, LogOut, Ship, ChevronDown, Sun, Moon, Monitor, Network, Menu, X, Shield, Bell } from 'lucide-react'
+import { NotificationBell } from './components/notifications/NotificationBell'
+import { CountBadge } from './components/notifications/NotificationParts'
+import { useNotificationCounts } from './components/notifications/useNotificationCounts'
 
 function ThemeToggle() {
   const { theme, resolvedTheme, setTheme } = useTheme()
@@ -68,230 +71,6 @@ function ThemeToggle() {
               <span>{label}</span>
             </button>
           ))}
-        </div>
-    </div>
-  )
-}
-
-function NotificationInbox() {
-  const { isAuthenticated } = useAuth()
-  const [dropdownOpen, setDropdownOpen] = useState(false)
-  const [notifications, setNotifications] = useState<Notification[]>([])
-  const [unreadCount, setUnreadCount] = useState(0)
-  const [loading, setLoading] = useState(false)
-  const notifRef = useRef<HTMLDivElement>(null)
-
-  // Close on click outside
-  useEffect(() => {
-    if (!dropdownOpen) return
-    const handler = (e: MouseEvent) => {
-      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
-        setDropdownOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [dropdownOpen])
-
-  // Fetch unread count on mount and periodically
-  useEffect(() => {
-    if (!isAuthenticated) return
-
-    const fetchUnreadCount = async () => {
-      try {
-        const count = await notificationsApi.getUnreadCount()
-        setUnreadCount(count)
-      } catch {
-        // Silently fail - not critical
-      }
-    }
-
-    fetchUnreadCount()
-    const interval = setInterval(fetchUnreadCount, 30000) // Every 30 seconds
-    return () => clearInterval(interval)
-  }, [isAuthenticated])
-
-  // Fetch notifications when dropdown opens
-  const handleOpen = async () => {
-    if (!dropdownOpen) {
-      setLoading(true)
-      try {
-        const response = await notificationsApi.getInbox(10, 0)
-        setNotifications(response.notifications)
-        setUnreadCount(response.unread)
-      } catch {
-        // Silently fail
-      } finally {
-        setLoading(false)
-      }
-    }
-    setDropdownOpen(!dropdownOpen)
-  }
-
-  const handleMarkAsRead = async (id: number, e: React.MouseEvent) => {
-    e.stopPropagation()
-    try {
-      await notificationsApi.markAsRead(id)
-      setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n))
-      setUnreadCount(prev => Math.max(0, prev - 1))
-    } catch {
-      // Silently fail
-    }
-  }
-
-  const handleMarkAllAsRead = async () => {
-    try {
-      await notificationsApi.markAllAsRead()
-      setNotifications(prev => prev.map(n => ({ ...n, read: true })))
-      setUnreadCount(0)
-    } catch {
-      // Silently fail
-    }
-  }
-
-  const handleDelete = async (id: number, e: React.MouseEvent) => {
-    e.stopPropagation()
-    try {
-      await notificationsApi.deleteNotification(id)
-      const wasUnread = notifications.find(n => n.id === id && !n.read)
-      setNotifications(prev => prev.filter(n => n.id !== id))
-      if (wasUnread) {
-        setUnreadCount(prev => Math.max(0, prev - 1))
-      }
-    } catch {
-      // Silently fail
-    }
-  }
-
-  const getSeverityIcon = (severity: string) => {
-    switch (severity) {
-      case 'critical':
-        return <AlertCircle size={16} className="text-red-500" />
-      case 'warning':
-        return <AlertTriangle size={16} className="text-yellow-500" />
-      default:
-        return <Info size={16} className="text-blue-500" />
-    }
-  }
-
-  const formatTime = (dateStr: string) => {
-    const date = new Date(dateStr)
-    const now = new Date()
-    const diff = now.getTime() - date.getTime()
-    const minutes = Math.floor(diff / 60000)
-    const hours = Math.floor(diff / 3600000)
-    const days = Math.floor(diff / 86400000)
-
-    if (minutes < 1) return 'Just now'
-    if (minutes < 60) return `${minutes}m ago`
-    if (hours < 24) return `${hours}h ago`
-    if (days < 7) return `${days}d ago`
-    return date.toLocaleDateString()
-  }
-
-  if (!isAuthenticated) return null
-
-  return (
-    <div ref={notifRef} className="relative">
-      <button
-        onClick={handleOpen}
-        className="relative flex items-center justify-center w-9 h-9 rounded-md text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-        title="Notifications"
-      >
-        <Bell size={18} strokeWidth={2} />
-        {unreadCount > 0 && (
-          <span className="absolute -top-1 -right-1 flex items-center justify-center min-w-[18px] h-[18px] px-1 text-xs font-bold text-white bg-red-500 rounded-full">
-            {unreadCount > 99 ? '99+' : unreadCount}
-          </span>
-        )}
-      </button>
-      <div className={`absolute top-full right-0 mt-1 w-80 bg-white dark:bg-gray-800 border border-gray-200/60 dark:border-gray-700/60 rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.1)] dark:shadow-[0_8px_24px_rgba(0,0,0,0.4)] z-50 overflow-hidden transition-all duration-200 ease-out origin-top-right ${
-        dropdownOpen
-          ? 'opacity-100 scale-100 translate-y-0 pointer-events-auto'
-          : 'opacity-0 scale-95 -translate-y-1 pointer-events-none'
-      }`}>
-          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-            <h3 className="font-semibold text-gray-900 dark:text-white">Notifications</h3>
-            {unreadCount > 0 && (
-              <button
-                onClick={handleMarkAllAsRead}
-                className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
-              >
-                Mark all as read
-              </button>
-            )}
-          </div>
-          <div className="max-h-80 overflow-y-auto">
-            {loading ? (
-              <div className="flex items-center justify-center py-8">
-                <div className="text-gray-500 dark:text-gray-400">Loading...</div>
-              </div>
-            ) : notifications.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-8 text-gray-500 dark:text-gray-400">
-                <Bell size={24} className="mb-2 opacity-50" />
-                <span>No notifications</span>
-              </div>
-            ) : (
-              notifications.map(notification => (
-                <div
-                  key={notification.id}
-                  className={`px-4 py-3 border-b border-gray-100 dark:border-gray-700 last:border-b-0 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors ${
-                    !notification.read ? 'bg-blue-50 dark:bg-blue-900/20' : ''
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5">
-                      {getSeverityIcon(notification.severity)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-2">
-                        <h4 className={`text-sm font-medium truncate ${
-                          !notification.read
-                            ? 'text-gray-900 dark:text-white'
-                            : 'text-gray-700 dark:text-gray-300'
-                        }`}>
-                          {notification.title}
-                        </h4>
-                        <div className="flex items-center gap-1 flex-shrink-0">
-                          {!notification.read && (
-                            <button
-                              onClick={(e) => handleMarkAsRead(notification.id, e)}
-                              className="p-1 text-gray-400 hover:text-green-500 transition-colors"
-                              title="Mark as read"
-                            >
-                              <Check size={14} />
-                            </button>
-                          )}
-                          <button
-                            onClick={(e) => handleDelete(notification.id, e)}
-                            className="p-1 text-gray-400 hover:text-red-500 transition-colors"
-                            title="Delete"
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                      </div>
-                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 line-clamp-2">
-                        {notification.message}
-                      </p>
-                      <span className="text-xs text-gray-400 dark:text-gray-500 mt-1 block">
-                        {formatTime(notification.created_at)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-          <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
-            <Link
-              to="/account"
-              className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
-              onClick={() => setDropdownOpen(false)}
-            >
-              Notification preferences
-            </Link>
-          </div>
         </div>
     </div>
   )
@@ -433,6 +212,14 @@ function Navigation() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [mobileSystemOpen, setMobileSystemOpen] = useState(false)
   const { clusterMetrics } = useMonitoring()
+  const notificationCounts = useNotificationCounts()
+  const notificationBadge = notificationCounts.count > 0 && (
+    <CountBadge
+      value={notificationCounts.count}
+      kind={notificationCounts.critical > 0 ? 'crit' : 'accent'}
+      label={`${notificationCounts.count} unread${notificationCounts.critical ? `, ${notificationCounts.critical} critical` : ''}`}
+    />
+  )
 
   const isActive = (path: string) => location.pathname === path
 
@@ -459,7 +246,7 @@ function Navigation() {
   }, [])
 
   // Determine which path is active for the indicator
-  const activePath = ['/', '/apps', '/settings'].find(p => isActive(p))
+  const activePath = ['/', '/apps', '/notifications', '/settings'].find(p => isActive(p))
     || (['/storage', '/logs', '/resources', '/networking', '/security'].includes(location.pathname) ? '__system' : null)
 
   useLayoutEffect(() => {
@@ -475,7 +262,8 @@ function Navigation() {
       left: elRect.left - containerRect.left,
       width: elRect.width,
     })
-  }, [activePath, location.pathname])
+    // The notifications badge changes the nav width, so re-measure when it does.
+  }, [activePath, location.pathname, notificationCounts.count])
 
   const handleLogout = async () => {
     setMobileMenuOpen(false)
@@ -667,6 +455,19 @@ function Navigation() {
                   </div>
               </div>
             )}
+            <Link
+              ref={setNavRef('/notifications')}
+              to="/notifications"
+              className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
+                isActive('/notifications')
+                  ? 'text-blue-700 dark:text-blue-300'
+                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100/80 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-white'
+              }`}
+            >
+              <Bell size={18} strokeWidth={2} />
+              <span>Notifications</span>
+              {notificationBadge}
+            </Link>
             {canViewSettings && (
               <Link
                 ref={setNavRef('/settings')}
@@ -682,7 +483,7 @@ function Navigation() {
               </Link>
             )}
             <div className="flex items-center gap-2 ml-4 border-l border-gray-200 dark:border-gray-700 pl-4">
-              <NotificationInbox />
+              <NotificationBell />
               <UserMenu />
               <ThemeToggle />
             </div>
@@ -822,6 +623,19 @@ function Navigation() {
               </div>
             )}
 
+            <Link
+              to="/notifications"
+              className={`flex items-center gap-3 px-4 py-3 rounded-md text-base font-medium transition-colors ${
+                isActive('/notifications')
+                  ? 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-white'
+                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+            >
+              <Bell size={20} strokeWidth={2} />
+              <span>Notifications</span>
+              {notificationBadge}
+            </Link>
+
             {canViewSettings && (
               <Link
                 to="/settings"
@@ -931,6 +745,7 @@ function AppContent() {
                   <Route path="/resources" element={<MonitoringPage />} />
                   <Route path="/networking" element={<NetworkingPage />} />
                   <Route path="/security" element={<SecurityPage />} />
+                  <Route path="/notifications" element={<NotificationsPage />} />
                   <Route path="/app-error" element={<AppErrorPage />} />
                   <Route path="*" element={<NotFoundPage />} />
                 </Routes>

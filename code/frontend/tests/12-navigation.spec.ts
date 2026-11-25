@@ -65,10 +65,10 @@ test.describe('Global Navigation', () => {
       await expect(page.locator('text=Notifications')).toBeVisible();
     });
 
-    test('notification preferences link is present', async ({ page }) => {
+    test('open notifications link is present', async ({ page }) => {
       const bellButton = page.locator('nav button').filter({ has: page.locator('svg.lucide-bell') }).first();
       await bellButton.click();
-      await expect(page.locator('text=Notification preferences')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('link', { name: 'Open notifications' })).toBeVisible({ timeout: 5000 });
     });
   });
 
