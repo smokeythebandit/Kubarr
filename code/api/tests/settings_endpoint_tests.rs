@@ -857,6 +857,19 @@ async fn login_as(role: &str, name: &str) -> (axum::Router, String) {
     )
 }
 
+/// The default schedule: hours 04 and 05 on every day.
+fn default_schedule() -> serde_json::Value {
+    let day: Vec<bool> = (0..24).map(|h| h == 4 || h == 5).collect();
+    serde_json::json!(vec![day; 7])
+}
+
+fn settings_body(schedule: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": true, "schedule": schedule,
+        "timezone": "UTC", "health_timeout_minutes": 10
+    })
+}
+
 #[tokio::test]
 async fn test_update_settings_defaults_and_roundtrip() {
     let (app, cookie) = login_as("admin", "updadmin").await;
@@ -864,25 +877,48 @@ async fn test_update_settings_defaults_and_roundtrip() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["enabled"], true);
-    assert_eq!(json["window_start"], "04:00");
-    assert_eq!(json["window_minutes"], 120);
+    assert_eq!(json["schedule"], default_schedule());
     assert_eq!(json["timezone"], "UTC");
+    assert_eq!(json["timezone_saved"], false);
     assert_eq!(json["health_timeout_minutes"], 10);
+    assert!(json.get("window_start").is_none());
     assert!(json["next_window_start"].as_str().unwrap().ends_with('Z'));
 
+    // Weekdays 22:00-23:59 plus Sunday 03:00.
+    let mut schedule = vec![vec![false; 24]; 7];
+    for day in schedule.iter_mut().take(5) {
+        day[22] = true;
+        day[23] = true;
+    }
+    schedule[6][3] = true;
     let put = serde_json::json!({
-        "enabled": false, "window_start": "23:00", "window_minutes": 180,
+        "enabled": false, "schedule": schedule,
         "timezone": "Europe/Amsterdam", "health_timeout_minutes": 20
     })
     .to_string();
     let (status, body) =
         authenticated_put(app.clone(), "/api/updates/settings", &cookie, &put).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["schedule"], serde_json::json!(schedule));
     let (_, body) = authenticated_get(app, "/api/updates/settings", &cookie).await;
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["enabled"], false);
     assert_eq!(json["timezone"], "Europe/Amsterdam");
-    assert_eq!(json["window_minutes"], 180);
+    assert_eq!(json["timezone_saved"], true);
+    assert_eq!(json["health_timeout_minutes"], 20);
+    assert_eq!(json["schedule"], serde_json::json!(schedule));
+}
+
+#[tokio::test]
+async fn test_update_settings_empty_schedule_has_no_next_window() {
+    let (app, cookie) = login_as("admin", "updadminempty").await;
+    let body = settings_body(serde_json::json!(vec![vec![false; 24]; 7])).to_string();
+    let (status, text) =
+        authenticated_put(app.clone(), "/api/updates/settings", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(json["next_window_start"].is_null(), "{text}");
 }
 
 #[tokio::test]
@@ -890,17 +926,22 @@ async fn test_update_settings_rejects_invalid_with_field_message() {
     let (app, cookie) = login_as("admin", "updadminbad").await;
     for (patch, field) in [
         (serde_json::json!({"timezone": "Nowhere/Land"}), "timezone"),
-        (serde_json::json!({"window_start": "25:61"}), "window_start"),
-        (serde_json::json!({"window_minutes": 5}), "window_minutes"),
+        (
+            serde_json::json!({"schedule": vec![vec![true; 24]; 6]}),
+            "schedule",
+        ),
+        (
+            serde_json::json!({"schedule": vec![vec![true; 23]; 7]}),
+            "schedule",
+        ),
+        (serde_json::json!({"schedule": []}), "schedule"),
         (
             serde_json::json!({"health_timeout_minutes": 99}),
             "health_timeout_minutes",
         ),
     ] {
-        let mut body = serde_json::json!({
-            "enabled": true, "window_start": "04:00", "window_minutes": 120,
-            "timezone": "UTC", "health_timeout_minutes": 10
-        });
+        let mut body = settings_body(default_schedule());
+        body["enabled"] = serde_json::json!(false);
         body.as_object_mut()
             .unwrap()
             .extend(patch.as_object().unwrap().clone());
@@ -914,6 +955,12 @@ async fn test_update_settings_rejects_invalid_with_field_message() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {text}");
         assert!(text.contains(field), "{field}: {text}");
     }
+    // Nothing was written: still the untouched defaults.
+    let (_, body) = authenticated_get(app, "/api/updates/settings", &cookie).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["enabled"], true);
+    assert_eq!(json["timezone_saved"], false);
+    assert_eq!(json["schedule"], default_schedule());
 }
 
 #[tokio::test]
@@ -925,7 +972,7 @@ async fn test_update_settings_permissions() {
         app,
         "/api/updates/settings",
         &cookie,
-        r#"{"enabled":false,"window_start":"04:00","window_minutes":120,"timezone":"UTC","health_timeout_minutes":10}"#,
+        &settings_body(default_schedule()).to_string(),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);

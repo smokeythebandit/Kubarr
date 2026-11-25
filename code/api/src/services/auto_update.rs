@@ -1,5 +1,5 @@
-//! Leader-only loop that applies eligible chart updates inside the owner's
-//! window, one app at a time. The operation itself (verify, rollback,
+//! Leader-only loop that applies eligible chart updates during the owner's
+//! scheduled hours, one app at a time. The operation itself (verify, rollback,
 //! notifications) runs in the worker; this loop only decides what to enqueue.
 
 use std::collections::HashSet;
@@ -19,7 +19,7 @@ use crate::services::app_manager::{
 };
 use crate::services::auto_update_settings;
 use crate::services::catalog::AppCatalog;
-use crate::services::update_policy::{auto_eligible, update_kind, window_bounds};
+use crate::services::update_policy::{auto_eligible, update_kind};
 use crate::state::SharedCatalog;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -133,10 +133,9 @@ pub async fn tick<C: ConnectionTrait>(
     if !settings.enabled {
         return Ok(TickResult::Disabled);
     }
-    let in_window = settings
-        .window()
-        .is_some_and(|window| window_bounds(&window, now).is_some());
-    if !in_window {
+    // Only start updates while the current local hour is enabled; one that
+    // is already running may finish after the schedule closes.
+    if !settings.is_open(now) {
         return Ok(TickResult::OutsideWindow);
     }
     let auto_in_flight = app_operation::Entity::find()
@@ -207,7 +206,7 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
-    /// Inside the default 04:00 UTC, 120 minute window.
+    /// Inside the default schedule (hours 04-05 UTC daily).
     fn in_window() -> DateTime<Utc> {
         utc("2026-11-25T04:30:00Z")
     }
@@ -343,12 +342,38 @@ mod tests {
             f.tick(utc("2026-11-25T12:00:00Z")).await,
             TickResult::OutsideWindow
         );
-        // Just after the 120 minute window ends.
+        // Just after the default hours 04-05 end.
         assert_eq!(
             f.tick(utc("2026-11-25T06:00:00Z")).await,
             TickResult::OutsideWindow
         );
         assert!(f.ops("alpha").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tick_follows_custom_schedule() {
+        let f = fixture().await;
+        f.state("alpha", "1.0.0+1", "1.0.1+1").await;
+        // Only Wednesday 14:00 (2026-11-25 is a Wednesday, day 2).
+        let mut schedule = vec![vec![false; 24]; 7];
+        schedule[2][14] = true;
+        let custom = AutoUpdateSettings {
+            schedule,
+            ..Default::default()
+        };
+        auto_update_settings::save(f.db(), &custom, None)
+            .await
+            .unwrap();
+        assert_eq!(f.tick(in_window()).await, TickResult::OutsideWindow);
+        assert_eq!(
+            f.tick(utc("2026-11-26T14:30:00Z")).await,
+            TickResult::OutsideWindow,
+            "Thursday 14:00 is closed"
+        );
+        assert_eq!(
+            f.tick(utc("2026-11-25T14:30:00Z")).await,
+            TickResult::Enqueued("alpha".into())
+        );
     }
 
     #[tokio::test]

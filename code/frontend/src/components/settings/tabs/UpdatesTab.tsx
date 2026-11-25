@@ -4,6 +4,9 @@ import { useAuth } from '../../../contexts/AuthContext';
 import { updatesApi } from '../../../api/updates';
 import type { UpdateSettingsResponse } from '../../../api/updates';
 import { SettingsCard, SettingsTabLayout } from './SettingsTabLayout';
+import { WeekScheduleGrid } from '../WeekScheduleGrid';
+import { countHours, normalizeSchedule, presetSchedule } from '../weekSchedule';
+import type { WeekSchedule } from '../weekSchedule';
 
 const inputClass = 'w-full px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-60';
 
@@ -40,8 +43,7 @@ export function UpdatesTab() {
   const canManage = useAuth().hasPermission('settings.manage');
   const [saved, setSaved] = useState<UpdateSettingsResponse | null>(null);
   const [enabled, setEnabled] = useState(true);
-  const [windowStart, setWindowStart] = useState('04:00');
-  const [windowMinutes, setWindowMinutes] = useState('120');
+  const [schedule, setSchedule] = useState<WeekSchedule>(() => presetSchedule('nightly'));
   const [timezone, setTimezone] = useState('UTC');
   const [healthTimeout, setHealthTimeout] = useState('10');
   const [loading, setLoading] = useState(true);
@@ -53,8 +55,7 @@ export function UpdatesTab() {
   const apply = (s: UpdateSettingsResponse, preselectBrowserZone: boolean) => {
     setSaved(s);
     setEnabled(s.enabled);
-    setWindowStart(s.window_start);
-    setWindowMinutes(String(s.window_minutes));
+    setSchedule(normalizeSchedule(s.schedule));
     setHealthTimeout(String(s.health_timeout_minutes));
     // Until an owner saves a zone the server's UTC is only a default:
     // start from the zone this browser is in.
@@ -83,8 +84,7 @@ export function UpdatesTab() {
     try {
       const result = await updatesApi.saveSettings({
         enabled,
-        window_start: windowStart,
-        window_minutes: Number(windowMinutes),
+        schedule,
         timezone,
         health_timeout_minutes: Number(healthTimeout),
       });
@@ -103,7 +103,7 @@ export function UpdatesTab() {
   return (
     <SettingsTabLayout
       title="Updates"
-      description="Apps are updated automatically once a night. Patch and minor chart updates are applied; major updates always wait for you. If an app is unhealthy after an update, Kubarr rolls it back."
+      description="Apps are updated automatically during the hours you choose, one app at a time. Patch and minor chart updates are applied; major updates always wait for you. If an app is unhealthy after an update, Kubarr rolls it back."
     >
       {loadError && <div className="p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded-lg text-sm">{loadError}</div>}
       {loading ? (
@@ -117,7 +117,7 @@ export function UpdatesTab() {
                 <div className="text-sm text-gray-500 dark:text-gray-400 mt-1">
                   {saved.enabled && saved.next_window_start
                     ? `Next window: ${formatNextWindow(saved.next_window_start, saved.timezone)}`
-                    : saved.enabled ? 'Enabled' : 'Automatic updates are off'}
+                    : saved.enabled ? 'No update hours selected' : 'Automatic updates are off'}
                 </div>
               </div>
               <button
@@ -133,15 +133,23 @@ export function UpdatesTab() {
               </button>
             </div>
 
+            <WeekScheduleGrid
+              schedule={schedule}
+              onChange={setSchedule}
+              timezone={timezone}
+              active={enabled}
+              readOnly={disabled}
+            />
+            {enabled && countHours(schedule) === 0 && (
+              <div className="p-3 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200 rounded-lg text-sm">
+                No hours selected — automatic updates won&apos;t run.
+              </div>
+            )}
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              An update that starts inside a window is always allowed to finish, including its health check and a rollback if needed, even when that runs past the end of the window. Major updates never run automatically.
+            </p>
+
             <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label htmlFor="update-window-start" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Window start</label>
-                <input id="update-window-start" type="time" required value={windowStart} onChange={(e) => setWindowStart(e.target.value)} disabled={disabled} className={inputClass} />
-              </div>
-              <div>
-                <label htmlFor="update-window-minutes" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Window length (minutes)</label>
-                <input id="update-window-minutes" type="number" required min={30} max={720} value={windowMinutes} onChange={(e) => setWindowMinutes(e.target.value)} disabled={disabled} className={inputClass} />
-              </div>
               <div>
                 <label htmlFor="update-timezone" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Timezone</label>
                 <select id="update-timezone" value={timezone} onChange={(e) => setTimezone(e.target.value)} disabled={disabled} className={inputClass}>
