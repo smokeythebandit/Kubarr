@@ -140,6 +140,100 @@ describe('DestinationRow', () => {
   });
 });
 
+describe('DestinationRow review fixes', () => {
+  it('normalizes pasted and typed codes to six digits', () => {
+    render(<DestinationRow initial={pref({ verification_pending: true })} />);
+    const input = screen.getByLabelText('Verification code');
+    expect(input).not.toHaveAttribute('maxlength');
+
+    fireEvent.paste(input, { clipboardData: { getData: () => '123 - 456' } });
+    expect(input).toHaveValue('123456');
+
+    fireEvent.change(input, { target: { value: 'Code: 98-76 54 32' } });
+    expect(input).toHaveValue('987654');
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled();
+
+    fireEvent.change(input, { target: { value: '12a3' } });
+    expect(input).toHaveValue('123');
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
+  });
+
+  it('moves focus to the code input after sending and announces it', async () => {
+    api.startVerification.mockResolvedValue({ destination: '123***89', expires_in_seconds: 600, resend_after_seconds: 60 });
+    render(<DestinationRow initial={pref()} />);
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent('');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
+    await flush();
+
+    expect(screen.getByLabelText('Verification code')).toHaveFocus();
+    expect(screen.getByRole('status')).toBe(status);
+    expect(status).toHaveTextContent('Code sent to 123***89');
+  });
+
+  it('closes the form and resyncs when the server asks for a new code', async () => {
+    api.confirmVerification.mockRejectedValue(httpError(400, 'The verification code has expired; request a new code'));
+    api.getPreferences.mockResolvedValue([pref({ verification_pending: false })]);
+    render(<DestinationRow initial={pref({ verification_pending: true })} />);
+
+    fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await flush();
+    await flush();
+
+    expect(api.getPreferences).toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('expired');
+    expect(screen.queryByLabelText('Verification code')).not.toBeInTheDocument();
+    expect(screen.getByText('Not verified')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send code' })).toBeEnabled();
+  });
+
+  it('saves with the current toggle state', async () => {
+    api.startVerification.mockResolvedValue({ destination: '123***89', expires_in_seconds: 600, resend_after_seconds: 60 });
+    api.updatePreference.mockResolvedValue(pref({ enabled: false, verification_pending: true }));
+    render(<DestinationRow initial={pref({ enabled: false })} />);
+
+    fireEvent.change(screen.getByLabelText('Chat ID'), { target: { value: '123456789' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await flush();
+    expect(api.updatePreference).toHaveBeenCalledWith('telegram', { enabled: false, destination: '123456789' });
+  });
+
+  it('re-saving the same destination keeps "Code sent to"', async () => {
+    api.startVerification.mockResolvedValue({ destination: '123***89', expires_in_seconds: 600, resend_after_seconds: 60 });
+    api.updatePreference.mockResolvedValue(pref({ verification_pending: true }));
+    render(<DestinationRow initial={pref()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
+    await flush();
+
+    fireEvent.change(screen.getByLabelText('Chat ID'), { target: { value: '123456789' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await flush();
+    expect(screen.getByRole('status')).toHaveTextContent('Code sent to 123***89');
+    expect(screen.getByLabelText('Verification code')).toBeInTheDocument();
+  });
+
+  it('hides the code form when the channel is switched off', async () => {
+    api.updatePreference.mockResolvedValue(pref({ enabled: false, verification_pending: true }));
+    render(<DestinationRow initial={pref({ verification_pending: true })} />);
+    expect(screen.getByLabelText('Verification code')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('switch', { name: 'Telegram notifications' }));
+    await flush();
+    expect(screen.queryByLabelText('Verification code')).not.toBeInTheDocument();
+  });
+
+  it('gives the saving button an accessible name', async () => {
+    let resolve: (p: UserNotificationPref) => void = () => {};
+    api.updatePreference.mockReturnValue(new Promise((r) => (resolve = r)));
+    render(<DestinationRow initial={pref()} />);
+    fireEvent.change(screen.getByLabelText('Chat ID'), { target: { value: '5550001' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.getByRole('button', { name: 'Saving' })).toBeDisabled();
+    await act(async () => resolve(pref()));
+  });
+});
+
 describe('NotificationDestinations', () => {
   it('renders one row per channel', async () => {
     api.getPreferences.mockResolvedValue([

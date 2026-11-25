@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Bell, Loader2 } from 'lucide-react';
 import { notificationsApi, type UserNotificationPref } from '../../api/notifications';
-import { errorDetail, retryAfterSeconds } from './verificationErrors';
+import { errorDetail, needsNewCode, normalizeCodeInput, retryAfterSeconds } from './verificationErrors';
 
 // The signed-in user's own notification destinations. External channels only
 // deliver to a destination after the user confirms a code sent to it.
@@ -49,6 +49,8 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
   const [busy, setBusy] = useState<'save' | 'toggle' | 'send' | 'confirm' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cooldown, startCooldown] = useCountdown();
+  const [focusCode, setFocusCode] = useState(false);
+  const codeRef = useRef<HTMLInputElement>(null);
   const id = `dest-${pref.channel_type}`;
 
   const resetVerification = () => {
@@ -62,8 +64,12 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
     setBusy('save');
     setError(null);
     try {
-      const updated = await notificationsApi.updatePreference(pref.channel_type, { enabled: true, destination: value });
-      if (!updated.verified) resetVerification();
+      const updated = await notificationsApi.updatePreference(pref.channel_type, {
+        enabled: pref.enabled,
+        destination: value,
+      });
+      // The server clears the pending code only when the destination changed.
+      if (!updated.verification_pending) resetVerification();
       setPref(updated);
       setDestination('');
     } catch (err) {
@@ -93,6 +99,7 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
       setSentTo(res.destination);
       setPref((p) => ({ ...p, verification_pending: true }));
       startCooldown(res.resend_after_seconds);
+      setFocusCode(true);
     } catch (err) {
       const wait = retryAfterSeconds(err);
       if (wait) startCooldown(wait);
@@ -104,7 +111,7 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
 
   const confirm = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!code.trim()) return;
+    if (code.length !== 6) return;
     setBusy('confirm');
     setError(null);
     try {
@@ -112,6 +119,16 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
       resetVerification();
     } catch (err) {
       setError(errorDetail(err, 'Could not confirm the code'));
+      if (needsNewCode(err)) {
+        // The pending code is gone server-side; resync so the form closes.
+        resetVerification();
+        try {
+          const fresh = (await notificationsApi.getPreferences()).find((p) => p.channel_type === pref.channel_type);
+          setPref((p) => fresh ?? { ...p, verification_pending: false });
+        } catch {
+          setPref((p) => ({ ...p, verification_pending: false }));
+        }
+      }
     } finally {
       setBusy(null);
     }
@@ -120,7 +137,15 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
   const chip = chipFor(pref);
   const hasDestination = !!pref.destination;
   const canSend = pref.enabled && hasDestination && !pref.verified && cooldown === 0 && busy === null;
-  const showCodeForm = !pref.verified && (pref.verification_pending || sentTo !== null);
+  const showCodeForm = pref.enabled && !pref.verified && (pref.verification_pending || sentTo !== null);
+
+  // The code input mounts after a successful send; move focus to it then.
+  useEffect(() => {
+    if (focusCode && showCodeForm) {
+      codeRef.current?.focus();
+      setFocusCode(false);
+    }
+  }, [focusCode, showCodeForm]);
 
   return (
     <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 p-4 space-y-3" data-testid={id}>
@@ -136,7 +161,7 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
           role="switch"
           aria-checked={pref.enabled}
           aria-label={`${meta.label} notifications`}
-          disabled={busy !== null || (!hasDestination && !pref.enabled)}
+          disabled={busy !== null}
           onClick={toggle}
           className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50 ${
             pref.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
@@ -168,7 +193,14 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
           disabled={busy !== null || !destination.trim()}
           className="rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
         >
-          {busy === 'save' ? <Loader2 size={16} className="animate-spin" aria-label="Saving" /> : 'Save'}
+          {busy === 'save' ? (
+            <>
+              <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+              <span className="sr-only">Saving</span>
+            </>
+          ) : (
+            'Save'
+          )}
         </button>
       </div>
 
@@ -187,12 +219,17 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
             {busy === 'send' ? 'Sending…' : cooldown > 0 ? `Send code (${cooldown}s)` : pref.verification_pending ? 'Send new code' : 'Send code'}
           </button>
           {sentTo && (
-            <span className="text-sm text-gray-600 dark:text-gray-400" role="status">
+            <span className="text-sm text-gray-600 dark:text-gray-400" aria-hidden="true">
               Code sent to {sentTo}
             </span>
           )}
         </div>
       )}
+
+      {/* Always mounted (visually hidden) so screen readers announce new text. */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {sentTo && !pref.verified ? `Code sent to ${sentTo}` : ''}
+      </p>
 
       {showCodeForm && (
         <form onSubmit={confirm} className="flex flex-wrap items-end gap-2">
@@ -200,18 +237,22 @@ export function DestinationRow({ initial }: { initial: UserNotificationPref }) {
             Verification code
             <input
               id={`${id}-code`}
+              ref={codeRef}
               value={code}
-              onChange={(e) => setCode(e.target.value)}
+              onChange={(e) => setCode(normalizeCodeInput(e.target.value))}
+              onPaste={(e) => {
+                e.preventDefault();
+                setCode(normalizeCodeInput(e.clipboardData.getData('text')));
+              }}
               inputMode="numeric"
               autoComplete="one-time-code"
-              maxLength={7}
               placeholder="123456"
               className="w-32 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm tracking-widest text-gray-900 dark:text-white"
             />
           </label>
           <button
             type="submit"
-            disabled={busy !== null || !code.trim()}
+            disabled={busy !== null || code.length !== 6}
             className="rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
           >
             {busy === 'confirm' ? 'Confirming…' : 'Confirm'}
