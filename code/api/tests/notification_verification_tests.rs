@@ -495,7 +495,10 @@ async fn failed_send_returns_502_and_leaves_no_pending_code() {
     set_destination(&ctx, "123456789").await;
     let (status, json) = start(&ctx).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
-    assert!(json["detail"].as_str().unwrap().contains("stub failure"));
+    // The provider's error text (which may echo the destination) is not returned.
+    let detail = json["detail"].as_str().unwrap();
+    assert!(!detail.contains("stub failure"), "{detail}");
+    assert!(detail.contains("Could not send the verification code"));
     assert_eq!(telegram_pref(&ctx).await["verification_pending"], false);
     let code = ctx.capture.last_code();
     assert_eq!(confirm(&ctx, &code).await.0, StatusCode::BAD_REQUEST);
@@ -626,4 +629,125 @@ async fn events_endpoint_lists_enum_derived_types() {
         .find(|e| e["event_type"] == "app_update_rollback_failed")
         .unwrap();
     assert_eq!(failed["severity"], "critical");
+}
+
+#[tokio::test]
+async fn rate_limited_start_sets_retry_after() {
+    let ctx = setup().await;
+    set_destination(&ctx, "123456789").await;
+    assert_eq!(start(&ctx).await.0, StatusCode::OK);
+    let response = create_router(ctx.state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/notifications/preferences/telegram/verify/start")
+                .method("POST")
+                .header("Cookie", &ctx.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .expect("Retry-After header")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&retry), "retry after {retry}");
+}
+
+#[tokio::test]
+async fn parallel_first_starts_never_500() {
+    let ctx = setup().await;
+    set_destination(&ctx, "123456789").await;
+    let (a, b) = tokio::join!(start(&ctx), start(&ctx));
+    let mut statuses = [a.0, b.0];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS],
+        "{a:?} {b:?}"
+    );
+    assert_eq!(ctx.capture.messages().len(), 1);
+}
+
+#[tokio::test]
+async fn destination_changed_between_check_and_save_is_not_verified() {
+    use kubarr::models::user_notification_pref;
+    use kubarr::services::notification::verification;
+
+    let ctx = setup().await;
+    set_destination(&ctx, "123456789").await;
+    // The confirm handler checked a code bound to 123456789 ...
+    let pref = user_notification_pref::Entity::find()
+        .filter(user_notification_pref::Column::UserId.eq(ctx.user_id))
+        .filter(user_notification_pref::Column::ChannelType.eq("telegram"))
+        .one(&ctx.db)
+        .await
+        .unwrap()
+        .unwrap();
+    // ... and a concurrent PUT switched the destination before the save.
+    set_destination(&ctx, "987654321").await;
+
+    let saved = verification::mark_verified(&ctx.db, pref.id, ctx.user_id, "telegram", "123456789")
+        .await
+        .unwrap();
+    assert!(!saved, "stale destination must not be verified");
+    assert_eq!(telegram_pref(&ctx).await["verified"], false);
+
+    // The current destination still verifies normally.
+    assert!(
+        verification::mark_verified(&ctx.db, pref.id, ctx.user_id, "telegram", "987654321")
+            .await
+            .unwrap()
+    );
+    assert_eq!(telegram_pref(&ctx).await["verified"], true);
+}
+
+#[tokio::test]
+async fn stale_enabled_noise_event_does_not_dispatch() {
+    let ctx = setup().await;
+    set_destination(&ctx, "123456789").await;
+    assert_eq!(start(&ctx).await.0, StatusCode::OK);
+    let code = ctx.capture.last_code();
+    assert_eq!(confirm(&ctx, &code).await.0, StatusCode::OK);
+
+    for event in ["app_accessed", "api_access", "token_refresh"] {
+        notification_event::ActiveModel {
+            event_type: Set(event.to_string()),
+            enabled: Set(true),
+            severity: Set("info".to_string()),
+            ..Default::default()
+        }
+        .insert(&ctx.db)
+        .await
+        .ok();
+    }
+    for action in [
+        AuditAction::AppAccessed,
+        AuditAction::ApiAccess,
+        AuditAction::TokenRefresh,
+    ] {
+        ctx.state
+            .notification
+            .notify_event(&action, Some(ctx.user_id), Some("verifier"), None)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        ctx.state
+            .notification
+            .get_unread_count(ctx.user_id)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        ctx.capture.messages().len(),
+        1,
+        "only the verification code"
+    );
 }

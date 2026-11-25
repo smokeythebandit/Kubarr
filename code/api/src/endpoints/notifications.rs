@@ -5,7 +5,7 @@ use axum::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 
@@ -670,7 +670,9 @@ async fn update_preference(
         .one(&db)
         .await?;
 
-    let mut destination_changed = false;
+    // Clearing the pending code and changing the destination commit together, so
+    // a code sent to the old destination never outlives the change.
+    let txn = db.begin().await?;
     let pref = if let Some(existing) = existing {
         let mut active: user_notification_pref::ActiveModel = existing.clone().into();
 
@@ -680,16 +682,16 @@ async fn update_preference(
         if let Some(destination) = req.destination {
             // If destination changed, reset verification
             if Some(&destination) != existing.destination.as_ref() {
+                verification::clear_code(&txn, auth.user_id(), &channel_type).await?;
                 active.destination = Set(Some(destination));
                 active.verified = Set(false);
-                destination_changed = true;
             }
         }
         active.updated_at = Set(now);
 
-        active.update(&db).await?
+        active.update(&txn).await?
     } else {
-        destination_changed = true;
+        verification::clear_code(&txn, auth.user_id(), &channel_type).await?;
         let new_pref = user_notification_pref::ActiveModel {
             user_id: Set(auth.user_id()),
             channel_type: Set(channel_type.clone()),
@@ -700,13 +702,10 @@ async fn update_preference(
             updated_at: Set(now),
             ..Default::default()
         };
-        new_pref.insert(&db).await?
+        new_pref.insert(&txn).await?
     };
+    txn.commit().await?;
 
-    // A code sent to the old destination must not verify the new one.
-    if destination_changed {
-        verification::clear_code(&db, auth.user_id(), &channel_type).await?;
-    }
     let pending = verification::pending_channels(&db, auth.user_id(), now)
         .await?
         .contains(&pref.channel_type);
@@ -826,7 +825,7 @@ async fn start_verification(
 
     let now = chrono::Utc::now();
     if let Err(e) = verification::reserve_send(&db, auth.user_id(), &channel_type, now).await {
-        if matches!(e, AppError::TooManyRequests(_)) {
+        if matches!(e, AppError::TooManyRequests { .. }) {
             audit_verification(
                 &state,
                 &auth,
@@ -864,10 +863,17 @@ async fn start_verification(
             Some("send_failed"),
         )
         .await;
-        return Err(AppError::BadGateway(format!(
-            "Could not send the verification code: {}",
-            sent.error.unwrap_or_else(|| "unknown error".to_string())
-        )));
+        tracing::warn!(
+            user_id = auth.user_id(),
+            channel_type = %channel_type,
+            error = sent.error.as_deref().unwrap_or("unknown error"),
+            "Verification code delivery failed"
+        );
+        return Err(AppError::BadGateway(
+            "Could not send the verification code. Check the destination, or ask an \
+             administrator to check the channel configuration."
+                .to_string(),
+        ));
     }
 
     audit_verification(&state, &auth, action, &channel_type, Some(&masked), None).await;
@@ -929,12 +935,28 @@ async fn confirm_verification(
 
     let (reason, message) = match outcome {
         CheckOutcome::Verified => {
-            let mut active: user_notification_pref::ActiveModel = pref.into();
-            active.verified = Set(true);
-            active.updated_at = Set(chrono::Utc::now());
-            let pref = active.update(&db).await?;
-            audit_verification(&state, &auth, action, &channel_type, Some(&masked), None).await;
-            return Ok(Json(UserPrefDto::from_model(pref, false)));
+            // Conditional on the destination the code was bound to: a concurrent
+            // destination change between check and save must not be verified.
+            if verification::mark_verified(
+                &db,
+                pref.id,
+                auth.user_id(),
+                &channel_type,
+                &destination,
+            )
+            .await?
+            {
+                let pref = user_notification_pref::Entity::find_by_id(pref.id)
+                    .one(&db)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("Preference not found".to_string()))?;
+                audit_verification(&state, &auth, action, &channel_type, Some(&masked), None).await;
+                return Ok(Json(UserPrefDto::from_model(pref, false)));
+            }
+            (
+                "destination_changed",
+                "The destination changed; request a new code".to_string(),
+            )
         }
         CheckOutcome::NoPendingCode => (
             "no_pending_code",

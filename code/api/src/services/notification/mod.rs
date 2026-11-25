@@ -312,6 +312,12 @@ impl NotificationService {
             None => return Ok(()), // Silently skip if DB not initialized
         };
 
+        // Noise types are not configurable in the UI, so a stale enabled row must
+        // not dispatch them.
+        if !action.is_notifiable() {
+            return Ok(());
+        }
+
         let event_type = action.to_string();
 
         // Check if this event type is enabled for notifications

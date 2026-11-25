@@ -6,6 +6,12 @@
 //! for an old destination can never verify a new one. Each code expires after
 //! [`CODE_TTL_SECS`] and allows [`MAX_ATTEMPTS`] guesses; sends are limited to
 //! one per [`RESEND_INTERVAL_SECS`] and [`MAX_SENDS_PER_HOUR`] per hour.
+//!
+//! Requesting a new code replaces the old one and resets its attempt counter,
+//! even if a confirm for the old code is in flight. That is accepted: the send
+//! limit caps guesses at `MAX_SENDS_PER_HOUR * MAX_ATTEMPTS` (25) per hour
+//! against a 10^6 code space, and a code only ever verifies the destination it
+//! was sent to (see [`mark_verified`]).
 
 use std::collections::HashSet;
 
@@ -14,11 +20,20 @@ use rand::RngExt;
 use rsa::sha2::{Digest, Sha256};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, ExprTrait,
+    QueryFilter, Set, SqlErr,
 };
 
 use crate::error::{AppError, Result};
 use crate::models::notification_verification::{self, Column, Entity};
+use crate::models::user_notification_pref;
+
+fn too_many(message: String, retry_after_secs: i64) -> AppError {
+    AppError::TooManyRequests {
+        message,
+        retry_after_secs: Ord::max(retry_after_secs, 1) as u64,
+    }
+}
 
 /// How long a code stays valid.
 pub const CODE_TTL_SECS: i64 = 10 * 60;
@@ -130,7 +145,7 @@ pub async fn reserve_send(
     now: DateTime<Utc>,
 ) -> Result<()> {
     let Some(row) = find(db, user_id, channel_type).await? else {
-        notification_verification::ActiveModel {
+        let inserted = notification_verification::ActiveModel {
             user_id: Set(user_id),
             channel_type: Set(channel_type.to_string()),
             code_hash: Set(None),
@@ -143,16 +158,29 @@ pub async fn reserve_send(
             ..Default::default()
         }
         .insert(db)
-        .await?;
-        return Ok(());
+        .await;
+        return match inserted {
+            Ok(_) => Ok(()),
+            // A parallel first request created the row (and sent) first.
+            Err(e) if matches!(e.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) => {
+                Err(too_many(
+                    format!(
+                        "Please wait {RESEND_INTERVAL_SECS} seconds before requesting another verification code"
+                    ),
+                    RESEND_INTERVAL_SECS,
+                ))
+            }
+            Err(e) => Err(e.into()),
+        };
     };
 
     if let Some(last) = row.last_sent_at {
         let wait = RESEND_INTERVAL_SECS - (now - last).num_seconds();
         if wait > 0 {
-            return Err(AppError::TooManyRequests(format!(
-                "Please wait {wait} seconds before requesting another verification code"
-            )));
+            return Err(too_many(
+                format!("Please wait {wait} seconds before requesting another verification code"),
+                wait,
+            ));
         }
     }
 
@@ -161,10 +189,12 @@ pub async fn reserve_send(
         _ => (now, 0),
     };
     if sends >= MAX_SENDS_PER_HOUR {
-        let minutes = (window_start + Duration::seconds(WINDOW_SECS) - now).num_minutes() + 1;
-        return Err(AppError::TooManyRequests(format!(
-            "Too many verification codes requested; try again in {minutes} minutes"
-        )));
+        let wait = (window_start + Duration::seconds(WINDOW_SECS) - now).num_seconds();
+        let minutes = wait / 60 + 1;
+        return Err(too_many(
+            format!("Too many verification codes requested; try again in {minutes} minutes"),
+            wait,
+        ));
     }
 
     // Optimistic: only succeeds if no concurrent request recorded a send meanwhile.
@@ -179,9 +209,12 @@ pub async fn reserve_send(
         None => update.filter(Column::LastSentAt.is_null()),
     };
     if update.exec(db).await?.rows_affected == 0 {
-        return Err(AppError::TooManyRequests(format!(
-            "Please wait {RESEND_INTERVAL_SECS} seconds before requesting another verification code"
-        )));
+        return Err(too_many(
+            format!(
+                "Please wait {RESEND_INTERVAL_SECS} seconds before requesting another verification code"
+            ),
+            RESEND_INTERVAL_SECS,
+        ));
     }
     Ok(())
 }
@@ -212,7 +245,11 @@ pub async fn store_code(
 }
 
 /// Drop any pending code for this user and channel (rate-limit state is kept).
-pub async fn clear_code(db: &DatabaseConnection, user_id: i64, channel_type: &str) -> Result<()> {
+pub async fn clear_code<C: ConnectionTrait>(
+    db: &C,
+    user_id: i64,
+    channel_type: &str,
+) -> Result<()> {
     Entity::update_many()
         .col_expr(Column::CodeHash, Expr::value(Option::<String>::None))
         .col_expr(
@@ -226,6 +263,32 @@ pub async fn clear_code(db: &DatabaseConnection, user_id: i64, channel_type: &st
         .exec(db)
         .await?;
     Ok(())
+}
+
+/// Set `verified = true` on the preference only if it still holds `destination`.
+///
+/// Returns `false` when the destination (or channel/user) changed after the code
+/// was checked, so a code sent to an old destination never verifies a new one.
+pub async fn mark_verified<C: ConnectionTrait>(
+    db: &C,
+    pref_id: i64,
+    user_id: i64,
+    channel_type: &str,
+    destination: &str,
+) -> Result<bool> {
+    let result = user_notification_pref::Entity::update_many()
+        .col_expr(user_notification_pref::Column::Verified, Expr::value(true))
+        .col_expr(
+            user_notification_pref::Column::UpdatedAt,
+            Expr::value(Utc::now()),
+        )
+        .filter(user_notification_pref::Column::Id.eq(pref_id))
+        .filter(user_notification_pref::Column::UserId.eq(user_id))
+        .filter(user_notification_pref::Column::ChannelType.eq(channel_type))
+        .filter(user_notification_pref::Column::Destination.eq(destination))
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected > 0)
 }
 
 /// Result of checking a submitted code.
