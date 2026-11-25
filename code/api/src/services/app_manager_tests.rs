@@ -1351,7 +1351,16 @@ async fn test_notification_events_seeded() {
 async fn test_auto_update_migration_down_removes_columns_and_events() {
     use crate::models::notification_event;
     let manager = setup().await;
-    crate::migrations::Migrator::down(&manager.db, Some(1))
+    // Roll back through the auto-update migration, whatever came after it.
+    let names: Vec<String> = crate::migrations::Migrator::migrations()
+        .iter()
+        .map(|m| m.name().to_string())
+        .collect();
+    let position = names
+        .iter()
+        .position(|name| name == "m20260226_000036_auto_update")
+        .unwrap();
+    crate::migrations::Migrator::down(&manager.db, Some((names.len() - position) as u32))
         .await
         .unwrap();
     let seeded = notification_event::Entity::find()

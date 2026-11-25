@@ -1,4 +1,5 @@
 pub mod apps;
+pub mod assistant;
 pub mod audit;
 pub mod auth;
 pub mod domains;
@@ -158,6 +159,14 @@ use crate::state::AppState;
         // Auto-update settings
         updates::get_update_settings,
         updates::put_update_settings,
+        // AI assistant
+        assistant::get_status,
+        assistant::get_assistant_settings,
+        assistant::put_assistant_settings,
+        assistant::get_key,
+        assistant::put_key,
+        assistant::delete_key,
+        assistant::test_key,
         // Domains
         domains::list_domains,
         domains::get_domain,
@@ -218,6 +227,7 @@ use crate::state::AppState;
         (name = "Storage", description = "File storage management"),
         (name = "Settings", description = "System settings"),
         (name = "Updates", description = "Automatic app update settings"),
+        (name = "Assistant", description = "AI assistant settings, API key and budget"),
         (name = "Domains", description = "Domains, Dynamic DNS, and Let's Encrypt configuration"),
         (name = "OAuth", description = "OAuth provider configuration and login"),
         (name = "VPN", description = "VPN provider and app VPN configuration"),
@@ -258,6 +268,7 @@ fn api_routes(state: AppState) -> Router {
         .nest("/roles", roles::roles_routes(state.clone()))
         .nest("/settings", settings::settings_routes(state.clone()))
         .nest("/updates", updates::updates_routes(state.clone()))
+        .nest("/assistant", assistant::assistant_routes(state.clone()))
         .nest("/domains", domains::domains_routes(state.clone()))
         .nest("/monitoring", monitoring::monitoring_routes(state.clone()))
         .nest("/networking", networking::networking_routes(state.clone()))

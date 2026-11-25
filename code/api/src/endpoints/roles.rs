@@ -535,6 +535,12 @@ async fn list_all_permissions(
             category: "VPN".to_string(),
             description: "Manage VPN providers and assign VPN to apps".to_string(),
         },
+        // AI assistant
+        PermissionInfo {
+            key: "assistant.use".to_string(),
+            category: "Assistant".to_string(),
+            description: "Chat with the AI assistant".to_string(),
+        },
     ];
 
     let catalog = state.catalog.read().await;

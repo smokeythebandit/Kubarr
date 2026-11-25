@@ -321,6 +321,7 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
         "app_states",
         "app_storage_configs",
         "app_vpn_configs",
+        "assistant_usage",
         "audit_logs",
         "domains",
         "dynamic_dns_profiles",
