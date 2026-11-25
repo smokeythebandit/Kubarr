@@ -22,7 +22,7 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// A streamed answer may think for a while; the whole stream gets this long.
-const STREAM_TIMEOUT: Duration = Duration::from_secs(300);
+const STREAM_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// One message of the conversation sent to the model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

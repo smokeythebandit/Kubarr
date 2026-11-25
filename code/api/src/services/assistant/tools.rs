@@ -8,13 +8,16 @@
 //! [`MAX_RESULT_BYTES`].
 
 use chrono::{DateTime, Duration, Utc};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect,
+};
 use serde_json::{json, Map, Value};
 
 use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::models::{app_operation, app_state};
 use crate::services::app_manager::{AppStateResponse, DESIRED_INSTALLED};
-use crate::services::update_diagnostics::{scrub_for_namespace, scrub_inline};
+use crate::services::update_diagnostics::{scrub_inline, scrub_with, secret_values_for_namespace};
 use crate::state::AppState;
 
 /// Tool results larger than this are cut, with [`TRUNCATED_MARKER`] appended.
@@ -239,6 +242,21 @@ impl ToolContext {
     /// The existing allowed-apps model: `app.*`, `app.<name>`, or admin.
     pub fn sees_app(&self, app: &str) -> bool {
         self.is_admin() || self.has("app.*") || self.has(&format!("app.{app}"))
+    }
+
+    /// The apps a non-admin may see (`app.<name>` grants); `None` when the
+    /// user sees every app.
+    pub fn visible_app_names(&self) -> Option<Vec<String>> {
+        if self.is_admin() || self.has("app.*") {
+            return None;
+        }
+        Some(
+            self.permissions
+                .iter()
+                .filter_map(|p| p.strip_prefix("app."))
+                .map(str::to_string)
+                .collect(),
+        )
     }
 
     /// The tools this user is offered, in fixed order.
@@ -605,10 +623,11 @@ async fn get_app(ctx: &ToolContext, name: &str) -> ToolResult {
     let operations: Vec<Value> = app_operation::Entity::find()
         .filter(app_operation::Column::AppName.eq(name))
         .order_by_desc(app_operation::Column::CreatedAt)
+        .order_by_desc(app_operation::Column::Id)
+        .limit(5)
         .all(&ctx.db)
         .await?
         .into_iter()
-        .take(5)
         .map(operation_json)
         .collect();
     Ok(json!({
@@ -621,20 +640,24 @@ async fn get_app(ctx: &ToolContext, name: &str) -> ToolResult {
 }
 
 async fn list_operations(ctx: &ToolContext, input: &Value) -> ToolResult {
-    let limit = limit_of(input, 10, 50) as usize;
-    let mut query = app_operation::Entity::find().order_by_desc(app_operation::Column::CreatedAt);
+    let limit = limit_of(input, 10, 50);
+    let mut query = app_operation::Entity::find()
+        .order_by_desc(app_operation::Column::CreatedAt)
+        .order_by_desc(app_operation::Column::Id)
+        .limit(limit);
     if let Some(app) = input["app"].as_str() {
         if !is_app_name(app) || !ctx.sees_app(app) {
             return Err(not_found(app));
         }
         query = query.filter(app_operation::Column::AppName.eq(app));
+    } else if let Some(apps) = ctx.visible_app_names() {
+        query = query.filter(app_operation::Column::AppName.is_in(apps));
     }
     let operations: Vec<Value> = query
         .all(&ctx.db)
         .await?
         .into_iter()
         .filter(|op| ctx.sees_app(&op.app_name))
-        .take(limit)
         .map(operation_json)
         .collect();
     Ok(json!({ "operations": operations }))
@@ -811,15 +834,55 @@ fn round(v: f64) -> f64 {
     (v * 10_000.0).round() / 10_000.0
 }
 
-async fn query_metrics(ctx: &ToolContext, input: &Value) -> ToolResult {
-    let app = input["app"].as_str().unwrap_or_default();
+/// Namespaces of the platform and the cluster itself.
+pub fn system_namespace(namespace: &str) -> bool {
+    namespace.starts_with("kubarr")
+        || namespace.starts_with("kube-")
+        || namespace.starts_with("victoria")
+        || matches!(
+            namespace,
+            "default" | "cnpg-system" | "cert-manager" | "monitoring" | "kube-system"
+        )
+}
+
+const ADMIN_ONLY_NAMESPACE: &str =
+    "Metrics and logs of system or shared namespaces are only available to administrators.";
+
+/// The namespace an app's metrics or logs may be read from. Non-admins only
+/// get namespaces that are owned by exactly this one app and are not system
+/// namespaces (and not of a catalog system app).
+async fn scoped_namespace(ctx: &ToolContext, app: &str) -> Result<String, ToolError> {
     let state = visible_app_state(ctx, app).await?;
-    if !is_app_name(&state.namespace) {
+    let namespace = state.namespace;
+    if !is_app_name(&namespace) {
         return Err(not_found(app));
     }
+    if ctx.is_admin() {
+        return Ok(namespace);
+    }
+    let system_app = ctx
+        .state
+        .catalog
+        .read()
+        .await
+        .get_app(app)
+        .is_some_and(|config| config.is_system);
+    let owners = app_state::Entity::find()
+        .filter(app_state::Column::Namespace.eq(namespace.as_str()))
+        .count(&ctx.db)
+        .await?;
+    if system_app || system_namespace(&namespace) || owners != 1 {
+        return Err(ToolError::new(ADMIN_ONLY_NAMESPACE));
+    }
+    Ok(namespace)
+}
+
+async fn query_metrics(ctx: &ToolContext, input: &Value) -> ToolResult {
+    let app = input["app"].as_str().unwrap_or_default();
+    let namespace = scoped_namespace(ctx, app).await?;
     let metric = input["metric"].as_str().unwrap_or_default();
     let range = input["range"].as_str().unwrap_or("1h");
-    let Some((query, unit)) = metric_query(metric, &state.namespace) else {
+    let Some((query, unit)) = metric_query(metric, &namespace) else {
         return Err(ToolError::new("Unknown metric."));
     };
     let seconds = range_seconds(range);
@@ -858,13 +921,10 @@ fn logsql_phrase(text: &str) -> String {
 
 async fn query_logs(ctx: &ToolContext, input: &Value) -> ToolResult {
     let app = input["app"].as_str().unwrap_or_default();
-    let state = visible_app_state(ctx, app).await?;
-    if !is_app_name(&state.namespace) {
-        return Err(not_found(app));
-    }
+    let namespace = scoped_namespace(ctx, app).await?;
     let since = input["since"].as_str().unwrap_or("1h");
     let limit = limit_of(input, 50, 200);
-    let mut query = format!("namespace:\"{}\"", state.namespace);
+    let mut query = format!("namespace:\"{namespace}\"");
     if let Some(contains) = input["contains"].as_str().filter(|c| !c.trim().is_empty()) {
         let contains: String = contains.chars().take(200).collect();
         query.push(' ');
@@ -883,28 +943,33 @@ async fn query_logs(ctx: &ToolContext, input: &Value) -> ToolResult {
             tracing::debug!(error = %e, "Assistant log query failed");
             ToolError::new("VictoriaLogs could not be queried right now.")
         })?;
-    let mut lines: Vec<(String, String)> = response
+    let mut entries: Vec<(String, String, String)> = response
         .streams
         .into_iter()
         .flat_map(|stream| {
             let pod = stream.labels.get("pod").cloned().unwrap_or_default();
-            stream.entries.into_iter().map(move |entry| {
-                let line = clip(&entry.line, MAX_LOG_LINE_CHARS);
-                (entry.timestamp, format!("{} {}", pod, line))
-            })
+            stream
+                .entries
+                .into_iter()
+                .map(move |entry| (entry.timestamp, pod.clone(), entry.line))
         })
         .collect();
-    lines.sort_by(|a, b| b.0.cmp(&a.0));
-    lines.truncate(limit as usize);
-    let text = lines
-        .iter()
-        .map(|(ts, line)| format!("{ts} {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let text = match ctx.state.k8s_client.read().await.as_ref() {
-        Some(k8s) => scrub_for_namespace(k8s, &state.namespace, &text).await,
-        None => scrub_inline(&text),
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.truncate(limit as usize);
+    let secrets = match ctx.state.k8s_client.read().await.as_ref() {
+        Some(k8s) => secret_values_for_namespace(k8s, &namespace).await,
+        None => Vec::new(),
     };
+    // Scrub each whole line before clipping, so a clip can never cut a
+    // secret in half and leave a recognisable prefix.
+    let lines: Vec<String> = entries
+        .iter()
+        .map(|(ts, pod, line)| {
+            let clean = scrub_with(line, &secrets);
+            format!("{ts} {pod} {}", clip(&clean, MAX_LOG_LINE_CHARS))
+        })
+        .collect();
+    let text = lines.join("\n");
     let mut result = Map::new();
     result.insert("app".into(), json!(app));
     result.insert("since".into(), json!(since));
@@ -982,6 +1047,27 @@ mod tests {
         assert_eq!(summary["latest"], 99.0);
         assert!(summary["series"].as_array().unwrap().len() <= 25);
         assert_eq!(summarize_series(&[], 24), json!({"points": 0}));
+    }
+
+    #[test]
+    fn system_namespaces_are_recognised() {
+        for ns in [
+            "kubarr-system",
+            "kubarr",
+            "kube-system",
+            "kube-public",
+            "cnpg-system",
+            "cert-manager",
+            "default",
+            "monitoring",
+            "victoriametrics",
+            "victorialogs",
+        ] {
+            assert!(system_namespace(ns), "{ns}");
+        }
+        for ns in ["jellyfin", "sonarr", "media"] {
+            assert!(!system_namespace(ns), "{ns}");
+        }
     }
 
     #[test]

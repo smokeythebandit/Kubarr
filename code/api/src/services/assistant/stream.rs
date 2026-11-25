@@ -122,6 +122,9 @@ pub struct FinishedMessage {
     pub content: Vec<Value>,
     pub stop_reason: Option<String>,
     pub usage: Usage,
+    /// The output token count is an estimate (the stream broke before the
+    /// final count arrived).
+    pub usage_estimated: bool,
     /// The stream ended with `message_stop`.
     pub complete: bool,
 }
@@ -163,6 +166,16 @@ pub struct Accumulator {
     complete: bool,
     /// Tool use blocks whose input JSON did not parse.
     invalid_inputs: Vec<String>,
+    /// `message_start` arrived.
+    started: bool,
+    /// `message_delta` carried the final output token count.
+    final_usage: bool,
+    /// Bytes of generated text, tool input and thinking seen so far.
+    generated_bytes: usize,
+    /// The stream ended with an `error` event.
+    api_error: bool,
+    /// The request's `max_tokens`, the fallback output estimate.
+    max_tokens: u32,
 }
 
 fn merge_usage(into: &mut Usage, from: &Value) {
@@ -183,6 +196,15 @@ fn merge_usage(into: &mut Usage, from: &Value) {
 impl Accumulator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An accumulator for a request with this `max_tokens`, used as the
+    /// output estimate when a broken stream gives nothing better.
+    pub fn with_max_tokens(max_tokens: u32) -> Self {
+        Self {
+            max_tokens,
+            ..Self::default()
+        }
     }
 
     /// Usage reported so far (also meaningful after an error).
@@ -207,6 +229,7 @@ impl Accumulator {
                 let message = &data["message"];
                 self.model = message["model"].as_str().map(str::to_string);
                 merge_usage(&mut self.usage, &message["usage"]);
+                self.started = true;
                 Ok(None)
             }
             "content_block_start" => {
@@ -240,21 +263,20 @@ impl Accumulator {
                 match delta["type"].as_str().unwrap_or_default() {
                     "text_delta" => {
                         let text = delta["text"].as_str().unwrap_or_default();
+                        self.generated_bytes += text.len();
                         append_str(&mut block.value, "text", text);
                         Ok((!text.is_empty()).then(|| Delta::Text(text.to_string())))
                     }
                     "input_json_delta" => {
-                        block
-                            .partial_json
-                            .push_str(delta["partial_json"].as_str().unwrap_or_default());
+                        let piece = delta["partial_json"].as_str().unwrap_or_default();
+                        self.generated_bytes += piece.len();
+                        block.partial_json.push_str(piece);
                         Ok(None)
                     }
                     "thinking_delta" => {
-                        append_str(
-                            &mut block.value,
-                            "thinking",
-                            delta["thinking"].as_str().unwrap_or_default(),
-                        );
+                        let thinking = delta["thinking"].as_str().unwrap_or_default();
+                        self.generated_bytes += thinking.len();
+                        append_str(&mut block.value, "thinking", thinking);
                         Ok(None)
                     }
                     "signature_delta" => {
@@ -298,21 +320,27 @@ impl Accumulator {
                     self.stop_reason = Some(reason.to_string());
                 }
                 merge_usage(&mut self.usage, &data["usage"]);
+                if data["usage"]["output_tokens"].is_u64() {
+                    self.final_usage = true;
+                }
                 Ok(None)
             }
             "message_stop" => {
                 self.complete = true;
                 Ok(None)
             }
-            "error" => Err(StreamError::Api {
-                error_type: data["error"]["type"]
-                    .as_str()
-                    .filter(|kind| {
-                        kind.len() <= 64
-                            && kind.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
-                    })
-                    .map(str::to_string),
-            }),
+            "error" => {
+                self.api_error = true;
+                Err(StreamError::Api {
+                    error_type: data["error"]["type"]
+                        .as_str()
+                        .filter(|kind| {
+                            kind.len() <= 64
+                                && kind.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                        })
+                        .map(str::to_string),
+                })
+            }
             // `ping` and unknown events.
             _ => Ok(None),
         }
@@ -321,14 +349,38 @@ impl Accumulator {
     /// The message so far. Tool calls whose input did not parse carry no
     /// input (see [`FinishedMessage::tool_calls`]) but keep `{}` in `content`
     /// so the message can still be replayed.
+    /// Output tokens to bill when the stream ended without the final count
+    /// (`message_delta`): the generated bytes / 4, rounded up, at least what
+    /// `message_start` reported; `max_tokens` when nothing at all arrived.
+    /// A stream that failed with an `error` event before `message_start`
+    /// generated nothing and is billed nothing.
+    fn estimated_output_tokens(&self) -> u64 {
+        if self.final_usage {
+            return self.usage.output_tokens;
+        }
+        let from_bytes = self.generated_bytes.div_ceil(4) as u64;
+        if self.started || from_bytes > 0 {
+            return from_bytes.max(self.usage.output_tokens);
+        }
+        if self.api_error {
+            0
+        } else {
+            u64::from(self.max_tokens)
+        }
+    }
+
     pub fn finish(self) -> FinishedMessage {
+        let mut usage = self.usage.clone();
+        usage.output_tokens = self.estimated_output_tokens();
+        let usage_estimated = !self.final_usage;
         let invalid = self.invalid_inputs;
         let content = self.blocks.into_values().map(|block| block.value).collect();
         let mut message = FinishedMessage {
             model: self.model,
             content,
             stop_reason: self.stop_reason,
-            usage: self.usage,
+            usage,
+            usage_estimated,
             complete: self.complete,
         };
         for block in &mut message.content {
@@ -585,6 +637,51 @@ data: {\"type\":\"message_stop\"}\n\n";
         assert_eq!(deltas, vec![Delta::Text("Half an ans".into())]);
         assert_eq!(message.stop_reason.as_deref(), Some("max_tokens"));
         assert_eq!(message.text(), "Half an ans");
+    }
+
+    #[test]
+    fn broken_stream_bills_an_output_estimate() {
+        // message_start reported 1 output token, then 38 bytes of text and
+        // tool input streamed before the connection broke: ceil(38 / 4) = 10.
+        let body = "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"0123456789012345678901234567890\"}}\n\n\
+data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"get_app\",\"input\":{}}}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"name\\\"\"}}\n\n";
+        let (_, message) = run(body, 13);
+        let message = message.unwrap();
+        assert!(message.usage_estimated);
+        assert_eq!(message.usage.input_tokens, 9);
+        assert_eq!(message.usage.output_tokens, 10);
+
+        // Only message_start: its own count.
+        let mut acc = Accumulator::with_max_tokens(16_000);
+        let start = SseEvent {
+            event: "message_start".into(),
+            data: r#"{"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":3}}}"#.into(),
+        };
+        acc.apply(&start).unwrap();
+        assert_eq!(acc.finish().usage.output_tokens, 3);
+
+        // Nothing at all: max_tokens.
+        let finished = Accumulator::with_max_tokens(16_000).finish();
+        assert!(finished.usage_estimated);
+        assert_eq!(finished.usage.output_tokens, 16_000);
+
+        // An error before anything was generated bills nothing.
+        let mut acc = Accumulator::with_max_tokens(16_000);
+        let error = SseEvent {
+            event: "error".into(),
+            data: r#"{"type":"error","error":{"type":"overloaded_error"}}"#.into(),
+        };
+        assert!(acc.apply(&error).is_err());
+        assert_eq!(acc.finish().usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn complete_stream_reports_exact_usage() {
+        let (_, message) = run(TEXT_STREAM, 4096);
+        assert!(!message.unwrap().usage_estimated);
     }
 
     #[test]

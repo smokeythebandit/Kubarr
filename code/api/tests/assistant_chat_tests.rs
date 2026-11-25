@@ -362,6 +362,11 @@ fn tool_results(body: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Number of cache breakpoints in a request.
+fn breakpoints(body: &Value) -> usize {
+    body.to_string().matches("\"cache_control\"").count()
+}
+
 fn tool_names(body: &Value) -> Vec<String> {
     body["tools"]
         .as_array()
@@ -418,11 +423,15 @@ async fn tool_round_trip_streams_status_text_sources_and_records_usage() {
         .all(|t| t["strict"] == true));
     // The question, then the per-question context as a system message.
     let messages = first["messages"].as_array().unwrap();
+    // The rolling cache breakpoint sits on the question, before the context.
     assert_eq!(
         messages[0],
-        json!({"role": "user", "content": "How is Jellyfin?"})
+        json!({"role": "user", "content": [{"type": "text", "text": "How is Jellyfin?",
+            "cache_control": {"type": "ephemeral"}}]})
     );
     assert_eq!(messages[1]["role"], "system");
+    assert!(messages[1].get("cache_control").is_none());
+    assert_eq!(breakpoints(first), 2);
     assert!(messages[1]["content"]
         .as_str()
         .unwrap()
@@ -441,8 +450,12 @@ async fn tool_round_trip_streams_status_text_sources_and_records_usage() {
         messages[2]["content"][1]["input"],
         json!({"name": "jellyfin"})
     );
+    // The breakpoint moved from the question to the newest tool result.
+    assert_eq!(messages[0]["content"], json!("How is Jellyfin?"));
+    assert_eq!(breakpoints(second), 2);
     let results = tool_results(second);
     assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["cache_control"], json!({"type": "ephemeral"}));
     assert_eq!(results[0]["tool_use_id"], "toolu_1");
     assert!(results[0].get("is_error").is_none());
     let content = results[0]["content"].as_str().unwrap();
@@ -493,10 +506,12 @@ async fn tool_round_trip_streams_status_text_sources_and_records_usage() {
     assert_eq!(messages[1]["sources"][0]["tool"], "get_app");
     assert_eq!(events[3].1["message_id"], messages[1]["id"]);
 
-    // A follow-up sends the earlier turn as plain text.
+    // A follow-up sends the earlier turn as plain text; the breakpoint has
+    // moved to the new question.
     let (_, events) = h.ask(&admin, &conversation, "And now?").await;
     assert_eq!(names(&events), ["text_delta", "done"]);
     let third = &seen.bodies()[2];
+    assert_eq!(breakpoints(third), 2);
     let messages = third["messages"].as_array().unwrap();
     assert_eq!(
         messages[0],
@@ -506,7 +521,11 @@ async fn tool_round_trip_streams_status_text_sources_and_records_usage() {
         messages[1],
         json!({"role": "assistant", "content": "Jellyfin is **healthy**."})
     );
-    assert_eq!(messages[2], json!({"role": "user", "content": "And now?"}));
+    assert_eq!(
+        messages[2],
+        json!({"role": "user", "content": [{"type": "text", "text": "And now?",
+            "cache_control": {"type": "ephemeral"}}]})
+    );
     assert_eq!(messages[3]["role"], "system");
 }
 
@@ -589,10 +608,16 @@ async fn the_budget_is_checked_before_every_api_call() {
     .unwrap();
 
     let (_, events) = h.ask(&admin, &conversation, "Hi").await;
-    assert_eq!(seen.bodies().len(), 1);
-    let (name, data) = events.last().unwrap();
-    assert_eq!(name, "error");
-    assert!(data["message"].as_str().unwrap().contains("budget"));
+    assert_eq!(
+        seen.bodies().len(),
+        1,
+        "no new round after the budget is hit"
+    );
+    assert_eq!(names(&events), ["status", "text_delta", "sources", "done"]);
+    assert!(events[1].1["text"]
+        .as_str()
+        .unwrap()
+        .contains("Budget reached"));
 }
 
 #[tokio::test]
@@ -868,6 +893,9 @@ async fn a_broken_stream_saves_the_partial_answer_as_interrupted() {
     assert!(stored.content_json.contains("lorem ipsum"));
     let usage = assistant_usage::Entity::find().all(&h.db).await.unwrap();
     assert_eq!(usage.len(), 1, "usage of the broken call is still recorded");
+    // No final count arrived: output is estimated from the streamed text,
+    // not left at message_start's 1 token.
+    assert!(usage[0].output_tokens > 1, "{}", usage[0].output_tokens);
 }
 
 #[tokio::test]
@@ -987,4 +1015,177 @@ async fn long_conversations_send_the_last_20_turns_and_a_running_summary() {
     h.ask(&admin, &conversation, "again").await;
     let bodies = seen.bodies();
     assert_eq!(bodies.len(), 4, "one more turn fell out: summary + answer");
+}
+
+#[tokio::test]
+async fn usage_is_priced_by_the_model_that_answered() {
+    // A server-side fallback answers with another model than requested.
+    let (url, _) = stub_api(Arc::new(|_, _| {
+        text_reply("ok").replace(
+            "\"model\":\"claude-opus-5-5\"",
+            "\"model\":\"claude-sonnet-5-5\"",
+        )
+    }))
+    .await;
+    let h = harness(&url).await;
+    let admin = h.user("admin").await;
+    let conversation = h.conversation(&admin).await;
+    h.ask(&admin, &conversation, "hi").await;
+    let usage = assistant_usage::Entity::find().all(&h.db).await.unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].model, "claude-sonnet-5-5");
+    // 100 input, 20 output, 50 cache-read and 10 cache-write tokens at Sonnet
+    // 5.5 prices (nano-dollars per token), rounded up to micro-dollars.
+    let expected = (100 * 2_000 + 20 * 10_000 + 50 * 100 + 10 * 2_500u64).div_ceil(1_000);
+    assert_eq!(usage[0].cost_usd_micros, expected as i64);
+}
+
+#[tokio::test]
+async fn non_admins_cannot_read_logs_or_metrics_of_system_or_shared_namespaces() {
+    let (url, seen) = stub_api(Arc::new(|n, _| match n {
+        0 => tool_reply("toolu_1", "query_logs", &json!({"app": "victorialogs"})),
+        1 => tool_reply("toolu_2", "query_logs", &json!({"app": "shared-a"})),
+        2 => tool_reply(
+            "toolu_3",
+            "query_metrics",
+            &json!({"app": "shared-a", "metric": "cpu"}),
+        ),
+        3 => tool_reply(
+            "toolu_4",
+            "query_metrics",
+            &json!({"app": "jellyfin", "metric": "cpu"}),
+        ),
+        _ => text_reply("Done."),
+    }))
+    .await;
+    let h = harness(&url).await;
+    for (app, namespace) in [
+        ("victorialogs", "victorialogs"),
+        ("victoriametrics", "victoriametrics"),
+        ("shared-a", "media"),
+        ("shared-b", "media"),
+    ] {
+        app_state::ActiveModel {
+            app_name: Set(app.into()),
+            namespace: Set(namespace.into()),
+            desired_state: Set("installed".into()),
+            observed_state: Set("installed".into()),
+            healthy: Set(true),
+            message: Set(None),
+            installed_chart_version: Set(None),
+            available_chart_version: Set(None),
+            update_available: Set(false),
+            auto_update: Set(false),
+            last_operation_id: Set(None),
+            last_checked_at: Set(None),
+            updated_at: Set(Utc::now()),
+        }
+        .insert(&h.db)
+        .await
+        .unwrap();
+    }
+    grant(&h.db, "viewer", "assistant.use").await;
+    grant(&h.db, "viewer", "app.*").await;
+    let viewer = h.user("viewer").await;
+    let conversation = h.conversation(&viewer).await;
+
+    let (_, events) = h.ask(&viewer, &conversation, "Show me logs").await;
+    assert_eq!(names(&events).last(), Some(&"done"));
+    let bodies = seen.bodies();
+    let offered = tool_names(&bodies[0]);
+    assert!(offered.contains(&"query_logs".to_string()));
+    assert!(offered.contains(&"query_metrics".to_string()));
+    for (i, what) in [
+        (1, "system namespace logs"),
+        (2, "shared namespace logs"),
+        (3, "shared namespace metrics"),
+    ] {
+        let result = &tool_results(&bodies[i])[0];
+        assert_eq!(result["is_error"], true, "{what}");
+        assert!(
+            result["content"]
+                .as_str()
+                .unwrap()
+                .contains("only available to administrators"),
+            "{what}: {result}"
+        );
+    }
+    // The viewer's own single-app namespace is allowed (VictoriaMetrics is
+    // unreachable in tests, so the answer is "no data", not a denial).
+    let own = &tool_results(&bodies[4])[0];
+    assert!(own.get("is_error").is_none(), "{own}");
+    assert!(own["content"].as_str().unwrap().contains("\"points\":0"));
+
+    let audits = audit_log::Entity::find()
+        .filter(audit_log::Column::Action.eq("assistant_tool_call"))
+        .filter(audit_log::Column::Success.eq(false))
+        .all(&h.db)
+        .await
+        .unwrap();
+    assert_eq!(audits.len(), 3);
+}
+
+#[tokio::test]
+async fn admins_can_read_logs_of_system_namespaces() {
+    let (url, seen) = stub_api(Arc::new(|n, _| match n {
+        0 => tool_reply(
+            "toolu_1",
+            "query_metrics",
+            &json!({"app": "victoriametrics", "metric": "memory"}),
+        ),
+        _ => text_reply("Done."),
+    }))
+    .await;
+    let h = harness(&url).await;
+    app_state::ActiveModel {
+        app_name: Set("victoriametrics".into()),
+        namespace: Set("victoriametrics".into()),
+        desired_state: Set("installed".into()),
+        observed_state: Set("installed".into()),
+        healthy: Set(true),
+        message: Set(None),
+        installed_chart_version: Set(None),
+        available_chart_version: Set(None),
+        update_available: Set(false),
+        auto_update: Set(false),
+        last_operation_id: Set(None),
+        last_checked_at: Set(None),
+        updated_at: Set(Utc::now()),
+    }
+    .insert(&h.db)
+    .await
+    .unwrap();
+    let admin = h.user("admin").await;
+    let conversation = h.conversation(&admin).await;
+    h.ask(&admin, &conversation, "memory?").await;
+    let result = &tool_results(&seen.bodies()[1])[0];
+    assert!(result.get("is_error").is_none(), "{result}");
+}
+
+#[tokio::test]
+async fn parallel_questions_cannot_exceed_the_rate_limit() {
+    let db = create_test_db_with_seed().await;
+    let user =
+        create_test_user_with_role(&db, "racer", "racer@example.com", "pw-123456", "admin").await;
+    for _ in 0..conversations::RATE_LIMIT - 1 {
+        assistant_request::ActiveModel {
+            user_id: Set(user.id),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+    }
+    let attempts = (0..5).map(|_| {
+        let db = db.clone();
+        tokio::spawn(async move { conversations::take_rate_slot(&db, user.id).await.is_ok() })
+    });
+    let mut granted = 0;
+    for attempt in attempts {
+        if attempt.await.unwrap() {
+            granted += 1;
+        }
+    }
+    assert_eq!(granted, 1);
 }

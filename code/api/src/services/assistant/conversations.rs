@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use crate::error::{AppError, Result};
 use crate::models::assistant_message::{
     STATUS_COMPLETE, STATUS_ERROR, STATUS_INTERRUPTED, STATUS_STREAMING,
 };
-use crate::models::{assistant_conversation, assistant_message, assistant_request};
+use crate::models::{assistant_conversation, assistant_message, assistant_request, user};
 
 /// Questions per user per [`RATE_WINDOW_MINUTES`].
 pub const RATE_LIMIT: u64 = 30;
@@ -22,7 +22,7 @@ pub const MAX_QUESTION_CHARS: usize = 8_000;
 pub const DEFAULT_TITLE: &str = "New conversation";
 const TITLE_CHARS: usize = 60;
 /// A `streaming` answer not updated for this long lost its replica.
-pub const STALE_STREAM_SECONDS: i64 = 6 * 60;
+pub const STALE_STREAM_SECONDS: i64 = 15 * 60;
 
 /// What a conversation (or one question) is about: the page the person was
 /// on and the app it concerns.
@@ -271,16 +271,29 @@ pub async fn delete(db: &DatabaseConnection, id: &str) -> Result<()> {
 }
 
 /// Count the question against the rate limit, or refuse it.
+///
+/// The count and the insert run in one transaction that first locks the
+/// user's row (PostgreSQL `SELECT ... FOR UPDATE`; SQLite serialises write
+/// transactions itself), so parallel requests from one user, on any
+/// replica, cannot both take the last slot.
 pub async fn take_rate_slot(db: &DatabaseConnection, user_id: i64) -> Result<()> {
+    let txn = db.begin().await?;
+    if txn.get_database_backend() == DbBackend::Postgres {
+        user::Entity::find_by_id(user_id)
+            .lock_exclusive()
+            .one(&txn)
+            .await?;
+    }
     let now = Utc::now();
     let recent = assistant_request::Entity::find()
         .filter(assistant_request::Column::UserId.eq(user_id))
         .filter(
             assistant_request::Column::CreatedAt.gte(now - Duration::minutes(RATE_WINDOW_MINUTES)),
         )
-        .count(db)
+        .count(&txn)
         .await?;
     if recent >= RATE_LIMIT {
+        txn.rollback().await?;
         return Err(AppError::TooManyRequests(format!(
             "You can ask the assistant at most {RATE_LIMIT} questions every \
              {RATE_WINDOW_MINUTES} minutes. Try again in a few minutes."
@@ -291,8 +304,9 @@ pub async fn take_rate_slot(db: &DatabaseConnection, user_id: i64) -> Result<()>
         created_at: Set(now),
         ..Default::default()
     }
-    .insert(db)
+    .insert(&txn)
     .await?;
+    txn.commit().await?;
     Ok(())
 }
 

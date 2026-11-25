@@ -41,6 +41,8 @@ const SUMMARY_MAX_TOKENS: u32 = 1_024;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
 pub const REFUSAL_TEXT: &str = "I can't help with that request.";
+pub const BUDGET_REACHED_TEXT: &str = "_(Budget reached: the assistant's monthly budget is \
+used up, so this answer stops here.)_";
 const CUT_OFF_TEXT: &str = "_(The answer was cut off because it got too long.)_";
 const TOOL_LIMIT_TEXT: &str = "Tool call limit reached for this answer. Do not call more \
 tools; answer with what you have found so far.";
@@ -201,6 +203,33 @@ fn stream_error_text(e: &StreamError) -> String {
         }),
         StreamError::Malformed => "Anthropic sent an unexpected response.".to_string(),
     }
+}
+
+/// The messages with one rolling cache breakpoint on the last content block
+/// of the newest user message (the question, or the latest tool results).
+/// Together with the system prompt's breakpoint that makes two of the four
+/// allowed. Each round re-reads the cached history instead of paying for it
+/// again; the per-question context message after the question stays out of
+/// the first round's cached prefix.
+pub fn with_cache_breakpoint(messages: &[Message]) -> Vec<Message> {
+    let mut messages = messages.to_vec();
+    if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == "user") {
+        let ephemeral = json!({ "type": "ephemeral" });
+        match &mut last_user.content {
+            Value::String(text) => {
+                last_user.content = json!([
+                    { "type": "text", "text": text, "cache_control": ephemeral }
+                ]);
+            }
+            Value::Array(blocks) => {
+                if let Some(Value::Object(block)) = blocks.last_mut() {
+                    block.insert("cache_control".into(), ephemeral);
+                }
+            }
+            _ => {}
+        }
+    }
+    messages
 }
 
 fn system_blocks(text: &str) -> Value {
@@ -473,22 +502,34 @@ async fn run_loop<W: AsyncWrite + Unpin>(
 
     let mut tool_calls = 0usize;
     let mut tools_closed = false;
-    for _round in 0..MAX_ROUNDS {
+    for round in 0..MAX_ROUNDS {
         if !sink.is_open() {
             return TurnEnd::Interrupted;
         }
+        // A running API call finishes, but no new round starts once the
+        // budget is used up.
         if let Err(e) = budget::ensure_budget(&turn.ctx.db).await {
-            return TurnEnd::Error(match e {
-                crate::error::AppError::ServiceUnavailable(message) => message,
-                _ => "Could not check the assistant budget.".into(),
-            });
+            return match e {
+                crate::error::AppError::ServiceUnavailable(_) if round > 0 => {
+                    let text = if answer.text.is_empty() {
+                        BUDGET_REACHED_TEXT.to_string()
+                    } else {
+                        format!("\n\n{BUDGET_REACHED_TEXT}")
+                    };
+                    answer.text.push_str(&text);
+                    sink.send(ChatEvent::TextDelta(text)).await;
+                    TurnEnd::Complete
+                }
+                crate::error::AppError::ServiceUnavailable(message) => TurnEnd::Error(message),
+                _ => TurnEnd::Error("Could not check the assistant budget.".into()),
+            };
         }
         flush(turn, answer).await;
         answer.round_text_started = false;
         let request = MessagesRequest {
             model: turn.settings.model.id().to_string(),
             max_tokens: MAX_TOKENS,
-            messages: messages.clone(),
+            messages: with_cache_breakpoint(&messages),
             system: Some(system_blocks(SYSTEM_PROMPT)),
             output_config: Some(OutputConfig {
                 effort: Some(turn.settings.effort.as_str().to_string()),
@@ -520,7 +561,7 @@ async fn run_loop<W: AsyncWrite + Unpin>(
         };
 
         let mut parser = SseParser::new();
-        let mut acc = Accumulator::new();
+        let mut acc = Accumulator::with_max_tokens(MAX_TOKENS);
         let mut failure: Option<String> = None;
         let mut gone = false;
         let mut last_flush = Instant::now();
@@ -540,10 +581,6 @@ async fn run_loop<W: AsyncWrite + Unpin>(
                             gone = true;
                             break 'read;
                         }
-                        if last_flush.elapsed() >= FLUSH_INTERVAL {
-                            flush(turn, answer).await;
-                            last_flush = Instant::now();
-                        }
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -551,6 +588,12 @@ async fn run_loop<W: AsyncWrite + Unpin>(
                         break 'read;
                     }
                 }
+            }
+            // Saves the partial text and refreshes the heartbeat, also while
+            // the model only thinks (pings and thinking deltas keep coming).
+            if last_flush.elapsed() >= FLUSH_INTERVAL {
+                flush(turn, answer).await;
+                last_flush = Instant::now();
             }
         }
         drop(body);
@@ -621,6 +664,8 @@ async fn run_loop<W: AsyncWrite + Unpin>(
                     let outcome = tools::execute(&turn.ctx, &call.name, call.input.as_ref()).await;
                     answer.push_source(outcome.source.clone());
                     results.push(outcome.result_block(&call.id));
+                    // Heartbeat: this replica is still working on the answer.
+                    flush(turn, answer).await;
                 }
                 if tool_calls >= MAX_TOOL_CALLS {
                     tools_closed = true;
@@ -666,6 +711,55 @@ mod tests {
         drop(reader);
         assert!(!sink.send(ChatEvent::Status("x".into())).await);
         assert!(!sink.is_open());
+    }
+
+    #[test]
+    fn the_cache_breakpoint_rolls_to_the_newest_user_message() {
+        let mut messages = vec![
+            Message::user("earlier"),
+            Message {
+                role: "assistant".into(),
+                content: json!("answer"),
+            },
+            Message::user("question"),
+            Message {
+                role: "system".into(),
+                content: json!("context"),
+            },
+        ];
+        let first = with_cache_breakpoint(&messages);
+        assert_eq!(first[0].content, json!("earlier"));
+        assert_eq!(
+            first[2].content,
+            json!([{"type": "text", "text": "question", "cache_control": {"type": "ephemeral"}}])
+        );
+        assert_eq!(first[3].content, json!("context"));
+        // The stored history is untouched.
+        assert_eq!(messages[2].content, json!("question"));
+
+        messages.push(Message {
+            role: "assistant".into(),
+            content: json!([{"type": "tool_use", "id": "t1", "name": "list_apps", "input": {}}]),
+        });
+        messages.push(Message {
+            role: "user".into(),
+            content: json!([
+                {"type": "tool_result", "tool_use_id": "t1", "content": "a"},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "b"}
+            ]),
+        });
+        let second = with_cache_breakpoint(&messages);
+        assert_eq!(second[2].content, json!("question"));
+        assert!(second[5].content[0].get("cache_control").is_none());
+        assert_eq!(
+            second[5].content[1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        let breakpoints = serde_json::to_string(&second)
+            .unwrap()
+            .matches("cache_control")
+            .count();
+        assert_eq!(breakpoints, 1);
     }
 
     #[test]
