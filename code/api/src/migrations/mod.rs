@@ -34,6 +34,7 @@ mod m20260226_000033_create_pod_status_cache;
 mod m20260226_000034_invite_role;
 mod m20260226_000036_auto_update;
 mod m20260226_000039_assistant;
+mod m20260226_000040_assistant_chat;
 
 pub struct Migrator;
 
@@ -75,6 +76,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260226_000034_invite_role::Migration),
             Box::new(m20260226_000036_auto_update::Migration),
             Box::new(m20260226_000039_assistant::Migration),
+            Box::new(m20260226_000040_assistant_chat::Migration),
         ]
     }
 }

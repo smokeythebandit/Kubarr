@@ -14,6 +14,8 @@ import RegisterPage from './pages/RegisterPage'
 import NotFoundPage from './pages/NotFoundPage'
 import NotificationsPage from './pages/NotificationsPage'
 import AppErrorPage from './pages/AppErrorPage'
+import AssistantPage from './pages/AssistantPage'
+import { AssistantButton, AssistantPanel } from './components/assistant/AssistantPanel'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { MonitoringProvider, useMonitoring } from './contexts/MonitoringContext'
@@ -493,6 +495,7 @@ function Navigation() {
               </Link>
             )}
             <div className="flex items-center gap-2 ml-2 xl:ml-4 border-l border-gray-200 dark:border-gray-700 pl-2 xl:pl-4">
+              <AssistantButton />
               <NotificationBell />
               <UserMenu />
               <ThemeToggle />
@@ -501,6 +504,7 @@ function Navigation() {
 
           {/* Mobile: Theme toggle and hamburger menu */}
           <div className="flex md:hidden items-center gap-2">
+            <AssistantButton />
             <ThemeToggle />
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -756,6 +760,7 @@ function AppContent() {
                   <Route path="/networking" element={<NetworkingPage />} />
                   <Route path="/security" element={<SecurityPage />} />
                   <Route path="/notifications" element={<NotificationsPage />} />
+                  <Route path="/assistant" element={<AssistantPage />} />
                   <Route path="/app-error" element={<AppErrorPage />} />
                   <Route path="*" element={<NotFoundPage />} />
                 </Routes>
@@ -763,6 +768,7 @@ function AppContent() {
             </PageTransition>
           </main>
         )}
+        <AssistantPanel />
       </div>
       </MonitoringProvider>
     </ProtectedRoute>

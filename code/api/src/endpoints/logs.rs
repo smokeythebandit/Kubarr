@@ -415,6 +415,11 @@ async fn query_vlogs(
     Query(params): Query<VLogsQueryParams>,
     _auth: Authorized<LogsView>,
 ) -> Result<Json<VLogsQueryResponse>> {
+    Ok(Json(fetch_vlogs(params).await?))
+}
+
+/// Run a LogsQL (or Loki-style) query against VictoriaLogs.
+pub(crate) async fn fetch_vlogs(params: VLogsQueryParams) -> Result<VLogsQueryResponse> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -549,10 +554,10 @@ async fn query_vlogs(
 
     let streams: Vec<VLogsStream> = streams_map.into_values().collect();
 
-    Ok(Json(VLogsQueryResponse {
+    Ok(VLogsQueryResponse {
         streams,
         total_entries,
-    }))
+    })
 }
 
 /// Convert Loki LogQL query to VictoriaLogs LogsQL

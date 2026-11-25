@@ -18,7 +18,11 @@ use serde::{Deserialize, Serialize};
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 /// API version header value.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// Beta header value enabling server-side refusal fallbacks.
+pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// A streamed answer may think for a while; the whole stream gets this long.
+const STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// One message of the conversation sent to the model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,7 +51,7 @@ pub struct OutputConfig {
 }
 
 /// Body of `POST /v1/messages`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MessagesRequest {
     pub model: String,
     pub max_tokens: u32,
@@ -56,6 +60,19 @@ pub struct MessagesRequest {
     pub system: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
+    /// Client tool definitions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
+    /// `{"type": "auto"}` or `{"type": "none"}`; forced choices are not
+    /// supported by the current models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// Server-side refusal fallbacks (`"default"`). When set, the request also
+    /// carries the [`FALLBACK_BETA`] header.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallbacks: Option<serde_json::Value>,
 }
 
 /// Token counts of one response.
@@ -193,6 +210,19 @@ impl MessagesClient {
         })
     }
 
+    fn post(&self, api_key: &str, request: &MessagesRequest) -> reqwest::RequestBuilder {
+        let mut builder = self
+            .http
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json");
+        if request.fallbacks.is_some() {
+            builder = builder.header("anthropic-beta", FALLBACK_BETA);
+        }
+        builder.json(request)
+    }
+
     /// Send one non-streaming request.
     pub async fn create(
         &self,
@@ -200,12 +230,7 @@ impl MessagesClient {
         request: &MessagesRequest,
     ) -> Result<MessagesResponse, ClientError> {
         let response = self
-            .http
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(request)
+            .post(api_key, request)
             .send()
             .await
             .map_err(|_| ClientError::Transport)?;
@@ -221,9 +246,53 @@ impl MessagesClient {
     }
 }
 
+impl MessagesClient {
+    /// Send a streaming request (`stream: true` is set here). A non-2xx answer
+    /// is an error; otherwise the body is read chunk by chunk from the
+    /// returned [`ByteStream`].
+    pub async fn stream(
+        &self,
+        api_key: &str,
+        request: &MessagesRequest,
+    ) -> Result<ByteStream, ClientError> {
+        let mut request = request.clone();
+        request.stream = Some(true);
+        let response = self
+            .post(api_key, &request)
+            .timeout(STREAM_TIMEOUT)
+            .send()
+            .await
+            .map_err(|_| ClientError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.bytes().await.map_err(|_| ClientError::Transport)?;
+            return Err(ClientError::Status {
+                status: status.as_u16(),
+                error_type: error_type(&body),
+            });
+        }
+        Ok(ByteStream { response })
+    }
+}
+
+/// The body of a streaming response.
+pub struct ByteStream {
+    response: reqwest::Response,
+}
+
+impl ByteStream {
+    /// The next chunk of the body; `None` at the end.
+    pub async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, ClientError> {
+        match self.response.chunk().await {
+            Ok(chunk) => Ok(chunk.map(|bytes| bytes.to_vec())),
+            Err(_) => Err(ClientError::Transport),
+        }
+    }
+}
+
 /// Anthropic's `error.type` if it is a plain identifier (it always is; the
 /// check keeps arbitrary text out of the error).
-fn error_type(body: &[u8]) -> Option<String> {
+pub(crate) fn error_type(body: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let kind = value.get("error")?.get("type")?.as_str()?;
     (kind.len() <= 64 && kind.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
@@ -240,8 +309,7 @@ mod tests {
             model: "claude-opus-5-5".into(),
             max_tokens: 1,
             messages: vec![Message::user("ping")],
-            system: None,
-            output_config: None,
+            ..Default::default()
         };
         assert_eq!(
             serde_json::to_value(&request).unwrap(),

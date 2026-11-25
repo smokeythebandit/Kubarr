@@ -4,19 +4,28 @@
 //! whether one is configured.
 
 use axum::{
-    extract::{rejection::JsonRejection, State},
+    body::Body,
+    extract::{rejection::JsonRejection, Path, State},
+    http::{header, StatusCode},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tokio_util::io::ReaderStream;
 
 use crate::error::{AppError, Result};
 use crate::middleware::permissions::{
     AssistantUse, Authenticated, Authorized, Permission, SettingsManage, SettingsView,
 };
 use crate::models::audit_log::{AuditAction, ResourceType};
+use crate::services::assistant::chat::{run_turn, EventSink, Turn};
+use crate::services::assistant::conversations::{
+    self, ChatContext, ConversationDetail, ConversationSummary,
+};
 use crate::services::assistant::key_store::normalize_key;
+use crate::services::assistant::tools::{Monitoring, ToolContext};
 use crate::services::assistant::{budget, settings, AssistantSettings};
 use crate::state::AppState;
 
@@ -29,6 +38,15 @@ pub fn assistant_routes(state: AppState) -> Router {
         )
         .route("/key", get(get_key).put(put_key).delete(delete_key))
         .route("/key/test", post(test_key))
+        .route(
+            "/conversations",
+            get(list_conversations).post(create_conversation),
+        )
+        .route(
+            "/conversations/{id}",
+            get(get_conversation).delete(delete_conversation),
+        )
+        .route("/conversations/{id}/messages", post(post_message))
         .with_state(state)
 }
 
@@ -281,4 +299,230 @@ pub async fn test_key(
             }))
         }
     }
+}
+
+// ============================================================================
+// Chat
+// ============================================================================
+
+fn require_use(auth: &Authenticated) -> Result<()> {
+    if auth.permissions().iter().any(|p| p == AssistantUse::NAME) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(format!(
+            "Permission denied: {} required",
+            AssistantUse::NAME
+        )))
+    }
+}
+
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct CreateConversationRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub context: Option<ChatContext>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PostMessageRequest {
+    /// The question.
+    pub text: String,
+    /// The page and app the question is asked from.
+    #[serde(default)]
+    pub context: Option<ChatContext>,
+}
+
+/// The caller's conversations, most recent first
+#[utoipa::path(
+    get,
+    path = "/api/assistant/conversations",
+    tag = "Assistant",
+    responses((status = 200, body = Vec<ConversationSummary>))
+)]
+pub async fn list_conversations(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> Result<Json<Vec<ConversationSummary>>> {
+    require_use(&auth)?;
+    let db = state.get_db().await?;
+    Ok(Json(conversations::list(&db, auth.user_id()).await?))
+}
+
+/// Start a conversation
+#[utoipa::path(
+    post,
+    path = "/api/assistant/conversations",
+    tag = "Assistant",
+    request_body = CreateConversationRequest,
+    responses((status = 200, body = ConversationSummary))
+)]
+pub async fn create_conversation(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    body: Option<Json<CreateConversationRequest>>,
+) -> Result<Json<ConversationSummary>> {
+    require_use(&auth)?;
+    let request = body.map(|Json(b)| b).unwrap_or_default();
+    let db = state.get_db().await?;
+    let conversation = conversations::create(
+        &db,
+        auth.user_id(),
+        request.title.as_deref(),
+        &request.context.unwrap_or_default(),
+    )
+    .await?;
+    Ok(Json(conversation.into()))
+}
+
+/// One of the caller's conversations with its messages
+#[utoipa::path(
+    get,
+    path = "/api/assistant/conversations/{id}",
+    tag = "Assistant",
+    params(("id" = String, Path, description = "Conversation id")),
+    responses(
+        (status = 200, body = ConversationDetail),
+        (status = 404, description = "No such conversation of the caller")
+    )
+)]
+pub async fn get_conversation(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<String>,
+) -> Result<Json<ConversationDetail>> {
+    require_use(&auth)?;
+    let db = state.get_db().await?;
+    let conversation = conversations::owned(&db, auth.user_id(), &id).await?;
+    Ok(Json(conversations::detail(&db, conversation).await?))
+}
+
+/// Delete one of the caller's conversations
+#[utoipa::path(
+    delete,
+    path = "/api/assistant/conversations/{id}",
+    tag = "Assistant",
+    params(("id" = String, Path, description = "Conversation id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "No such conversation of the caller")
+    )
+)]
+pub async fn delete_conversation(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    require_use(&auth)?;
+    let db = state.get_db().await?;
+    let conversation = conversations::owned(&db, auth.user_id(), &id).await?;
+    conversations::delete(&db, &conversation.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ask a question; the answer streams back as server-sent events
+///
+/// Events: `status` `{text}` while tools run, `text_delta` `{text}`,
+/// `sources` `{items}`, then `done` `{message_id}` or `error` `{message}`.
+#[utoipa::path(
+    post,
+    path = "/api/assistant/conversations/{id}/messages",
+    tag = "Assistant",
+    params(("id" = String, Path, description = "Conversation id")),
+    request_body = PostMessageRequest,
+    responses(
+        (status = 200, description = "Server-sent event stream", content_type = "text/event-stream"),
+        (status = 400, description = "Empty or too long question"),
+        (status = 404, description = "No such conversation of the caller"),
+        (status = 429, description = "Too many questions; try again later"),
+        (status = 503, description = "Not set up, switched off, or the monthly budget is used up")
+    )
+)]
+pub async fn post_message(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<String>,
+    body: std::result::Result<Json<PostMessageRequest>, JsonRejection>,
+) -> Result<Response> {
+    require_use(&auth)?;
+    let Json(request) =
+        body.map_err(|_| AppError::BadRequest("Expected a JSON body {\"text\": \"...\"}".into()))?;
+    let question = request.text.trim().to_string();
+    if question.is_empty() {
+        return Err(AppError::BadRequest("text: ask a question".into()));
+    }
+    if question.chars().count() > conversations::MAX_QUESTION_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "text: at most {} characters",
+            conversations::MAX_QUESTION_CHARS
+        )));
+    }
+    let db = state.get_db().await?;
+    let conversation = conversations::owned(&db, auth.user_id(), &id).await?;
+
+    let settings = settings::load(&db).await?;
+    if !settings.enabled {
+        return Err(AppError::ServiceUnavailable(
+            "The assistant is switched off.".into(),
+        ));
+    }
+    let api_key = match state.assistant.key_store.get().await {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return Err(AppError::ServiceUnavailable(
+                "The assistant is not set up: no Anthropic API key is configured.".into(),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!("Could not read the assistant API key: {e}");
+            return Err(AppError::ServiceUnavailable(
+                "The assistant's API key could not be read.".into(),
+            ));
+        }
+    };
+    budget::ensure_budget(&db).await?;
+    conversations::take_rate_slot(&db, auth.user_id()).await?;
+
+    let stored: ChatContext = conversation
+        .context_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    let context = request
+        .context
+        .unwrap_or_default()
+        .sanitized()
+        .or(&stored.sanitized());
+    let (question_id, answer_id) = conversations::start_turn(&db, &conversation, &question).await?;
+    let ctx = ToolContext {
+        state: state.clone(),
+        db: db.clone(),
+        user_id: auth.user_id(),
+        username: auth.user().username.clone(),
+        permissions: auth.permissions().to_vec(),
+        conversation_id: conversation.id.clone(),
+        monitoring: Monitoring::detect(&db).await,
+    };
+    let turn = Turn {
+        ctx,
+        conversation,
+        question,
+        question_id,
+        answer_id,
+        context,
+        settings,
+        api_key,
+    };
+
+    let (writer, reader) = tokio::io::duplex(16 * 1024);
+    tokio::spawn(async move {
+        let mut sink = EventSink::new(writer);
+        run_turn(turn, &mut sink).await;
+    });
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(ReaderStream::new(reader)))
+        .map_err(|e| AppError::Internal(format!("Could not start the stream: {e}")))
 }

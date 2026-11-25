@@ -97,6 +97,7 @@ pub fn start_scheduler(db: Arc<DatabaseConnection>, cancel: CancellationToken) {
     let tasks: Vec<Box<dyn PeriodicTask>> = vec![
         Box::new(SessionCleanupTask),
         Box::new(AuditRetentionTask { days }),
+        Box::new(super::assistant::retention::AssistantRetentionTask),
     ];
 
     for task in tasks {

@@ -1,14 +1,21 @@
 //! AI assistant foundation: the Anthropic API key, the Messages API client,
 //! settings, pricing and the monthly budget.
 //!
-//! The chat loop, tools and actions build on these in later phases; the
-//! auto-update AI recovery shares the same key and budget.
+//! The chat (conversations, the streaming tool loop and the read tools)
+//! builds on these; the auto-update AI recovery shares the same key and
+//! budget.
 
 pub mod budget;
+pub mod chat;
 pub mod client;
+pub mod conversations;
 pub mod key_store;
 pub mod pricing;
+pub mod prompt;
+pub mod retention;
 pub mod settings;
+pub mod stream;
+pub mod tools;
 
 use std::sync::Arc;
 

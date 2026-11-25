@@ -80,6 +80,8 @@ pub enum AuditAction {
     InviteDeleted,
     /// The assistant's spend this month passed 80 % of its budget.
     AssistantBudgetWarning,
+    /// The assistant ran a read tool for a user (not notifiable).
+    AssistantToolCall,
 
     // API access
     ApiAccess,
@@ -128,6 +130,7 @@ impl std::fmt::Display for AuditAction {
             AuditAction::InviteUsed => write!(f, "invite_used"),
             AuditAction::InviteDeleted => write!(f, "invite_deleted"),
             AuditAction::AssistantBudgetWarning => write!(f, "assistant_budget_warning"),
+            AuditAction::AssistantToolCall => write!(f, "assistant_tool_call"),
             AuditAction::ApiAccess => write!(f, "api_access"),
         }
     }
@@ -244,6 +247,10 @@ mod tests {
         assert_eq!(
             AuditAction::AssistantBudgetWarning.to_string(),
             "assistant_budget_warning"
+        );
+        assert_eq!(
+            AuditAction::AssistantToolCall.to_string(),
+            "assistant_tool_call"
         );
         assert_eq!(AuditAction::InviteDeleted.to_string(), "invite_deleted");
         assert_eq!(AuditAction::ApiAccess.to_string(), "api_access");

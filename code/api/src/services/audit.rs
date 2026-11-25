@@ -213,7 +213,14 @@ fn allowed_label(key: &str, value: &str) -> bool {
         ),
         "method" => matches!(value, "totp" | "recovery_code" | "password"),
         "changed" => matches!(value, "apps" | "permissions"),
-        "operation_id" => uuid::Uuid::parse_str(value).is_ok(),
+        "operation_id" | "conversation_id" => uuid::Uuid::parse_str(value).is_ok(),
+        // Assistant tool names: a fixed vocabulary of identifiers.
+        "tool" => {
+            !value.is_empty()
+                && value.len() <= 32
+                && value.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        }
+        "target" => app_slug(value),
         _ => false,
     }
 }
@@ -228,6 +235,9 @@ fn allowed_detail_key(key: &str) -> bool {
             | "method"
             | "changed"
             | "operation_id"
+            | "conversation_id"
+            | "tool"
+            | "target"
             | "days"
             | "deleted"
             | "attempts"
