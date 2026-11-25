@@ -1655,6 +1655,8 @@ async fn test_get_unread_count_returns_correct_count() {
         "Response must include count field"
     );
     assert_eq!(json["count"], 2, "Unread count must be 2");
+    assert_eq!(json["critical"], 0, "No critical notifications were seeded");
+    assert_eq!(json["attention"], 0, "No warnings or criticals were seeded");
 }
 
 // ============================================================================

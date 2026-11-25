@@ -14,6 +14,21 @@ use kubarr::models::{
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use tower::ServiceExt;
 
+// JWT keys are process-global: two tests each calling init_jwt_keys race,
+// and the loser's session cookie no longer verifies (401). Initialise once.
+static JWT_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn ensure_jwt_keys() {
+    JWT_INIT
+        .get_or_init(|| async {
+            let db = create_test_db_with_seed().await;
+            kubarr::services::init_jwt_keys(&db)
+                .await
+                .expect("Failed to init JWT keys");
+        })
+        .await;
+}
+
 async fn send(
     app: axum::Router,
     method: &str,
@@ -74,7 +89,7 @@ async fn assert_registered_access(app: &impl Fn() -> axum::Router, cookie: &str)
 #[tokio::test]
 async fn registration_approval_invitation_and_permissions() {
     let db = create_test_db_with_seed().await;
-    kubarr::services::init_jwt_keys(&db).await.unwrap();
+    ensure_jwt_keys().await;
     create_test_user_with_role(
         &db,
         "registration_admin",
@@ -407,7 +422,7 @@ async fn registration_approval_invitation_and_permissions() {
 #[tokio::test]
 async fn invite_role_is_granted_on_registration() {
     let db = create_test_db_with_seed().await;
-    kubarr::services::init_jwt_keys(&db).await.unwrap();
+    ensure_jwt_keys().await;
     // Generated per run so no credential literal lives in the test.
     let admin_password = uuid::Uuid::new_v4().to_string();
     create_test_user_with_role(
