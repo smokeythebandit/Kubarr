@@ -1,63 +1,42 @@
+import { useEffect, useState } from 'react'
 import type { UpdateSettingsResponse } from '../api/updates'
+import { formatHour, nowInZone, validZone, windowPosition } from '../components/settings/weekSchedule'
 
-interface ZonedParts {
-  year: number
-  month: number
-  day: number
-  hour: number
-  minute: number
-  weekday: string
-}
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 
-function zoned(date: Date, timeZone: string): ZonedParts {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hourCycle: 'h23', weekday: 'long',
-  }).formatToParts(date)
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? ''
-  return {
-    year: Number(get('year')),
-    month: Number(get('month')),
-    day: Number(get('day')),
-    // Some engines render midnight as "24" even with h23.
-    hour: Number(get('hour')) % 24,
-    minute: Number(get('minute')),
-    weekday: get('weekday'),
-  }
-}
-
-/** The card's auto-update status line; null when the viewer cannot see the settings. */
+/**
+ * The card's auto-update status line; null when the viewer cannot see the
+ * settings. Computed from the schedule and zone against `now`, so it stays
+ * right between refetches.
+ */
 export function autoUpdateStatus(settings: UpdateSettingsResponse | undefined, now: Date = new Date()): string | null {
   if (!settings) return null
   if (!settings.enabled) return 'Automatic updates are off'
-  const hours = settings.schedule?.flat() ?? []
-  if (!hours.some(Boolean) || !settings.next_window_start) return 'No update hours selected'
-  if (hours.length === 168 && hours.every(Boolean)) return 'Updates can start any time'
+  const zone = validZone(settings.timezone)
+  const pos = windowPosition(settings.schedule ?? [], nowInZone(zone, now))
+  if (pos.kind === 'empty') return 'No update hours selected'
+  if (pos.kind === 'always') return 'Updates can start any time'
+  if (pos.kind === 'open') return `Auto-update window open now (${zone})`
 
-  const start = new Date(settings.next_window_start)
-  if (Number.isNaN(start.getTime())) return null
-  let zone = settings.timezone
-  let at: ZonedParts
-  let today: ZonedParts
-  try {
-    at = zoned(start, zone)
-    today = zoned(now, zone)
-  } catch {
-    zone = 'UTC'
-    at = zoned(start, zone)
-    today = zoned(now, zone)
-  }
-  const time = `${String(at.hour).padStart(2, '0')}:${String(at.minute).padStart(2, '0')}`
-  if (start.getTime() <= now.getTime()) return `Auto-update window open now (${zone})`
-
-  const days = Math.round(
-    (Date.UTC(at.year, at.month - 1, at.day) - Date.UTC(today.year, today.month - 1, today.day)) / 86_400_000,
-  )
-  const night = at.hour < 6 || at.hour >= 18
+  // Same local date: tonight or today by the hour; next date: tomorrow.
   let when: string
-  if (days === 0) when = night ? 'tonight' : 'today'
-  else if (days === 1 && at.hour < 6) when = 'tonight'
-  else if (days === 1) when = 'tomorrow'
-  else when = `on ${at.weekday}`
-  return `Auto-update ${when} at ${time} (${zone})`
+  if (pos.days === 0) when = pos.hour >= 18 || pos.hour < 6 ? 'tonight' : 'today'
+  else if (pos.days === 1) when = 'tomorrow'
+  else when = `on ${WEEKDAYS[pos.day]}`
+  return `Auto-update ${when} at ${formatHour(pos.hour)} (${zone})`
+}
+
+/** The current time, refreshed every `intervalMs` while mounted. */
+export function useNow(intervalMs = 60_000): Date {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), intervalMs)
+    return () => window.clearInterval(id)
+  }, [intervalMs])
+  return now
+}
+
+/** {@link autoUpdateStatus} re-evaluated every minute. */
+export function useAutoUpdateStatus(settings: UpdateSettingsResponse | undefined): string | null {
+  return autoUpdateStatus(settings, useNow())
 }

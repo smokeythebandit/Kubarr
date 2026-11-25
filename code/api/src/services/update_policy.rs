@@ -159,17 +159,20 @@ impl Schedule {
         self.0.iter().map(|r| r.to_vec()).collect()
     }
 
-    /// Convert a legacy daily window (`HH:MM` start, length in minutes) to the
-    /// hours it touched on every day. A window past midnight spills into the
-    /// next day (Sunday wraps to Monday).
+    /// Convert a legacy daily window (`HH:MM` start, length in minutes) to
+    /// whole hours on every day. Never starts earlier than the legacy window:
+    /// the start rounds up to the next full hour and so does the end, keeping
+    /// at least one hour. A window past midnight spills into the next day
+    /// (Sunday wraps to Monday).
     pub fn from_legacy_window(start: &str, minutes: u32) -> Result<Self, String> {
         let start = NaiveTime::parse_from_str(start, "%H:%M")
             .map_err(|_| format!("invalid window start '{start}', expected HH:MM"))?;
         let begin = start.hour() as usize * 60 + start.minute() as usize;
         let end = begin + minutes as usize;
+        let first = begin.div_ceil(60);
+        let last = end.div_ceil(60).max(first + 1);
         let mut grid = [[false; HOURS]; DAYS];
-        // Hours from the one holding `begin` up to the one holding `end - 1`.
-        for slot in (begin / 60)..end.div_ceil(60) {
+        for slot in first..last {
             for day in 0..DAYS {
                 let index = (day * HOURS + slot) % (DAYS * HOURS);
                 grid[index / HOURS][index % HOURS] = true;
@@ -182,11 +185,32 @@ impl Schedule {
         !self.0.iter().flatten().any(|&on| on)
     }
 
-    /// Whether the local weekday and hour of `now` in `tz` is enabled. A local
-    /// hour skipped by DST never occurs; a repeated one is open both times.
+    /// Whether the local weekday and hour of `now` in `tz` is enabled. A
+    /// repeated local hour (DST fall-back) is open both times. A local hour
+    /// skipped by DST (spring-forward) carries over: the first existing hour
+    /// after the gap is open when any skipped hour is enabled.
     pub fn is_open(&self, tz: &Tz, now: DateTime<Utc>) -> bool {
-        tz.local_slot(now)
-            .is_some_and(|(day, hour, _)| self.0[day][hour])
+        let Some((day, hour, into)) = tz.local_slot(now) else {
+            return false;
+        };
+        if self.0[day][hour] {
+            return true;
+        }
+        // The local hour just before this one started; more than one hour of
+        // the week back means the hours in between never occurred.
+        let before =
+            DateTime::from_timestamp(now.timestamp() - into - 1, 0).and_then(|t| tz.local_slot(t));
+        let Some((pd, ph, _)) = before else {
+            return false;
+        };
+        let week = DAYS * HOURS;
+        let cur = day * HOURS + hour;
+        let prev = pd * HOURS + ph;
+        let gap = (cur + week - prev) % week;
+        (1..gap).any(|k| {
+            let i = (prev + k) % week;
+            self.0[i / HOURS][i % HOURS]
+        })
     }
 
     pub fn is_full(&self) -> bool {
@@ -295,9 +319,29 @@ mod tests {
             Schedule::from_legacy_window("04:00", 120).unwrap(),
             daily(&[4, 5])
         );
+        // Sub-hour starts round up: never earlier than the owner allowed.
         assert_eq!(
             Schedule::from_legacy_window("04:30", 60).unwrap(),
-            daily(&[4, 5])
+            daily(&[5])
+        );
+        assert_eq!(
+            Schedule::from_legacy_window("04:30", 90).unwrap(),
+            daily(&[5])
+        );
+        assert_eq!(
+            Schedule::from_legacy_window("04:30", 15).unwrap(),
+            daily(&[5])
+        );
+        assert_eq!(
+            Schedule::from_legacy_window("04:00", 30).unwrap(),
+            daily(&[4])
+        );
+        // 23:30 for 1 h: hour 00 of the next day only.
+        let late = Schedule::from_legacy_window("23:30", 60).unwrap();
+        assert_eq!(late, daily(&[0]));
+        assert!(
+            late.0[0][0] && !late.0[6][23],
+            "Monday 00 from Sunday 23:30"
         );
         // 23:00 for 3 h: hour 23 on day d, hours 0-1 on d+1 (Sunday wraps).
         assert_eq!(
@@ -397,14 +441,27 @@ mod tests {
         // Sunday 2027-03-28: Amsterdam jumps 02:00 CET -> 03:00 CEST at 01:00Z.
         let tz = amsterdam();
         let skipped = hours(&[(6, 2)]);
-        // Local 02:xx never occurs that day: closed across the jump.
+        // Local 02:xx never occurs that day: it carries over to 03:00-04:00
+        // CEST (01:00Z-02:00Z).
         assert!(!skipped.is_open(&tz, utc("2027-03-28T00:59:59Z")));
-        assert!(!skipped.is_open(&tz, utc("2027-03-28T01:00:00Z")));
-        // The next 02:00 is a week later, CEST: 00:00Z.
+        assert!(skipped.is_open(&tz, utc("2027-03-28T01:00:00Z")));
+        assert!(skipped.is_open(&tz, utc("2027-03-28T01:59:59Z")));
+        assert!(!skipped.is_open(&tz, utc("2027-03-28T02:00:00Z")));
         assert_eq!(
             skipped.next_open(&tz, utc("2027-03-27T12:00:00Z")),
+            Some(utc("2027-03-28T01:00:00Z"))
+        );
+        assert_eq!(
+            skipped.next_open(&tz, utc("2027-03-28T01:30:00Z")),
+            Some(utc("2027-03-28T01:00:00Z"))
+        );
+        // After that, the next 02:00 is a week later, CEST: 00:00Z.
+        assert_eq!(
+            skipped.next_open(&tz, utc("2027-03-28T02:00:00Z")),
             Some(utc("2027-04-04T00:00:00Z"))
         );
+        // An ordinary Sunday 03:00 is not opened by the carry-over rule.
+        assert!(!skipped.is_open(&tz, utc("2027-04-04T01:00:00Z")));
         // A run 01-03 local spans 00:00Z..02:00Z (two real hours).
         let run = hours(&[(6, 1), (6, 2), (6, 3)]);
         assert!(run.is_open(&tz, utc("2027-03-28T01:30:00Z")));

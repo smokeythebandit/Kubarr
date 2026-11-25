@@ -164,20 +164,24 @@ export function WeekScheduleGrid({ schedule, onChange, timezone, active, readOnl
   };
 
   const onCellKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>, d: number, h: number) => {
-    if (readOnly) return;
     if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
-      toggle(d, h);
+      if (!readOnly) toggle(d, h);
       return;
     }
-    const moves: Record<string, [number, number]> = {
-      ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0],
-    };
-    const move = moves[e.key];
-    if (!move) return;
+    // Navigation works read-only too (roving tabindex); only toggling is blocked.
+    const ctrl = e.ctrlKey || e.metaKey;
+    let target: [number, number] | null = null;
+    if (e.key === 'ArrowLeft') target = [d, h - 1];
+    else if (e.key === 'ArrowRight') target = [d, h + 1];
+    else if (e.key === 'ArrowUp') target = [d - 1, h];
+    else if (e.key === 'ArrowDown') target = [d + 1, h];
+    else if (e.key === 'Home') target = ctrl ? [0, 0] : [d, 0];
+    else if (e.key === 'End') target = ctrl ? [6, 23] : [d, 23];
+    if (!target) return;
     e.preventDefault();
-    const nd = Math.min(6, Math.max(0, d + move[0]));
-    const nh = Math.min(23, Math.max(0, h + move[1]));
+    const nd = Math.min(6, Math.max(0, target[0]));
+    const nh = Math.min(23, Math.max(0, target[1]));
     setFocus({ d: nd, h: nh });
     cellRefs.current[nd * 24 + nh]?.focus();
   };

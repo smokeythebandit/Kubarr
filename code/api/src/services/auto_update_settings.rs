@@ -36,10 +36,29 @@ pub struct AutoUpdateSettings {
     pub enabled: bool,
     /// Weekly schedule: exactly 7 days (Monday first) of 24 local hours each;
     /// an automatic update may start while the current local hour is true.
+    #[schema(schema_with = schedule_schema)]
     pub schedule: Vec<Vec<bool>>,
     /// IANA timezone name the schedule is evaluated in.
     pub timezone: String,
     pub health_timeout_minutes: u32,
+}
+
+/// OpenAPI schema for [`AutoUpdateSettings::schedule`]: 7 arrays of 24 booleans.
+fn schedule_schema() -> utoipa::openapi::schema::Array {
+    use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, Type};
+    let day = ArrayBuilder::new()
+        .items(ObjectBuilder::new().schema_type(Type::Boolean))
+        .min_items(Some(24))
+        .max_items(Some(24));
+    ArrayBuilder::new()
+        .items(day)
+        .min_items(Some(7))
+        .max_items(Some(7))
+        .description(Some(
+            "Weekly schedule: exactly 7 days (Monday first) of 24 local hours each; \
+             an automatic update may start while the current local hour is true.",
+        ))
+        .build()
 }
 
 impl Default for AutoUpdateSettings {
@@ -228,6 +247,18 @@ mod tests {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         crate::migrations::Migrator::up(&db, None).await.unwrap();
         db
+    }
+
+    #[test]
+    fn test_schedule_schema_has_7x24_bounds() {
+        use utoipa::PartialSchema;
+        let schema = serde_json::to_value(AutoUpdateSettings::schema()).unwrap();
+        let sched = &schema["properties"]["schedule"];
+        assert_eq!(sched["minItems"], 7, "{sched}");
+        assert_eq!(sched["maxItems"], 7, "{sched}");
+        assert_eq!(sched["items"]["minItems"], 24, "{sched}");
+        assert_eq!(sched["items"]["maxItems"], 24, "{sched}");
+        assert_eq!(sched["items"]["items"]["type"], "boolean", "{sched}");
     }
 
     fn utc(s: &str) -> DateTime<Utc> {

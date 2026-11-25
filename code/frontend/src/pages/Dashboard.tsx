@@ -9,7 +9,7 @@ import { Cpu, MemoryStick, Container, HardDrive, Activity, AlertCircle, CheckCir
 import { Link } from 'react-router-dom'
 import { appsApi } from '../api/apps'
 import { updatesApi } from '../api/updates'
-import { autoUpdateStatus } from './autoUpdateStatus'
+import { useAutoUpdateStatus } from './autoUpdateStatus'
 import { CLASSES_WITH_FLOW_COUNTS, formatBandwidth, totalByteRate } from '../api/networking'
 import { useFlowClasses } from '../hooks/useFlowClasses'
 import { FlowSplitBar } from '../components/networking/FlowSplitBar'
@@ -192,8 +192,10 @@ export default function Dashboard() {
     queryFn: updatesApi.getSettings,
     enabled: canViewSettings,
     staleTime: 60000,
+    // The line itself re-renders every minute; refetch to pick up edits.
+    refetchInterval: 5 * 60_000,
   })
-  const autoUpdateLine = autoUpdateStatus(updateSettings)
+  const autoUpdateLine = useAutoUpdateStatus(updateSettings)
   const availableUpdateApps = useMemo(
     () => availableUpdates
       .map((state) => catalog.find((app) => app.name === state.app_name))

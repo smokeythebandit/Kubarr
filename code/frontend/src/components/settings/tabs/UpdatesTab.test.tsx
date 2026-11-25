@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { UpdatesTab } from './UpdatesTab';
 import { emptySchedule, presetSchedule } from '../weekSchedule';
@@ -107,5 +107,40 @@ describe('UpdatesTab', () => {
     fireEvent.keyDown(screen.getByRole('gridcell', { name: 'Mon 10:00' }), { key: ' ' });
     expect(screen.getByRole('gridcell', { name: 'Mon 10:00' })).toHaveAttribute('aria-selected', 'false');
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+  });
+
+  describe('window status line', () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('shows when the open window ends instead of its past start', async () => {
+      // Wednesday 2026-11-25 04:30 UTC, inside the nightly 04–06 window.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-11-25T04:30:00Z'));
+      mocks.getSettings.mockResolvedValue({ ...defaults, timezone_saved: true, next_window_start: '2026-11-25T04:00:00Z' });
+      render(<UpdatesTab />);
+      expect(await screen.findByText('Open now, until 06:00')).toBeVisible();
+    });
+
+    it('names the end day when the run ends on a later day, in the saved zone', async () => {
+      // Monday 23:00 – Tuesday 06:00 Amsterdam; now Monday 23:30 Amsterdam.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-11-23T22:30:00Z'));
+      const schedule = emptySchedule();
+      schedule[0][23] = true;
+      for (let h = 0; h < 6; h++) schedule[1][h] = true;
+      mocks.getSettings.mockResolvedValue({
+        ...defaults, schedule, timezone: 'Europe/Amsterdam', timezone_saved: true, next_window_start: '2026-11-23T22:00:00Z',
+      });
+      render(<UpdatesTab />);
+      expect(await screen.findByText('Open now, until Tue 06:00')).toBeVisible();
+    });
+
+    it('shows the next start while closed', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-11-25T12:00:00Z'));
+      mocks.getSettings.mockResolvedValue({ ...defaults, timezone_saved: true, next_window_start: '2026-11-26T04:00:00Z' });
+      render(<UpdatesTab />);
+      expect(await screen.findByText(/^Next window: /)).toBeVisible();
+    });
   });
 });
