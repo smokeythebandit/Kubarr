@@ -1,6 +1,7 @@
 mod email;
 mod messagebird;
 mod telegram;
+pub mod verification;
 
 pub use email::EmailProvider;
 pub use messagebird::MessageBirdProvider;
@@ -12,6 +13,7 @@ use sea_orm::{
     QueryOrder, QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -136,6 +138,8 @@ pub struct NotificationService {
     messagebird: Arc<RwLock<Option<MessageBirdProvider>>>,
     /// `(count, max(updated_at))` of the channel table when providers were last loaded.
     fingerprint: Arc<RwLock<Option<ChannelFingerprint>>>,
+    /// Providers that take precedence over the configured ones (tests and stubs).
+    overrides: Arc<RwLock<HashMap<ChannelType, Arc<dyn NotificationProvider>>>>,
 }
 
 type ChannelFingerprint = (i64, Option<chrono::DateTime<chrono::Utc>>);
@@ -148,7 +152,42 @@ impl NotificationService {
             telegram: Arc::new(RwLock::new(None)),
             messagebird: Arc::new(RwLock::new(None)),
             fingerprint: Arc::new(RwLock::new(None)),
+            overrides: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Route a channel through `provider` instead of the configured one, regardless of
+    /// the channel table. Meant for tests and local stubs; survives `init_providers`.
+    #[doc(hidden)]
+    pub async fn set_provider_override(&self, provider: Arc<dyn NotificationProvider>) {
+        self.overrides
+            .write()
+            .await
+            .insert(provider.channel_type(), provider);
+    }
+
+    async fn override_for(&self, channel_type: &str) -> Option<Arc<dyn NotificationProvider>> {
+        let channel = ChannelType::parse(channel_type)?;
+        self.overrides.read().await.get(&channel).cloned()
+    }
+
+    /// Send one message straight to `destination` over `channel_type`, bypassing event
+    /// settings and user preferences (used for verification codes). Not logged.
+    pub async fn send_direct(
+        &self,
+        channel_type: &str,
+        destination: &str,
+        title: &str,
+        body: &str,
+    ) -> SendResult {
+        self.refresh_or_warn().await;
+        let message = NotificationMessage {
+            recipient: destination.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            severity: NotificationSeverity::Info,
+        };
+        self.send_to_channel(channel_type, &message).await
     }
 
     pub async fn set_db(&self, db: DatabaseConnection) {
@@ -272,6 +311,12 @@ impl NotificationService {
             Some(db) => db,
             None => return Ok(()), // Silently skip if DB not initialized
         };
+
+        // Noise types are not configurable in the UI, so a stale enabled row must
+        // not dispatch them.
+        if !action.is_notifiable() {
+            return Ok(());
+        }
 
         let event_type = action.to_string();
 
@@ -405,6 +450,9 @@ impl NotificationService {
         channel_type: &str,
         message: &NotificationMessage,
     ) -> SendResult {
+        if let Some(provider) = self.override_for(channel_type).await {
+            return provider.send(message).await;
+        }
         match channel_type {
             "email" => {
                 let email_lock = self.email.read().await;
@@ -464,6 +512,9 @@ impl NotificationService {
     /// Test a notification channel
     pub async fn test_channel(&self, channel_type: &str, destination: &str) -> SendResult {
         self.refresh_or_warn().await;
+        if let Some(provider) = self.override_for(channel_type).await {
+            return provider.test(destination).await;
+        }
         match channel_type {
             "email" => {
                 let email_lock = self.email.read().await;
@@ -606,6 +657,7 @@ impl Clone for NotificationService {
             telegram: Arc::clone(&self.telegram),
             messagebird: Arc::clone(&self.messagebird),
             fingerprint: Arc::clone(&self.fingerprint),
+            overrides: Arc::clone(&self.overrides),
         }
     }
 }
@@ -691,6 +743,11 @@ fn format_event_title(action: &AuditAction) -> String {
         AuditAction::InviteCreated => "Invite Link Created".to_string(),
         AuditAction::InviteUsed => "Invite Link Used".to_string(),
         AuditAction::InviteDeleted => "Invite Link Deleted".to_string(),
+        // Notification destinations
+        AuditAction::NotificationVerificationSent => "Verification Code Sent".to_string(),
+        AuditAction::NotificationDestinationVerified => {
+            "Notification Destination Verified".to_string()
+        }
         // API
         AuditAction::ApiAccess => "API Access".to_string(),
     }
@@ -910,6 +967,13 @@ fn format_event_body(
             } else {
                 format!("Invite link deleted by {}: {}", user, detail)
             }
+        }
+        // Notification destinations
+        AuditAction::NotificationVerificationSent => {
+            format!("Verification code sent to {}", user)
+        }
+        AuditAction::NotificationDestinationVerified => {
+            format!("User {} verified a notification destination", user)
         }
         // API
         AuditAction::ApiAccess => {

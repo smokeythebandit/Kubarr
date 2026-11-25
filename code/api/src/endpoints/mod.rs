@@ -143,6 +143,8 @@ use crate::state::AppState;
         notifications::update_event,
         notifications::get_preferences,
         notifications::update_preference,
+        notifications::start_verification,
+        notifications::confirm_verification,
         notifications::list_logs,
         // Storage
         storage::browse_directory,

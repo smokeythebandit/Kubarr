@@ -8,6 +8,7 @@ import { changeOwnPassword, get2FAStatus, getRecoveryCodeCount, setup2FA, enable
 import { oauthApi, type LinkedAccount, type AvailableProvider } from '../api/oauth'
 import { getSessions, revokeSession, type SessionInfo } from '../api/auth'
 import { auditApi, type AuditLog } from '../api/audit'
+import NotificationDestinations from '../components/notifications/NotificationDestinations'
 
 export default function AccountPage() {
   const { user, isAdmin, checkAuth, logout } = useAuth()
@@ -806,6 +807,9 @@ export default function AccountPage() {
             </button>
           </form>
         </div>
+
+        {/* Notification destinations */}
+        <NotificationDestinations />
 
         {/* Active Sessions Panel */}
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
