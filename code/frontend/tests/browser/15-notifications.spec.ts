@@ -62,9 +62,11 @@ for (const action of ['single', 'all'] as const) {
 
 test('a critical unread turns the badge red; dismissing it clears the badge and list', async ({ page, api }) => {
   const critical = { ...notification, severity: 'critical' as const };
-  api.get('/api/notifications/inbox/count', { count: 1, critical: 1 });
-  api.get('/api/notifications/inbox?limit=30&offset=0', { notifications: [critical], total: 1, unread: 1 });
-  api.on('DELETE', '/api/notifications/inbox/71', () => ({ json: {} }));
+  let deleted = false;
+  api.on('GET', '/api/notifications/inbox/count', () => ({ json: deleted ? { count: 0, critical: 0, attention: 0 } : { count: 1, critical: 1, attention: 1 } }));
+  api.on('GET', '/api/notifications/inbox?limit=30&offset=0', () => ({ json: deleted
+    ? { notifications: [], total: 0, unread: 0 } : { notifications: [critical], total: 1, unread: 1 } }));
+  api.on('DELETE', '/api/notifications/inbox/71', () => { deleted = true; return { json: {} }; });
   await page.goto('/settings?section=notifications');
   const bell = page.getByRole('button', { name: /^Notifications, \d+ unread/ });
   await expect(bell).toHaveAccessibleName('Notifications, 1 unread, 1 critical');
@@ -83,7 +85,7 @@ test('a critical unread turns the badge red; dismissing it clears the badge and 
 test('the notifications page lists the inbox and filters by facet', async ({ page, api }) => {
   const update = { ...notification, id: 72, title: 'Sonarr update failed', event_type: 'app_update_failed', severity: 'warning' as const,
     message: 'App update failed: app=sonarr from=1 to=2' };
-  api.get('/api/notifications/inbox/count', { count: 2, critical: 0 });
+  api.get('/api/notifications/inbox/count', { count: 2, critical: 0, attention: 1 });
   api.get('/api/notifications/inbox?limit=50&offset=0', { notifications: [update, notification], total: 2, unread: 2 });
   await page.goto('/settings?section=notifications');
   await page.getByRole('link', { name: /^Notifications/ }).click();
@@ -131,6 +133,7 @@ test('channel configuration persists and enabled state controls test delivery co
 });
 
 test('a failed latest delivery marks the channel and both tab badges', async ({ page, api }) => {
+  api.get('/api/notifications/channels', [{ channel_type: 'email', enabled: true, config: { smtp_host: 'smtp.example.test' }, created_at: timestamp, updated_at: timestamp }]);
   api.get('/api/notifications/logs?limit=50', { total: 1, logs: [{ id: 1, user_id: admin.id, channel_type: 'email', event_type: 'user_login',
     recipient: 'a***@example.test', status: 'failed', error_message: 'SMTP refused', created_at: timestamp }] });
   await page.goto('/settings?section=notifications');

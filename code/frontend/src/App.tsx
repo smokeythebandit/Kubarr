@@ -134,7 +134,7 @@ function UserMenu() {
         }`}
       >
         <User size={18} strokeWidth={2} />
-        <span>{user.username}</span>
+        <span className="whitespace-nowrap max-w-[10rem] truncate">{user.username}</span>
         <ChevronDown size={16} strokeWidth={2} className={`transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} />
       </button>
       <div className={`absolute top-full right-0 pt-1 w-56 z-50 transition-all duration-200 ease-out origin-top-right ${
@@ -336,27 +336,31 @@ function Navigation() {
             <Link
               ref={setNavRef('/')}
               to="/"
-              className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
+              aria-label="Dashboard"
+              title="Dashboard"
+              className={`relative flex items-center gap-2 px-3 2xl:px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
                 isActive('/')
                   ? 'text-blue-700 dark:text-blue-300'
                   : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100/80 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-white'
               }`}
             >
               <Ship size={18} strokeWidth={2} />
-              <span>Dashboard</span>
+              <span className="hidden xl:inline">Dashboard</span>
             </Link>
             {canViewApps && (
               <Link
                 ref={setNavRef('/apps')}
                 to="/apps"
-                className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
+                aria-label="Apps"
+                title="Apps"
+                className={`relative flex items-center gap-2 px-3 2xl:px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
                   isActive('/apps')
                     ? 'text-blue-700 dark:text-blue-300'
                     : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100/80 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-white'
                 }`}
               >
                 <Grid3X3 size={18} strokeWidth={2} />
-                <span>Apps</span>
+                <span className="hidden xl:inline">Apps</span>
               </Link>
             )}
             {hasAnySystemPermission && (
@@ -367,14 +371,16 @@ function Navigation() {
               >
                 <button
                   onClick={() => setSystemDropdownOpen(!systemDropdownOpen)}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
+                  aria-label="Status"
+                  title="Status"
+                  className={`flex items-center gap-2 px-3 2xl:px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
                     isSystemActive
                       ? 'text-blue-700 dark:text-blue-300'
                       : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100/80 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-white'
                   }`}
                 >
                   <Activity size={18} strokeWidth={2} />
-                  <span>Status</span>
+                  <span className="hidden xl:inline">Status</span>
                   <ChevronDown size={16} strokeWidth={2} className={`transition-transform ${systemDropdownOpen ? 'rotate-180' : ''}`} />
                 </button>
                 <div className={`absolute top-full left-0 pt-1 w-48 z-50 transition-all duration-200 ease-out origin-top ${
@@ -458,31 +464,35 @@ function Navigation() {
             <Link
               ref={setNavRef('/notifications')}
               to="/notifications"
-              className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
+              aria-label={`Notifications${notificationCounts.count ? `, ${notificationCounts.count} unread` : ''}${notificationCounts.critical ? `, ${notificationCounts.critical} critical` : ''}`}
+              title="Notifications"
+              className={`relative flex items-center gap-2 px-3 2xl:px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
                 isActive('/notifications')
                   ? 'text-blue-700 dark:text-blue-300'
                   : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100/80 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-white'
               }`}
             >
               <Bell size={18} strokeWidth={2} />
-              <span>Notifications</span>
+              <span className="hidden xl:inline">Notifications</span>
               {notificationBadge}
             </Link>
             {canViewSettings && (
               <Link
                 ref={setNavRef('/settings')}
                 to="/settings"
-                className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
+                aria-label="Settings"
+                title="Settings"
+                className={`relative flex items-center gap-2 px-3 2xl:px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
                   isActive('/settings')
                     ? 'text-blue-700 dark:text-blue-300'
                     : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100/80 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-white'
                 }`}
               >
                 <Settings size={18} strokeWidth={2} />
-                <span>Settings</span>
+                <span className="hidden xl:inline">Settings</span>
               </Link>
             )}
-            <div className="flex items-center gap-2 ml-4 border-l border-gray-200 dark:border-gray-700 pl-4">
+            <div className="flex items-center gap-2 ml-2 xl:ml-4 border-l border-gray-200 dark:border-gray-700 pl-2 xl:pl-4">
               <NotificationBell />
               <UserMenu />
               <ThemeToggle />

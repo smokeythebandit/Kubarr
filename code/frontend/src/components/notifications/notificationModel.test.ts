@@ -7,6 +7,7 @@ import {
   categoryOf,
   dayGroupOf,
   formatCount,
+  formatPartialCount,
   isUpdateEvent,
   matchesPageFilter,
   matchesPopoverFilter,
@@ -92,6 +93,8 @@ describe('notification fields', () => {
   it('caps counts and labels the bell', () => {
     expect(formatCount(99)).toBe('99');
     expect(formatCount(100)).toBe('99+');
+    expect(formatPartialCount(3, true)).toBe('3');
+    expect(formatPartialCount(3, false)).toBe('3+');
     expect(bellLabel(3, 0)).toBe('Notifications, 3 unread');
     expect(bellLabel(3, 1)).toBe('Notifications, 3 unread, 1 critical');
   });
@@ -139,8 +142,14 @@ describe('grouping', () => {
     const rows = buildRows([u1, u2, u3, other], NOW);
     expect(describeRows(rows)).toEqual(['# Today 4/3', `- ${u1.id}`, '+ +2 more updates last night', `- ${other.id}`]);
 
-    const open = buildRows([u1, u2, u3, other], NOW, new Set([u1.id]));
+    const stack = rows.find((r) => r.kind === 'stack');
+    expect(stack?.kind === 'stack' && stack.stackId).toMatch(/^app_updated@/);
+    const key = stack?.kind === 'stack' ? stack.stackId : '';
+    const open = buildRows([u1, u2, u3, other], NOW, new Set([key]));
     expect(describeRows(open)).toEqual(['# Today 4/3', `- ${u1.id}`, `- ${u2.id}`, `- ${u3.id}`, `- ${other.id}`]);
+    // The run stays expanded after its first item is dismissed.
+    const afterDismiss = buildRows([u2, u3, other], NOW, new Set([key]));
+    expect(describeRows(afterDismiss)).toEqual(['# Today 3/2', `- ${u2.id}`, `- ${u3.id}`, `- ${other.id}`]);
   });
 
   it('does not collapse across a failure, different nights or afternoons', () => {
@@ -157,21 +166,22 @@ describe('grouping', () => {
 describe('filters', () => {
   const update = make({ event_type: 'app_update_failed', severity: 'warning', read: false, created_at: at(25, 9) });
   const login = make({ event_type: 'login', created_at: at(20, 9) });
-  const crit = make({ event_type: 'system_setting_changed', severity: 'critical', read: true, created_at: at(25, 9) });
+  const crit = make({ event_type: 'system_setting_changed', severity: 'critical', read: false, created_at: at(25, 9) });
+  const readCrit = make({ event_type: 'system_setting_changed', severity: 'critical', read: true, created_at: at(25, 9) });
 
   it('popover pills', () => {
-    expect([update, login, crit].filter((n) => matchesPopoverFilter(n, 'unread'))).toEqual([update]);
-    expect([update, login, crit].filter((n) => matchesPopoverFilter(n, 'attention'))).toEqual([update]);
+    expect([update, login, crit].filter((n) => matchesPopoverFilter(n, 'unread'))).toEqual([update, crit]);
+    expect([update, login, crit].filter((n) => matchesPopoverFilter(n, 'attention'))).toEqual([update, crit]);
     expect([update, login, crit].filter((n) => matchesPopoverFilter(n, 'updates'))).toEqual([update]);
     expect([update, login, crit].filter((n) => matchesPopoverFilter(n, 'all'))).toHaveLength(3);
   });
 
   it('page facets and counters', () => {
-    const all = [update, login, crit];
+    const all = [update, login, crit, readCrit];
     expect(all.filter((n) => matchesPageFilter(n, 'critical', NOW))).toEqual([crit]);
-    expect(all.filter((n) => matchesPageFilter(n, 'recent', NOW))).toEqual([update, crit]);
+    expect(all.filter((n) => matchesPageFilter(n, 'recent', NOW))).toEqual([update, crit, readCrit]);
     expect(all.filter((n) => matchesPageFilter(n, 'security', NOW))).toEqual([login]);
-    expect(all.filter((n) => matchesPageFilter(n, 'system', NOW))).toEqual([crit]);
+    expect(all.filter((n) => matchesPageFilter(n, 'system', NOW))).toEqual([crit, readCrit]);
     expect(all.filter((n) => matchesPageFilter(n, 'updates', NOW))).toEqual([update]);
   });
 });

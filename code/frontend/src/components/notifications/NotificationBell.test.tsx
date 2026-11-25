@@ -41,11 +41,20 @@ function renderBell() {
   );
 }
 
+// A tiny fake server: counts and the inbox are derived from the same list.
+let server: Notification[] = [];
 function inbox(notifications: Notification[]) {
-  mocks.getInbox.mockResolvedValue({
-    notifications,
-    total: notifications.length,
-    unread: notifications.filter((n) => !n.read).length,
+  server = notifications.map((n) => ({ ...n }));
+}
+function counts(over: Partial<{ count: number; critical: number; attention: number }> = {}) {
+  mocks.getUnreadCounts.mockImplementation(async () => {
+    const unread = server.filter((n) => !n.read);
+    return {
+      count: unread.length,
+      critical: unread.filter((n) => n.severity === 'critical').length,
+      attention: unread.filter((n) => n.severity !== 'info').length,
+      ...over,
+    };
   });
 }
 
@@ -54,15 +63,27 @@ describe('NotificationBell', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(2026, 10, 25, 10, 0));
     Object.values(mocks).forEach((m) => m.mockReset());
-    mocks.markAsRead.mockResolvedValue(undefined);
-    mocks.markAllAsRead.mockResolvedValue(undefined);
-    mocks.deleteNotification.mockResolvedValue(undefined);
+    mocks.getInbox.mockImplementation(async (limit: number) => ({
+      notifications: server.slice(0, limit).map((n) => ({ ...n })),
+      total: server.length,
+      unread: server.filter((n) => !n.read).length,
+    }));
+    mocks.markAsRead.mockImplementation(async (id: number) => {
+      server = server.map((n) => (n.id === id ? { ...n, read: true } : n));
+    });
+    mocks.markAllAsRead.mockImplementation(async () => {
+      server = server.map((n) => ({ ...n, read: true }));
+    });
+    mocks.deleteNotification.mockImplementation(async (id: number) => {
+      server = server.filter((n) => n.id !== id);
+    });
     inbox([]);
+    counts();
   });
   afterEach(() => vi.useRealTimers());
 
   it('shows an accent badge and counts in the label when nothing critical is unread', async () => {
-    mocks.getUnreadCounts.mockResolvedValue({ count: 3, critical: 0 });
+    counts({ count: 3, critical: 0 });
     renderBell();
     const bell = await screen.findByRole('button', { name: 'Notifications, 3 unread' });
     const badge = within(bell).getByTestId('bell-badge');
@@ -72,7 +93,7 @@ describe('NotificationBell', () => {
   });
 
   it('turns the badge red when a critical notification is unread and caps at 99+', async () => {
-    mocks.getUnreadCounts.mockResolvedValue({ count: 120, critical: 2 });
+    counts({ count: 120, critical: 2 });
     renderBell();
     const bell = await screen.findByRole('button', { name: 'Notifications, 120 unread, 2 critical' });
     const badge = within(bell).getByTestId('bell-badge');
@@ -82,14 +103,13 @@ describe('NotificationBell', () => {
   });
 
   it('hides the badge when everything is read', async () => {
-    mocks.getUnreadCounts.mockResolvedValue({ count: 0, critical: 0 });
+    counts({ count: 0, critical: 0 });
     renderBell();
     const bell = await screen.findByRole('button', { name: 'Notifications, 0 unread' });
     expect(within(bell).queryByTestId('bell-badge')).toBeNull();
   });
 
   it('shows filter pills with counts on one non-wrapping row', async () => {
-    mocks.getUnreadCounts.mockResolvedValue({ count: 3, critical: 1 });
     inbox([
       make({ severity: 'critical', read: false, event_type: 'app_update_rollback_failed' }),
       make({ severity: 'warning', read: false, event_type: 'login_failed' }),
@@ -117,8 +137,24 @@ describe('NotificationBell', () => {
     expect(within(dialog).getAllByTestId('notification-item')).toHaveLength(2);
   });
 
+  it('marks the Updates count partial when older notifications are not loaded', async () => {
+    inbox([
+      ...Array.from({ length: 30 }, () => make({ event_type: 'app_updated' })),
+      ...Array.from({ length: 5 }, () => make({ event_type: 'app_updated', severity: 'warning', read: false })),
+    ]);
+    renderBell();
+    fireEvent.click(await screen.findByRole('button', { name: /Notifications, 5 unread/ }));
+    const pills = await screen.findByRole('group', { name: 'Filter' });
+    const badge = (name: string) => within(within(pills).getByRole('button', { name: new RegExp(`^${name}`) })).getByTestId('count-badge');
+    await waitFor(() => expect(badge('All')).toHaveTextContent('35'));
+    // Server counts are exact even though only 30 are loaded.
+    expect(badge('Unread')).toHaveTextContent('5');
+    expect(badge('Attention')).toHaveTextContent('5');
+    expect(badge('Updates')).toHaveTextContent('30+');
+    expect(badge('Updates')).toHaveAttribute('title', '30 in the latest 30');
+  });
+
   it('groups Needs you, day groups, app chips and collapsed night updates', async () => {
-    mocks.getUnreadCounts.mockResolvedValue({ count: 4, critical: 1 });
     inbox([
       make({ title: 'Update of Prowlarr failed', severity: 'critical', read: false, event_type: 'app_update_rollback_failed', message: 'App update failed: app=prowlarr from=1 to=2', created_at: at(25, 9, 40) }),
       make({ title: 'Jackett updated', read: false, event_type: 'app_updated', message: 'App updated: app=jackett from=1 to=2', created_at: at(25, 4, 30) }),
@@ -141,7 +177,6 @@ describe('NotificationBell', () => {
   it('marks read and dismisses, updating the badge; Esc closes and returns focus', async () => {
     const crit = make({ title: 'Rollback failed', severity: 'critical', read: false });
     const info = make({ title: 'Signed in', read: false });
-    mocks.getUnreadCounts.mockResolvedValue({ count: 2, critical: 1 });
     inbox([crit, info]);
     renderBell();
     const bell = await screen.findByRole('button', { name: 'Notifications, 2 unread, 1 critical' });
@@ -169,7 +204,6 @@ describe('NotificationBell', () => {
   });
 
   it('marks everything read', async () => {
-    mocks.getUnreadCounts.mockResolvedValue({ count: 1, critical: 0 });
     inbox([make({ read: false })]);
     renderBell();
     fireEvent.click(await screen.findByRole('button', { name: 'Notifications, 1 unread' }));

@@ -3,7 +3,7 @@ import { Bell } from 'lucide-react';
 import type { NotificationChannel, NotificationEvent, NotificationLog } from '../../../api/notifications';
 import { CountBadge } from '../../notifications/NotificationParts';
 import { CATEGORY_LABELS, CATEGORY_ORDER, categoryOf } from '../../notifications/notificationModel';
-import { channelStatus, CHANNEL_NAMES, type ChannelStatus } from './notificationChannelStatus';
+import { channelStatus, CHANNEL_NAMES, unresolvedFailures, type ChannelStatus, type ChannelTestResult } from './notificationChannelStatus';
 import { SettingsTabLayout } from './SettingsTabLayout';
 
 type ChannelConfigField = { key: string; label: string; type: string; placeholder: string };
@@ -33,11 +33,14 @@ type NotificationsTabProps = {
   canManage: boolean;
   /** audit.view: delivery logs are only loaded with it. */
   canViewHistory?: boolean;
+  /** Last "Send test" result per channel in this session. */
+  testResults?: Record<string, ChannelTestResult>;
 };
 
 type TabId = 'channels' | 'rules' | 'history';
 
 const STATUS_STYLE: Record<ChannelStatus, { label: string; className: string }> = {
+  enabled: { label: 'Enabled', className: 'text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-900/40' },
   working: { label: 'Working', className: 'text-emerald-700 bg-emerald-50 dark:text-emerald-300 dark:bg-emerald-900/40' },
   off: { label: 'Off', className: 'text-gray-600 bg-gray-100 dark:text-gray-300 dark:bg-gray-700' },
   unset: { label: 'Not set up', className: 'text-gray-600 bg-gray-100 dark:text-gray-300 dark:bg-gray-700' },
@@ -103,18 +106,23 @@ export function NotificationsTab({
   formatAuditAction,
   canManage,
   canViewHistory = true,
+  testResults = {},
 }: NotificationsTabProps) {
   const [tab, setTab] = useState<TabId>('channels');
   const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({ channels: null, rules: null, history: null });
 
-  const statuses = notificationChannels.map((c) => ({ channel: c, ...channelStatus(c, notificationLogs) }));
+  const statuses = notificationChannels.map((c) => ({
+    channel: c,
+    ...channelStatus(c, notificationLogs, canViewHistory, testResults[c.channel_type]),
+  }));
   const problems = statuses.filter((s) => s.status === 'problem').length;
-  const failed = notificationLogs.filter((l) => l.status === 'failed').length;
+  // Failures that a later success on the same channel has not cleared.
+  const failed = unresolvedFailures(notificationLogs);
 
   const tabs: { id: TabId; label: string; badge: number; badgeTitle: string }[] = [
     { id: 'channels', label: 'Channels', badge: problems, badgeTitle: `${problems} with a problem` },
     { id: 'rules', label: 'What you get', badge: 0, badgeTitle: '' },
-    ...(canViewHistory ? [{ id: 'history' as TabId, label: 'Delivery history', badge: failed, badgeTitle: `${failed} failed` }] : []),
+    ...(canViewHistory ? [{ id: 'history' as TabId, label: 'Delivery history', badge: failed, badgeTitle: `${failed} failed since the last successful delivery` }] : []),
   ];
 
   const onTabKey = (e: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -214,7 +222,7 @@ export function NotificationsTab({
                           disabled={!canManage}
                           onChange={() => onToggleChannel(type, !channel.enabled)}
                         />
-                        <span>{channel.enabled ? 'Enabled' : 'Disabled'}</span>
+                        <span>Send through this channel</span>
                       </div>
 
                       {canManage && editing && (

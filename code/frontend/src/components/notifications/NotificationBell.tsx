@@ -4,8 +4,8 @@ import { Bell } from 'lucide-react';
 import { notificationsApi, type Notification } from '../../api/notifications';
 import { useAuth } from '../../contexts/AuthContext';
 import { CountBadge, NotificationRowList } from './NotificationParts';
-import { bellLabel, formatCount, isUpdateEvent, matchesPopoverFilter, needsAttention, type PopoverFilter } from './notificationModel';
-import { useNotificationCounts, useRefreshNotificationCounts } from './useNotificationCounts';
+import { bellLabel, formatCount, formatPartialCount, isUpdateEvent, matchesPopoverFilter, type PopoverFilter } from './notificationModel';
+import { useNotificationCounts, useSettleNotificationCounts } from './useNotificationCounts';
 
 const POPOVER_LIMIT = 30;
 
@@ -19,23 +19,19 @@ const FILTERS: { id: PopoverFilter; label: string; title?: string }[] = [
 export function NotificationBell() {
   const { isAuthenticated } = useAuth();
   const counts = useNotificationCounts();
-  const refreshCounts = useRefreshNotificationCounts();
+  const settleCounts = useSettleNotificationCounts();
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState<PopoverFilter>('all');
   const [items, setItems] = useState<Notification[]>([]);
   const [total, setTotal] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const wrapRef = useRef<HTMLDivElement>(null);
   const bellRef = useRef<HTMLButtonElement>(null);
 
-  // Loaded inbox totals, adjusted locally after read/dismiss so the badge
-  // reacts instantly; the polled counts take over when the server changes.
-  const [localUnread, setLocalUnread] = useState(0);
-  const [localCritical, setLocalCritical] = useState(0);
-  const unread = loaded ? localUnread : counts.count;
-  const critical = loaded ? localCritical : counts.critical;
+  const unread = counts.count;
+  const critical = counts.critical;
 
   const close = useCallback((returnFocus: boolean) => {
     setOpen(false);
@@ -58,19 +54,12 @@ export function NotificationBell() {
     };
   }, [open, close]);
 
-  // A new poll result means the server changed; reload next time it opens.
-  useEffect(() => {
-    if (!open) setLoaded(false);
-  }, [counts.count, counts.critical, open]);
-
   const load = async () => {
     setLoading(true);
     try {
       const response = await notificationsApi.getInbox(POPOVER_LIMIT, 0);
       setItems(response.notifications);
       setTotal(response.total);
-      setLocalUnread(response.unread);
-      setLocalCritical(Math.max(counts.critical, response.notifications.filter((n) => !n.read && n.severity === 'critical').length));
       setLoaded(true);
     } catch {
       // The bell is best-effort; the list just stays as it was.
@@ -84,18 +73,11 @@ export function NotificationBell() {
     setOpen(!open);
   };
 
-  const forget = (n: Notification) => {
-    if (n.read) return;
-    setLocalUnread((c) => Math.max(0, c - 1));
-    if (n.severity === 'critical') setLocalCritical((c) => Math.max(0, c - 1));
-  };
-
   const markRead = async (n: Notification) => {
     try {
       await notificationsApi.markAsRead(n.id);
-      forget(n);
       setItems((prev) => prev.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
-      refreshCounts();
+      settleCounts([n]);
     } catch {
       // Leave it unread; the next open shows the server state.
     }
@@ -105,9 +87,7 @@ export function NotificationBell() {
     try {
       await notificationsApi.markAllAsRead();
       setItems((prev) => prev.map((x) => ({ ...x, read: true })));
-      setLocalUnread(0);
-      setLocalCritical(0);
-      refreshCounts();
+      settleCounts('all');
     } catch {
       // Same as above.
     }
@@ -116,10 +96,9 @@ export function NotificationBell() {
   const dismiss = async (n: Notification) => {
     try {
       await notificationsApi.deleteNotification(n.id);
-      forget(n);
       setItems((prev) => prev.filter((x) => x.id !== n.id));
       setTotal((t) => Math.max(0, t - 1));
-      refreshCounts();
+      settleCounts([n]);
     } catch {
       // Same as above.
     }
@@ -127,11 +106,17 @@ export function NotificationBell() {
 
   if (!isAuthenticated) return null;
 
-  const filterCounts: Record<PopoverFilter, number> = {
-    all: total,
-    unread: unread,
-    attention: items.filter(needsAttention).length,
-    updates: items.filter((n) => isUpdateEvent(n.event_type)).length,
+  // All / Unread / Attention come from the server. Updates is counted in the
+  // loaded page, so it reads "N+" while older notifications are not loaded.
+  const complete = loaded && items.length >= total;
+  const updates = items.filter((n) => isUpdateEvent(n.event_type)).length;
+  const filterCounts: Record<PopoverFilter, { value: number; display?: string; title?: string }> = {
+    all: { value: total },
+    unread: { value: unread },
+    attention: { value: counts.attention },
+    updates: complete
+      ? { value: updates }
+      : { value: updates, display: formatPartialCount(updates, false), title: `${updates} in the latest ${items.length}` },
   };
   const visible = items.filter((n) => matchesPopoverFilter(n, filter));
   const badgeKind = critical > 0 ? 'crit' : 'calm';
@@ -189,7 +174,7 @@ export function NotificationBell() {
           >
             {FILTERS.map((f) => {
               const pressed = filter === f.id;
-              const value = filterCounts[f.id];
+              const { value, display, title } = filterCounts[f.id];
               return (
                 <button
                   key={f.id}
@@ -204,7 +189,7 @@ export function NotificationBell() {
                   }`}
                 >
                   {f.label}
-                  <CountBadge value={value} kind={f.id === 'attention' && value > 0 ? 'warn' : 'neutral'} />
+                  <CountBadge value={value} display={display} label={title} kind={f.id === 'attention' && value > 0 ? 'warn' : 'neutral'} />
                 </button>
               );
             })}

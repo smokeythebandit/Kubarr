@@ -24,11 +24,14 @@ export interface UnreadCountResponse {
   count: number;
   /** Unread notifications with severity `critical`. Older servers omit it. */
   critical?: number;
+  /** Unread warnings + criticals ("needs you"). Older servers omit it. */
+  attention?: number;
 }
 
 export interface UnreadCounts {
   count: number;
   critical: number;
+  attention: number;
 }
 
 export interface NotificationChannel {
@@ -93,7 +96,11 @@ export const notificationsApi = {
   // Unread count plus how many of those are critical (drives the red badge)
   getUnreadCounts: async (): Promise<UnreadCounts> => {
     const response = await apiClient.get<UnreadCountResponse>('/notifications/inbox/count');
-    return { count: response.data.count ?? 0, critical: response.data.critical ?? 0 };
+    return {
+      count: response.data.count ?? 0,
+      critical: response.data.critical ?? 0,
+      attention: response.data.attention ?? 0,
+    };
   },
 
   // Mark a notification as read

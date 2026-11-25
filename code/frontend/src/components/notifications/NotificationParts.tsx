@@ -12,7 +12,20 @@ const BADGE_CLASSES: Record<BadgeKind, string> = {
 };
 
 /** Small pill counter; dimmed at zero, capped at 99+. */
-export function CountBadge({ value, kind = 'neutral', className = '', label }: { value: number; kind?: BadgeKind; className?: string; label?: string }) {
+export function CountBadge({
+  value,
+  display,
+  kind = 'neutral',
+  className = '',
+  label,
+}: {
+  value: number;
+  /** Overrides the rendered text, e.g. "3+" for a partial count. */
+  display?: string;
+  kind?: BadgeKind;
+  className?: string;
+  label?: string;
+}) {
   return (
     <span
       data-testid="count-badge"
@@ -20,7 +33,7 @@ export function CountBadge({ value, kind = 'neutral', className = '', label }: {
       title={label}
       className={`inline-block min-w-[1.35em] px-1.5 rounded-full text-[0.68rem] font-bold leading-[1.35rem] text-center tabular-nums ${BADGE_CLASSES[kind]} ${value === 0 ? 'opacity-45' : ''} ${className}`}
     >
-      {formatCount(value)}
+      {display ?? formatCount(value)}
     </span>
   );
 }
@@ -109,8 +122,8 @@ export function NotificationRowList({
 }: {
   notifications: Notification[];
   now: Date;
-  expanded: ReadonlySet<number>;
-  onExpand: (stackId: number) => void;
+  expanded: ReadonlySet<string>;
+  onExpand: (stackId: string) => void;
   onMarkRead: (n: Notification) => void;
   onDismiss: (n: Notification) => void;
   emptyText?: string;

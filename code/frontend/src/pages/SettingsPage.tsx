@@ -42,6 +42,7 @@ import type { SettingsStatus } from '../components/settings/tabs/GeneralTab';
 import { InvitesTab } from '../components/settings/tabs/InvitesTab';
 import { LetsEncryptTab } from '../components/settings/tabs/LetsEncryptTab';
 import { NotificationsTab } from '../components/settings/tabs/NotificationsTab';
+import type { ChannelTestResult } from '../components/settings/tabs/notificationChannelStatus';
 import { PendingUsersTab } from '../components/settings/tabs/PendingUsersTab';
 import { PermissionsTab } from '../components/settings/tabs/PermissionsTab';
 import { UpdatesTab } from '../components/settings/tabs/UpdatesTab';
@@ -157,6 +158,7 @@ const SettingsPage: React.FC = () => {
   const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
   const [notificationLogsTotal, setNotificationLogsTotal] = useState(0);
   const [notificationLoading, setNotificationLoading] = useState(false);
+  const [testResults, setTestResults] = useState<Record<string, ChannelTestResult>>({});
   const [testingChannel, setTestingChannel] = useState<string | null>(null);
   const [testDestination, setTestDestination] = useState<Record<string, string>>({});
   const [editingChannel, setEditingChannel] = useState<string | null>(null);
@@ -458,6 +460,7 @@ const SettingsPage: React.FC = () => {
     try {
       setTestingChannel(channelType);
       const result = await notificationsApi.testChannel(channelType, destination);
+      setTestResults((prev) => ({ ...prev, [channelType]: { ...result, at: new Date().toISOString() } }));
       if (result.success) {
         alert('Test notification sent successfully!');
       } else {
@@ -468,6 +471,8 @@ const SettingsPage: React.FC = () => {
       setError(error.response?.data?.detail || 'Failed to test channel');
     } finally {
       setTestingChannel(null);
+      // Refresh delivery history so channel status and badges are current.
+      if (canViewAudit) void loadNotificationLogs();
     }
   };
 
@@ -1007,6 +1012,7 @@ const SettingsPage: React.FC = () => {
                 formatAuditAction={formatAuditAction}
                 canManage={canManageSettings}
                 canViewHistory={canViewAudit}
+                testResults={testResults}
               />
             )}
 

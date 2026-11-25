@@ -108,7 +108,7 @@ function nightLabel(key: string, now: Date): string {
 export type ListRow =
   | { kind: 'header'; key: string; label: string; count: number; unread: number }
   | { kind: 'item'; key: string; notification: Notification }
-  | { kind: 'stack'; key: string; stackId: number; hidden: number; label: string };
+  | { kind: 'stack'; key: string; stackId: string; hidden: number; label: string };
 
 /**
  * Turns a newest-first list into display rows: unread warnings/criticals are
@@ -116,7 +116,7 @@ export type ListRow =
  * Consecutive successful updates from the same night collapse behind a
  * "+N more updates last night" row unless their stack id is in `expanded`.
  */
-export function buildRows(list: Notification[], now: Date, expanded: ReadonlySet<number> = new Set()): ListRow[] {
+export function buildRows(list: Notification[], now: Date, expanded: ReadonlySet<string> = new Set()): ListRow[] {
   const rows: ListRow[] = [];
   const pinned = list.filter(needsAttention);
   const rest = list.filter((n) => !needsAttention(n));
@@ -126,6 +126,9 @@ export function buildRows(list: Notification[], now: Date, expanded: ReadonlySet
     for (const n of pinned) rows.push({ kind: 'item', key: `n-${n.id}`, notification: n });
   }
 
+  // Runs are keyed by night + type (+ ordinal within that night), so an expanded
+  // run stays expanded when its first item is read, dismissed or replaced.
+  const runsPerNight = new Map<string, number>();
   const groups: DayGroup[] = ['Today', 'Yesterday', 'Earlier'];
   for (const group of groups) {
     const inGroup = rest.filter((n) => dayGroupOf(n.created_at, now) === group);
@@ -155,14 +158,17 @@ export function buildRows(list: Notification[], now: Date, expanded: ReadonlySet
       const run = inGroup.slice(i, end);
       rows.push({ kind: 'item', key: `n-${first.id}`, notification: first });
       if (run.length > 1 && night) {
-        if (expanded.has(first.id)) {
+        const ordinal = runsPerNight.get(night) ?? 0;
+        runsPerNight.set(night, ordinal + 1);
+        const stackId = `app_updated@${night}#${ordinal}`;
+        if (expanded.has(stackId)) {
           for (const n of run.slice(1)) rows.push({ kind: 'item', key: `n-${n.id}`, notification: n });
         } else {
           const hidden = run.length - 1;
           rows.push({
             kind: 'stack',
-            key: `s-${first.id}`,
-            stackId: first.id,
+            key: `s-${stackId}`,
+            stackId,
             hidden,
             label: `+${hidden} more update${hidden > 1 ? 's' : ''} ${nightLabel(night, now)}`,
           });
@@ -206,7 +212,7 @@ export function matchesPageFilter(n: Notification, filter: PageFilter, now: Date
     case 'attention':
       return needsAttention(n);
     case 'critical':
-      return n.severity === 'critical';
+      return !n.read && n.severity === 'critical';
     case 'recent':
       return isWithinLastDay(n, now);
     default:
@@ -222,6 +228,11 @@ export function matchesSearch(n: Notification, query: string): boolean {
 
 export function bellLabel(unread: number, critical: number): string {
   return `Notifications, ${unread} unread${critical ? `, ${critical} critical` : ''}`;
+}
+
+/** A count from loaded pages only: "N+" ("at least N") unless it is known to be complete. */
+export function formatPartialCount(n: number, complete: boolean): string {
+  return complete ? String(n) : `${n}+`;
 }
 
 export function formatCount(n: number): string {

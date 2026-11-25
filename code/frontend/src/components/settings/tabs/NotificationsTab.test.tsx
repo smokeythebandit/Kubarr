@@ -3,7 +3,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import type { NotificationChannel, NotificationLog } from '../../../api/notifications';
 import { NotificationsTab } from './NotificationsTab';
-import { channelStatus } from './notificationChannelStatus';
+import { channelStatus, unresolvedFailures } from './notificationChannelStatus';
 
 const channel = (channel_type: string, enabled: boolean, config: Record<string, unknown> = {}): NotificationChannel => ({
   channel_type,
@@ -66,12 +66,43 @@ function renderTab(overrides: Partial<ComponentProps<typeof NotificationsTab>> =
 }
 
 describe('channelStatus', () => {
-  it('uses the latest delivery for the channel', () => {
-    expect(channelStatus(channel('telegram', true), logs).status).toBe('working');
-    expect(channelStatus(channel('messagebird', true), logs)).toEqual({ status: 'problem', detail: 'Last delivery failed: invalid API key' });
-    expect(channelStatus(channel('email', true), logs).status).toBe('working');
-    expect(channelStatus(channel('email', false), logs).status).toBe('unset');
-    expect(channelStatus(channel('email', false, { smtp_host: 'x' }), logs).status).toBe('off');
+  const tg = channel('telegram', true, { bot_token: '***' });
+  const sms = channel('messagebird', true, { api_key: '***' });
+
+  it('uses the latest delivery for the channel when logs are available', () => {
+    expect(channelStatus(tg, logs, true).status).toBe('working');
+    expect(channelStatus(sms, logs, true)).toEqual({ status: 'problem', detail: 'Last delivery failed: invalid API key' });
+    expect(channelStatus(channel('email', true, { smtp_host: 'x' }), logs, true)).toEqual({ status: 'working', detail: 'No failed deliveries' });
+  });
+
+  it('shows a neutral Enabled without delivery logs (no audit.view)', () => {
+    expect(channelStatus(sms, [], false)).toEqual({ status: 'enabled', detail: 'Delivery history needs audit access' });
+    expect(channelStatus(tg, logs, false).status).toBe('enabled');
+  });
+
+  it('needs saved settings before anything else', () => {
+    expect(channelStatus(channel('email', true), logs, true).status).toBe('unset');
+    expect(channelStatus(channel('email', true), [], false).status).toBe('unset');
+    expect(channelStatus(channel('email', false), logs, true).status).toBe('unset');
+    expect(channelStatus(channel('email', false, { smtp_host: 'x' }), logs, true).status).toBe('off');
+  });
+
+  it('lets a newer test result decide', () => {
+    expect(channelStatus(sms, logs, true, { success: true, error: null, at: '2026-11-25T11:00:00Z' }).status).toBe('working');
+    expect(channelStatus(tg, logs, true, { success: false, error: 'chat not found', at: '2026-11-25T11:00:00Z' })).toEqual({
+      status: 'problem',
+      detail: 'Test failed: chat not found',
+    });
+    expect(channelStatus(sms, logs, true, { success: true, error: null, at: '2026-11-20T00:00:00Z' }).status).toBe('problem');
+    expect(channelStatus(sms, [], false, { success: false, error: null, at: '2026-11-25T11:00:00Z' }).status).toBe('problem');
+  });
+});
+
+describe('unresolvedFailures', () => {
+  it('counts only failures newer than the latest success on that channel', () => {
+    expect(unresolvedFailures(logs)).toBe(1);
+    expect(unresolvedFailures([...logs, log('messagebird', 'sent', '2026-11-25T12:00:00Z')])).toBe(0);
+    expect(unresolvedFailures([log('email', 'failed', '2026-11-25T12:00:00Z'), log('email', 'failed', '2026-11-25T13:00:00Z')])).toBe(2);
   });
 });
 
@@ -83,7 +114,7 @@ describe('NotificationsTab', () => {
     const history = within(tabs).getByRole('tab', { name: /Delivery history/ });
     expect(within(channels).getByTestId('count-badge')).toHaveTextContent('1');
     expect(within(channels).getByTestId('count-badge')).toHaveAttribute('data-kind', 'crit');
-    expect(within(history).getByTestId('count-badge')).toHaveTextContent('2');
+    expect(within(history).getByTestId('count-badge')).toHaveTextContent('1');
     expect(within(history).getByTestId('count-badge')).toHaveAttribute('data-kind', 'crit');
     expect(within(within(tabs).getByRole('tab', { name: 'What you get' })).queryByTestId('count-badge')).toBeNull();
     expect(within(tabs).queryByRole('tab', { name: /Quiet hours/ })).toBeNull();
@@ -93,6 +124,19 @@ describe('NotificationsTab', () => {
     renderTab({ notificationLogs: [], canViewHistory: false });
     expect(screen.queryAllByTestId('count-badge')).toHaveLength(0);
     expect(screen.queryByRole('tab', { name: /Delivery history/ })).toBeNull();
+    // Without logs nothing can be called Working.
+    expect(within(screen.getByTestId('channel-card-telegram')).getByText('Enabled')).toBeInTheDocument();
+    expect(within(screen.getByTestId('channel-card-telegram')).queryByText('Working')).toBeNull();
+  });
+
+  it('clears the history badge once a later delivery succeeds and shows test results', () => {
+    renderTab({
+      notificationLogs: [...logs, log('messagebird', 'sent', '2026-11-25T12:00:00Z')],
+      testResults: { telegram: { success: false, error: 'chat not found', at: '2026-11-26T00:00:00Z' } },
+    });
+    expect(within(screen.getByRole('tab', { name: /Delivery history/ })).queryByTestId('count-badge')).toBeNull();
+    expect(within(screen.getByTestId('channel-card-messagebird')).getByText('Working')).toBeInTheDocument();
+    expect(within(screen.getByTestId('channel-card-telegram')).getByText('Test failed: chat not found')).toBeInTheDocument();
   });
 
   it('renders channel cards with status, edit and send test', () => {
