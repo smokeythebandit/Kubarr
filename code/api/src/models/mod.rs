@@ -13,6 +13,7 @@ pub mod notification_channel;
 pub mod notification_event;
 pub mod notification_log;
 pub mod notification_route;
+pub mod notification_verification;
 pub mod oauth_account;
 pub mod oauth_provider;
 pub mod role;
@@ -47,6 +48,7 @@ pub mod prelude {
     pub use super::notification_event::{self, Entity as NotificationEvent};
     pub use super::notification_log::{self, Entity as NotificationLog};
     pub use super::notification_route::{self, Entity as NotificationRoute};
+    pub use super::notification_verification::{self, Entity as NotificationVerification};
     pub use super::oauth_account::{self, Entity as OauthAccount};
     pub use super::oauth_provider::{self, Entity as OauthProvider};
     pub use super::role::{self, Entity as Role};

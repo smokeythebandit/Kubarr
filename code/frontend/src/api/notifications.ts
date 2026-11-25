@@ -64,6 +64,16 @@ export interface UserNotificationPref {
   enabled: boolean;
   destination: string | null;
   verified: boolean;
+  /** A verification code was sent and can still be confirmed. Older servers omit it. */
+  verification_pending?: boolean;
+}
+
+export interface VerifyStartResponse {
+  /** Masked destination the code was sent to. */
+  destination: string;
+  expires_in_seconds: number;
+  /** Seconds before another code may be requested. */
+  resend_after_seconds: number;
 }
 
 export interface NotificationLog {
@@ -216,6 +226,19 @@ export const notificationsApi = {
     data: { enabled?: boolean; destination?: string }
   ): Promise<UserNotificationPref> => {
     const response = await apiClient.put(`/notifications/preferences/${channelType}`, data);
+    return response.data;
+  },
+
+  // Send a 6-digit code to the user's destination for a channel.
+  // Rejects with 429 (Retry-After header) when rate limited.
+  startVerification: async (channelType: string): Promise<VerifyStartResponse> => {
+    const response = await apiClient.post(`/notifications/preferences/${channelType}/verify/start`);
+    return response.data;
+  },
+
+  // Confirm the code; resolves with the now-verified preference, 400 otherwise.
+  confirmVerification: async (channelType: string, code: string): Promise<UserNotificationPref> => {
+    const response = await apiClient.post(`/notifications/preferences/${channelType}/verify/confirm`, { code });
     return response.data;
   },
 

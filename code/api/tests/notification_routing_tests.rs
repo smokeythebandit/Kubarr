@@ -151,6 +151,15 @@ async fn list_routes_returns_every_event_with_seeded_defaults() {
 
     let off = serde_json::json!({ "email": false, "telegram": false, "messagebird": false });
     // Severity seeding is covered by the service tests; `login` has no row: off.
+    // The list comes from AuditAction, so the auto-update events (seeded and
+    // enabled by 000036) are there with every channel on.
+    let all_on = serde_json::json!({ "email": true, "telegram": true, "messagebird": true });
+    assert_eq!(route_for(&routes, "app_update_failed")["channels"], all_on);
+    assert_eq!(
+        route_for(&routes, "app_update_rollback_failed")["channels"],
+        all_on
+    );
+    assert_eq!(route_for(&routes, "app_updated")["channels"], off);
     assert_eq!(route_for(&routes, "login")["channels"], off);
 }
 
@@ -196,6 +205,21 @@ async fn update_route_upserts_audits_and_keeps_unlisted_channels() {
         .await
         .unwrap();
     assert_eq!(audits.len(), 2, "each change is audited");
+}
+
+#[tokio::test]
+async fn update_route_accepts_auto_update_events() {
+    let (app, cookie, _) = login_as("admin", "routeautoupdate").await;
+    let (status, body) = send(
+        app,
+        "PUT",
+        "/api/notifications/routes/app_updated",
+        Some(&cookie),
+        Some(serde_json::json!({ "channels": { "telegram": true } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(r#""telegram":true"#), "{body}");
 }
 
 #[tokio::test]

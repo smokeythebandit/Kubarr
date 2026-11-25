@@ -145,6 +145,8 @@ use crate::state::AppState;
         notifications::routing::update_route,
         notifications::get_preferences,
         notifications::update_preference,
+        notifications::start_verification,
+        notifications::confirm_verification,
         notifications::list_logs,
         // Storage
         storage::browse_directory,
