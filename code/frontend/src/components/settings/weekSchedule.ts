@@ -190,3 +190,46 @@ export function removeGroup(schedule: WeekSchedule, group: WindowGroup): WeekSch
   }
   return next;
 }
+
+/**
+ * Where `now` stands relative to the schedule, in local wall-clock terms.
+ * `days` counts local calendar days from today (0 = today) to the hour named
+ * by `hour`/`day`: the end of the open run, or the start of the next one.
+ */
+export type WindowPosition =
+  | { kind: 'empty' }
+  | { kind: 'always' }
+  | { kind: 'open'; days: number; day: number; hour: number }
+  | { kind: 'closed'; days: number; day: number; hour: number };
+
+export function windowPosition(schedule: WeekSchedule, now: LocalNow): WindowPosition {
+  const flat = normalizeSchedule(schedule).flat();
+  if (!flat.some(Boolean)) return { kind: 'empty' };
+  if (flat.every(Boolean)) return { kind: 'always' };
+  const nowH = now.day * 24 + now.hour;
+  const at = (k: number) => {
+    const i = (nowH + k) % HOURS_PER_WEEK;
+    return { days: Math.floor((now.hour + k) / 24), day: Math.floor(i / 24), hour: i % 24 };
+  };
+  const open = flat[nowH];
+  // First hour (k ≥ 1) whose state differs from now: the run's end or the next start.
+  for (let k = 1; k <= HOURS_PER_WEEK; k++) {
+    if (flat[(nowH + k) % HOURS_PER_WEEK] !== open) return { kind: open ? 'open' : 'closed', ...at(k) };
+  }
+  return { kind: 'empty' };
+}
+
+/** "06:00" when `days` is 0, otherwise "Tue 06:00". */
+export function untilLabel(pos: { days: number; day: number; hour: number }): string {
+  return pos.days === 0 ? formatHour(pos.hour) : `${DAYS[pos.day]} ${formatHour(pos.hour)}`;
+}
+
+/** A zone `Intl` accepts, else UTC. */
+export function validZone(timezone: string): string {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone });
+    return timezone;
+  } catch {
+    return 'UTC';
+  }
+}
