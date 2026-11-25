@@ -13,10 +13,11 @@ use crate::error::{AppError, Result};
 use crate::middleware::permissions::{
     AuditView, Authenticated, Authorized, SettingsManage, SettingsView,
 };
+use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::models::{
     notification_channel, notification_event, notification_log, user_notification_pref,
 };
-use crate::services::notification::ChannelType;
+use crate::services::notification::{verification, ChannelType};
 use crate::state::AppState;
 
 pub fn notifications_routes(state: AppState) -> Router {
@@ -38,6 +39,14 @@ pub fn notifications_routes(state: AppState) -> Router {
         // User preferences
         .route("/preferences", get(get_preferences))
         .route("/preferences/{channel_type}", put(update_preference))
+        .route(
+            "/preferences/{channel_type}/verify/start",
+            post(start_verification),
+        )
+        .route(
+            "/preferences/{channel_type}/verify/confirm",
+            post(confirm_verification),
+        )
         // Admin: Logs
         .route("/logs", get(list_logs))
         .with_state(state)
@@ -562,6 +571,20 @@ pub struct UserPrefDto {
     pub enabled: bool,
     pub destination: Option<String>,
     pub verified: bool,
+    /// A verification code was sent and can still be confirmed.
+    pub verification_pending: bool,
+}
+
+impl UserPrefDto {
+    fn from_model(pref: user_notification_pref::Model, verification_pending: bool) -> Self {
+        Self {
+            channel_type: pref.channel_type,
+            enabled: pref.enabled,
+            destination: pref.destination.map(|d| mask_destination(&d)),
+            verified: pref.verified,
+            verification_pending,
+        }
+    }
 }
 
 #[utoipa::path(
@@ -581,6 +604,7 @@ async fn get_preferences(
         .filter(user_notification_pref::Column::UserId.eq(auth.user_id()))
         .all(&db)
         .await?;
+    let pending = verification::pending_channels(&db, auth.user_id(), chrono::Utc::now()).await?;
 
     let mut result: Vec<UserPrefDto> = Vec::new();
 
@@ -590,18 +614,15 @@ async fn get_preferences(
             .find(|p| p.channel_type == channel_type.as_str());
 
         if let Some(pref) = existing {
-            result.push(UserPrefDto {
-                channel_type: pref.channel_type.clone(),
-                enabled: pref.enabled,
-                destination: pref.destination.clone().map(|d| mask_destination(&d)),
-                verified: pref.verified,
-            });
+            let is_pending = pending.contains(&pref.channel_type);
+            result.push(UserPrefDto::from_model(pref.clone(), is_pending));
         } else {
             result.push(UserPrefDto {
                 channel_type: channel_type.as_str().to_string(),
                 enabled: false,
                 destination: None,
                 verified: false,
+                verification_pending: false,
             });
         }
     }
@@ -649,6 +670,7 @@ async fn update_preference(
         .one(&db)
         .await?;
 
+    let mut destination_changed = false;
     let pref = if let Some(existing) = existing {
         let mut active: user_notification_pref::ActiveModel = existing.clone().into();
 
@@ -660,12 +682,14 @@ async fn update_preference(
             if Some(&destination) != existing.destination.as_ref() {
                 active.destination = Set(Some(destination));
                 active.verified = Set(false);
+                destination_changed = true;
             }
         }
         active.updated_at = Set(now);
 
         active.update(&db).await?
     } else {
+        destination_changed = true;
         let new_pref = user_notification_pref::ActiveModel {
             user_id: Set(auth.user_id()),
             channel_type: Set(channel_type.clone()),
@@ -679,12 +703,270 @@ async fn update_preference(
         new_pref.insert(&db).await?
     };
 
-    Ok(Json(UserPrefDto {
-        channel_type: pref.channel_type,
-        enabled: pref.enabled,
-        destination: pref.destination.map(|d| mask_destination(&d)),
-        verified: pref.verified,
+    // A code sent to the old destination must not verify the new one.
+    if destination_changed {
+        verification::clear_code(&db, auth.user_id(), &channel_type).await?;
+    }
+    let pending = verification::pending_channels(&db, auth.user_id(), now)
+        .await?
+        .contains(&pref.channel_type);
+
+    Ok(Json(UserPrefDto::from_model(pref, pending)))
+}
+
+// ============================================================================
+// User Preferences: destination verification
+// ============================================================================
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct VerifyStartResponse {
+    /// Masked destination the code was sent to.
+    pub destination: String,
+    /// Seconds until the code expires.
+    pub expires_in_seconds: i64,
+    /// Seconds before another code may be requested.
+    pub resend_after_seconds: i64,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct VerifyConfirmRequest {
+    pub code: String,
+}
+
+/// Audit a verification step with the masked destination only (never the code).
+async fn audit_verification(
+    state: &AppState,
+    auth: &Authenticated,
+    action: AuditAction,
+    channel_type: &str,
+    masked_destination: Option<&str>,
+    error: Option<&str>,
+) {
+    let result = state
+        .audit
+        .log(
+            action,
+            ResourceType::User,
+            Some(auth.user_id().to_string()),
+            Some(auth.user_id()),
+            Some(auth.user().username.clone()),
+            Some(serde_json::json!({
+                "channel_type": channel_type,
+                "destination": masked_destination,
+            })),
+            None,
+            None,
+            error.is_none(),
+            error.map(str::to_string),
+        )
+        .await;
+    if let Err(e) = result {
+        tracing::warn!(
+            channel_type,
+            "Failed to audit notification verification: {}",
+            e
+        );
+    }
+}
+
+/// The caller's enabled preference destination for `channel_type`.
+async fn verifiable_destination(
+    db: &sea_orm::DatabaseConnection,
+    user_id: i64,
+    channel_type: &str,
+) -> Result<Option<(user_notification_pref::Model, String)>> {
+    let pref = user_notification_pref::Entity::find()
+        .filter(user_notification_pref::Column::UserId.eq(user_id))
+        .filter(user_notification_pref::Column::ChannelType.eq(channel_type))
+        .one(db)
+        .await?;
+    Ok(pref.and_then(|pref| {
+        let destination = pref.destination.clone().filter(|d| !d.trim().is_empty());
+        match (pref.enabled, destination) {
+            (true, Some(destination)) => Some((pref, destination)),
+            _ => None,
+        }
     }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/notifications/preferences/{channel_type}/verify/start",
+    tag = "Notifications",
+    params(
+        ("channel_type" = String, Path, description = "Channel type"),
+    ),
+    responses(
+        (status = 200, body = VerifyStartResponse),
+        (status = 400, description = "Channel not enabled or has no destination"),
+        (status = 429, description = "Rate limited"),
+        (status = 502, description = "The channel could not deliver the code")
+    )
+)]
+async fn start_verification(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(channel_type): Path<String>,
+) -> Result<Json<VerifyStartResponse>> {
+    let db = state.get_db().await?;
+    if ChannelType::parse(&channel_type).is_none() {
+        return Err(AppError::BadRequest(format!(
+            "Invalid channel type: {}",
+            channel_type
+        )));
+    }
+    let action = AuditAction::NotificationVerificationSent;
+    let Some((_, destination)) = verifiable_destination(&db, auth.user_id(), &channel_type).await?
+    else {
+        return Err(AppError::BadRequest(
+            "Enable this channel and set a destination before verifying it".to_string(),
+        ));
+    };
+    let masked = mask_destination(&destination);
+
+    let now = chrono::Utc::now();
+    if let Err(e) = verification::reserve_send(&db, auth.user_id(), &channel_type, now).await {
+        if matches!(e, AppError::TooManyRequests(_)) {
+            audit_verification(
+                &state,
+                &auth,
+                action,
+                &channel_type,
+                Some(&masked),
+                Some("rate_limited"),
+            )
+            .await;
+        }
+        return Err(e);
+    }
+
+    let code = verification::generate_code();
+    let hash = verification::hash_code(&channel_type, &destination, &code);
+    verification::store_code(&db, auth.user_id(), &channel_type, hash, now).await?;
+
+    let sent = state
+        .notification
+        .send_direct(
+            &channel_type,
+            &destination,
+            verification::CODE_TITLE,
+            &verification::code_message(&code),
+        )
+        .await;
+    if !sent.success {
+        verification::clear_code(&db, auth.user_id(), &channel_type).await?;
+        audit_verification(
+            &state,
+            &auth,
+            action,
+            &channel_type,
+            Some(&masked),
+            Some("send_failed"),
+        )
+        .await;
+        return Err(AppError::BadGateway(format!(
+            "Could not send the verification code: {}",
+            sent.error.unwrap_or_else(|| "unknown error".to_string())
+        )));
+    }
+
+    audit_verification(&state, &auth, action, &channel_type, Some(&masked), None).await;
+    Ok(Json(VerifyStartResponse {
+        destination: masked,
+        expires_in_seconds: verification::CODE_TTL_SECS,
+        resend_after_seconds: verification::RESEND_INTERVAL_SECS,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/notifications/preferences/{channel_type}/verify/confirm",
+    tag = "Notifications",
+    params(
+        ("channel_type" = String, Path, description = "Channel type"),
+    ),
+    request_body = VerifyConfirmRequest,
+    responses(
+        (status = 200, body = UserPrefDto),
+        (status = 400, description = "Wrong, expired or missing code")
+    )
+)]
+async fn confirm_verification(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(channel_type): Path<String>,
+    Json(req): Json<VerifyConfirmRequest>,
+) -> Result<Json<UserPrefDto>> {
+    use verification::CheckOutcome;
+
+    let db = state.get_db().await?;
+    if ChannelType::parse(&channel_type).is_none() {
+        return Err(AppError::BadRequest(format!(
+            "Invalid channel type: {}",
+            channel_type
+        )));
+    }
+    let action = AuditAction::NotificationDestinationVerified;
+    let Some((pref, destination)) =
+        verifiable_destination(&db, auth.user_id(), &channel_type).await?
+    else {
+        return Err(AppError::BadRequest(
+            "Enable this channel and set a destination before verifying it".to_string(),
+        ));
+    };
+    let masked = mask_destination(&destination);
+
+    let code = verification::normalize_code(&req.code);
+    let outcome = verification::check_code(
+        &db,
+        auth.user_id(),
+        &channel_type,
+        &destination,
+        &code,
+        chrono::Utc::now(),
+    )
+    .await?;
+
+    let (reason, message) = match outcome {
+        CheckOutcome::Verified => {
+            let mut active: user_notification_pref::ActiveModel = pref.into();
+            active.verified = Set(true);
+            active.updated_at = Set(chrono::Utc::now());
+            let pref = active.update(&db).await?;
+            audit_verification(&state, &auth, action, &channel_type, Some(&masked), None).await;
+            return Ok(Json(UserPrefDto::from_model(pref, false)));
+        }
+        CheckOutcome::NoPendingCode => (
+            "no_pending_code",
+            "No verification code is pending; request a new code".to_string(),
+        ),
+        CheckOutcome::Expired => (
+            "expired",
+            "The verification code has expired; request a new code".to_string(),
+        ),
+        CheckOutcome::TooManyAttempts => (
+            "too_many_attempts",
+            "Too many wrong attempts; request a new code".to_string(),
+        ),
+        CheckOutcome::WrongCode { remaining: 0 } => (
+            "wrong_code",
+            "Incorrect verification code; no attempts left, request a new code".to_string(),
+        ),
+        CheckOutcome::WrongCode { remaining } => (
+            "wrong_code",
+            format!("Incorrect verification code; {remaining} attempts left"),
+        ),
+    };
+    audit_verification(
+        &state,
+        &auth,
+        action,
+        &channel_type,
+        Some(&masked),
+        Some(reason),
+    )
+    .await;
+    Err(AppError::BadRequest(message))
 }
 
 // ============================================================================
@@ -822,34 +1104,11 @@ fn mask_destination(dest: &str) -> String {
     }
 }
 
+/// Every configurable notification event type, derived from [`AuditAction`].
+///
+/// Noise types are excluded by [`AuditAction::is_notifiable`].
 fn get_all_event_types() -> Vec<String> {
-    use crate::models::audit_log::AuditAction;
-
-    vec![
-        AuditAction::Login.to_string(),
-        AuditAction::LoginFailed.to_string(),
-        AuditAction::Logout.to_string(),
-        AuditAction::UserCreated.to_string(),
-        AuditAction::UserUpdated.to_string(),
-        AuditAction::UserDeleted.to_string(),
-        AuditAction::UserApproved.to_string(),
-        AuditAction::UserDeactivated.to_string(),
-        AuditAction::RoleCreated.to_string(),
-        AuditAction::RoleUpdated.to_string(),
-        AuditAction::RoleDeleted.to_string(),
-        AuditAction::RoleAssigned.to_string(),
-        AuditAction::RoleUnassigned.to_string(),
-        AuditAction::AppInstalled.to_string(),
-        AuditAction::AppUninstalled.to_string(),
-        AuditAction::AppRestarted.to_string(),
-        AuditAction::AppAccessed.to_string(),
-        AuditAction::TwoFactorEnabled.to_string(),
-        AuditAction::TwoFactorDisabled.to_string(),
-        AuditAction::PasswordChanged.to_string(),
-        AuditAction::SystemSettingChanged.to_string(),
-        AuditAction::InviteCreated.to_string(),
-        AuditAction::InviteUsed.to_string(),
-    ]
+    AuditAction::notifiable().map(|a| a.to_string()).collect()
 }
 
 #[cfg(test)]
@@ -962,20 +1221,53 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn get_all_event_types_returns_23_entries() {
+    fn get_all_event_types_is_derived_from_audit_actions() {
         let types = get_all_event_types();
-        assert_eq!(types.len(), 23);
+        assert_eq!(
+            types.len(),
+            AuditAction::all()
+                .filter(AuditAction::is_notifiable)
+                .count()
+        );
+        for expected in [
+            "login",
+            "logout",
+            "login_failed",
+            "user_created",
+            "user_activated",
+            "app_installed",
+            "app_updated",
+            "app_update_failed",
+            "app_update_rollback_failed",
+            "vpn_provider_created",
+            "vpn_provider_updated",
+            "vpn_provider_deleted",
+            "vpn_assigned",
+            "vpn_removed",
+            "2fa_verified",
+            "2fa_failed",
+            "invite_used",
+            "invite_deleted",
+        ] {
+            assert!(types.iter().any(|t| t == expected), "missing {expected}");
+        }
     }
 
     #[test]
-    fn get_all_event_types_contains_expected_values() {
+    fn get_all_event_types_excludes_noise() {
         let types = get_all_event_types();
-        assert!(types.iter().any(|t| t == "login"));
-        assert!(types.iter().any(|t| t == "logout"));
-        assert!(types.iter().any(|t| t == "login_failed"));
-        assert!(types.iter().any(|t| t == "user_created"));
-        assert!(types.iter().any(|t| t == "app_installed"));
-        assert!(types.iter().any(|t| t == "invite_used"));
+        for noise in [
+            "api_access",
+            "token_refresh",
+            "app_accessed",
+            "notification_verification_sent",
+            "notification_destination_verified",
+        ] {
+            assert!(
+                !types.iter().any(|t| t == noise),
+                "{noise} must be excluded"
+            );
+        }
     }
 
     #[test]
@@ -1117,10 +1409,12 @@ mod tests {
             enabled: true,
             destination: Some("al***@example.com".to_string()),
             verified: false,
+            verification_pending: true,
         };
         let json = serde_json::to_string(&dto).expect("ser");
         assert!(json.contains("\"channel_type\":\"email\""));
         assert!(json.contains("\"verified\":false"));
+        assert!(json.contains("\"verification_pending\":true"));
     }
 
     #[test]
