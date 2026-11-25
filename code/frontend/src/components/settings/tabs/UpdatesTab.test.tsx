@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { UpdatesTab } from './UpdatesTab';
+import { emptySchedule, presetSchedule } from '../weekSchedule';
 
 const mocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
@@ -21,8 +22,7 @@ vi.mock('../../../contexts/AuthContext', () => ({
 
 const defaults = {
   enabled: true,
-  window_start: '04:00',
-  window_minutes: 120,
+  schedule: presetSchedule('nightly'),
   timezone: 'UTC',
   health_timeout_minutes: 10,
   next_window_start: null,
@@ -35,16 +35,19 @@ describe('UpdatesTab', () => {
     mocks.getSettings.mockReset().mockResolvedValue(defaults);
     mocks.saveSettings.mockReset().mockImplementation(async (s) => ({ ...s, next_window_start: null, timezone_saved: true }));
     mocks.canManage = true;
-    vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(
-      () => ({ resolvedOptions: () => ({ timeZone: 'Europe/Amsterdam' }) }) as unknown as Intl.DateTimeFormat,
-    );
+    const real = Intl.DateTimeFormat.prototype.resolvedOptions;
+    vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(function (this: Intl.DateTimeFormat) {
+      return { ...real.call(this), timeZone: 'Europe/Amsterdam' };
+    });
   });
 
   it('renders the server values', async () => {
-    mocks.getSettings.mockResolvedValue({ ...defaults, timezone: 'America/New_York', timezone_saved: true, window_start: '23:00', window_minutes: 180 });
+    const schedule = emptySchedule();
+    schedule[0][23] = true;
+    mocks.getSettings.mockResolvedValue({ ...defaults, timezone: 'America/New_York', timezone_saved: true, schedule });
     render(<UpdatesTab />);
-    expect(await screen.findByLabelText('Window start')).toHaveValue('23:00');
-    expect(screen.getByLabelText('Window length (minutes)')).toHaveValue(180);
+    expect(await screen.findByRole('gridcell', { name: 'Mon 23:00' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('gridcell', { name: 'Mon 04:00' })).toHaveAttribute('aria-selected', 'false');
     expect(screen.getByLabelText('Timezone')).toHaveValue('America/New_York');
     expect(screen.getByLabelText('Health check timeout (minutes)')).toHaveValue(10);
     // The worker needs time to become healthy plus a 3-minute settle period.
@@ -66,35 +69,43 @@ describe('UpdatesTab', () => {
     expect(screen.queryByText(/Not saved yet/)).not.toBeInTheDocument();
   });
 
-  it('saves the edited window and timezone', async () => {
+  it('saves the edited schedule and timezone', async () => {
     render(<UpdatesTab />);
-    fireEvent.change(await screen.findByLabelText('Window start'), { target: { value: '02:30' } });
-    fireEvent.change(screen.getByLabelText('Window length (minutes)'), { target: { value: '90' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Weekdays 10–16' }));
     fireEvent.change(screen.getByLabelText('Timezone'), { target: { value: 'Europe/Berlin' } });
     fireEvent.click(screen.getByRole('switch', { name: 'Automatic updates' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledWith({
       enabled: false,
-      window_start: '02:30',
-      window_minutes: 90,
+      schedule: presetSchedule('workday'),
       timezone: 'Europe/Berlin',
       health_timeout_minutes: 10,
     }));
     expect(await screen.findByText('Update settings saved.')).toBeVisible();
   });
 
-  it("shows the server's 400 message", async () => {
-    mocks.saveSettings.mockRejectedValue({ response: { data: { detail: 'window_minutes: must be between 30 and 720' } } });
+  it('warns when enabled with no hours selected', async () => {
     render(<UpdatesTab />);
-    await screen.findByLabelText('Window start');
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('window_minutes: must be between 30 and 720');
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
+    expect(screen.getByText("No hours selected — automatic updates won't run.")).toBeVisible();
+    fireEvent.click(screen.getByRole('switch', { name: 'Automatic updates' }));
+    expect(screen.queryByText(/automatic updates won't run/)).not.toBeInTheDocument();
+  });
+
+  it("shows the server's 400 message", async () => {
+    mocks.saveSettings.mockRejectedValue({ response: { data: { detail: 'schedule: expected 7 days of 24 hours each' } } });
+    render(<UpdatesTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('schedule: expected 7 days of 24 hours each');
   });
 
   it('is read-only without settings.manage', async () => {
     mocks.canManage = false;
     render(<UpdatesTab />);
-    expect(await screen.findByLabelText('Window start')).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Clear' })).toBeDisabled();
+    expect(screen.getByLabelText('Timezone')).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole('gridcell', { name: 'Mon 10:00' }), { key: ' ' });
+    expect(screen.getByRole('gridcell', { name: 'Mon 10:00' })).toHaveAttribute('aria-selected', 'false');
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
   });
 });

@@ -189,14 +189,22 @@ impl Schedule {
             .is_some_and(|(day, hour, _)| self.0[day][hour])
     }
 
+    pub fn is_full(&self) -> bool {
+        self.0.iter().flatten().all(|&on| on)
+    }
+
     /// When open, the start of the current contiguous open run (looking back
     /// at most 168 hours); otherwise the start of the next enabled local hour
-    /// within 8 days. `None` for an empty schedule.
+    /// within 8 days. `None` for an empty schedule; the start of the current
+    /// hour when every hour is enabled (the run never began).
     pub fn next_open(&self, tz: &Tz, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         if self.is_empty() {
             return None;
         }
         let mut cur = tz.hour_start(now)?;
+        if self.is_full() {
+            return Some(cur);
+        }
         if self.is_open(tz, now) {
             // Stop after a full week so an all-open schedule still terminates.
             for _ in 1..DAYS * HOURS {
@@ -362,9 +370,26 @@ mod tests {
         assert_eq!(empty.next_open(&tz, now), None);
         let full = Schedule([[true; HOURS]; DAYS]);
         assert!(full.is_open(&tz, now));
-        let start = full.next_open(&tz, now).unwrap();
-        assert!(start <= now && now - start <= Duration::hours(168));
-        assert_eq!(start.timestamp() % 3600, 0);
+        assert!(full.is_full() && !empty.is_full());
+        assert_eq!(full.next_open(&tz, now), Some(utc("2026-11-25T12:00:00Z")));
+    }
+
+    #[test]
+    fn test_full_schedule_starts_at_current_hour() {
+        let tz = amsterdam();
+        let full = Schedule([[true; HOURS]; DAYS]);
+        // Sunday night into Monday: still the current hour, not a week back.
+        assert_eq!(
+            full.next_open(&tz, utc("2026-11-29T23:59:59Z")),
+            Some(utc("2026-11-29T23:00:00Z"))
+        );
+        // One hour off: the run starts right after that hour.
+        let mut grid = [[true; HOURS]; DAYS];
+        grid[2][10] = false; // Wednesday 10:00 local
+        assert_eq!(
+            Schedule(grid).next_open(&tz, utc("2026-11-25T12:30:00Z")),
+            Some(utc("2026-11-25T10:00:00Z"))
+        );
     }
 
     #[test]

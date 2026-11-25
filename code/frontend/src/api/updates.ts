@@ -2,16 +2,15 @@ import apiClient from './client';
 
 export interface UpdateSettings {
   enabled: boolean;
-  /** Local wall-clock start of the window, "HH:MM". */
-  window_start: string;
-  window_minutes: number;
-  /** IANA timezone name the window is evaluated in. */
+  /** 7 days (Monday first) of 24 hours; true = automatic updates may start in that local hour. */
+  schedule: boolean[][];
+  /** IANA timezone name the schedule is evaluated in. */
   timezone: string;
   health_timeout_minutes: number;
 }
 
 export interface UpdateSettingsResponse extends UpdateSettings {
-  /** Start (UTC ISO) of the running or next window, or null. */
+  /** Start (UTC ISO) of the running or next window; null when the schedule is empty. */
   next_window_start: string | null;
   /** False until an owner saves a timezone; the reported one is then a default. */
   timezone_saved: boolean;
