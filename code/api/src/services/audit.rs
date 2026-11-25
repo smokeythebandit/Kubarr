@@ -312,7 +312,10 @@ fn safe_resource_id(action: &AuditAction, resource_type: &ResourceType, id: Stri
         ResourceType::Vpn if vpn_app_action(action, resource_type) => app_slug(&id),
         ResourceType::System => matches!(
             id.as_str(),
-            "registration_enabled" | "registration_require_approval" | "auto_update"
+            "registration_enabled"
+                | "registration_require_approval"
+                | "auto_update"
+                | "notification_routes"
         ),
         _ => id.parse::<i64>().is_ok() && id.len() <= 20,
     };

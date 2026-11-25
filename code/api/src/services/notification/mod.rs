@@ -1,5 +1,6 @@
 mod email;
 mod messagebird;
+pub mod routing;
 mod telegram;
 
 pub use email::EmailProvider;
@@ -372,8 +373,12 @@ impl NotificationService {
                 .filter(user_notification_pref::Column::Verified.eq(true))
                 .all(db)
                 .await?;
+            // Only channels this event is routed to; the bell is not affected.
+            let routed = routing::routed_channels(db, event_type).await?;
 
-            for pref in prefs {
+            for pref in prefs.into_iter().filter(|pref| {
+                ChannelType::parse(&pref.channel_type).is_some_and(|c| routed.contains(&c))
+            }) {
                 if let Some(destination) = &pref.destination {
                     let message = NotificationMessage {
                         recipient: destination.clone(),
@@ -2311,6 +2316,17 @@ mod tests {
     // init_providers — with actual channel records in DB
     // -------------------------------------------------------------------------
 
+    /// Route the `login` event to `channel` so external sends are attempted.
+    async fn route_login(db: &sea_orm::DatabaseConnection, channel: ChannelType) {
+        routing::set_routes(
+            db,
+            "login",
+            &std::collections::HashMap::from([(channel, true)]),
+        )
+        .await
+        .expect("route login");
+    }
+
     async fn insert_channel(
         db: &sea_orm::DatabaseConnection,
         channel_type: &str,
@@ -2523,6 +2539,7 @@ mod tests {
 
         // Add a user pref for email (enabled + verified + with destination)
         insert_user_pref(&db, 20, "email", Some("to@example.com"), true, true).await;
+        route_login(&db, ChannelType::Email).await;
 
         // Add email channel so init_providers can load it
         let email_config = serde_json::json!({
@@ -2615,6 +2632,7 @@ mod tests {
 
         // User pref for telegram with destination, but no provider loaded
         insert_user_pref(&db, 40, "telegram", Some("123456789"), true, true).await;
+        route_login(&db, ChannelType::Telegram).await;
 
         svc.set_db(db.clone()).await;
         // Do NOT call init_providers, so telegram provider stays None
@@ -2649,6 +2667,7 @@ mod tests {
 
         // Add user pref for telegram with a destination (chat ID)
         insert_user_pref(&db, 30, "telegram", Some("987654321"), true, true).await;
+        route_login(&db, ChannelType::Telegram).await;
 
         // Add telegram channel so init_providers loads the TelegramProvider
         let telegram_config = serde_json::json!({
@@ -2691,6 +2710,7 @@ mod tests {
 
         // Add user pref for messagebird with a phone number destination
         insert_user_pref(&db, 31, "messagebird", Some("+15550001234"), true, true).await;
+        route_login(&db, ChannelType::MessageBird).await;
 
         // Add messagebird channel so init_providers loads the MessageBirdProvider
         let mb_config = serde_json::json!({

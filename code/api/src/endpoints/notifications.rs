@@ -19,6 +19,8 @@ use crate::models::{
 use crate::services::notification::ChannelType;
 use crate::state::AppState;
 
+pub(crate) mod routing;
+
 pub fn notifications_routes(state: AppState) -> Router {
     Router::new()
         // User inbox endpoints
@@ -35,6 +37,9 @@ pub fn notifications_routes(state: AppState) -> Router {
         // Admin: Event settings
         .route("/events", get(list_events))
         .route("/events/{event_type}", put(update_event))
+        // Admin: per-event channel routing
+        .route("/routes", get(routing::list_routes))
+        .route("/routes/{event_type}", put(routing::update_route))
         // User preferences
         .route("/preferences", get(get_preferences))
         .route("/preferences/{channel_type}", put(update_preference))
