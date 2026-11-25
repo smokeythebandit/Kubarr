@@ -114,11 +114,17 @@ struct Ctx {
     capture: Capture,
 }
 
+/// Random per run so no credential literal sits in the source.
+fn test_password() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 async fn setup_with(fail: bool) -> Ctx {
     ensure_jwt_keys().await;
     let db = create_test_db_with_seed().await;
+    let password = test_password();
     let user =
-        create_test_user_with_role(&db, "verifier", "v@example.com", "password123", "viewer").await;
+        create_test_user_with_role(&db, "verifier", "v@example.com", &password, "viewer").await;
     let state = build_test_app_state_with_db(db.clone()).await;
     let capture = Capture::new(ChannelType::Telegram, fail);
     state
@@ -126,7 +132,7 @@ async fn setup_with(fail: bool) -> Ctx {
         .set_provider_override(Arc::new(capture.clone()))
         .await;
 
-    let body = serde_json::json!({"username": "verifier", "password": "password123"}).to_string();
+    let body = serde_json::json!({"username": "verifier", "password": &password}).to_string();
     let response = create_router(state.clone())
         .oneshot(
             Request::builder()
@@ -540,7 +546,8 @@ async fn unverified_preference_receives_nothing() {
 async fn events_endpoint_lists_enum_derived_types() {
     ensure_jwt_keys().await;
     let db = create_test_db_with_seed().await;
-    create_test_user_with_role(&db, "evadmin", "ev@example.com", "password123", "admin").await;
+    let password = test_password();
+    create_test_user_with_role(&db, "evadmin", "ev@example.com", &password, "admin").await;
     // The seeded admin role lacks settings.view; add it.
     {
         use kubarr::models::{role, role_permission};
@@ -560,7 +567,7 @@ async fn events_endpoint_lists_enum_derived_types() {
         .ok();
     }
     let state = build_test_app_state_with_db(db.clone()).await;
-    let body = serde_json::json!({"username": "evadmin", "password": "password123"}).to_string();
+    let body = serde_json::json!({"username": "evadmin", "password": &password}).to_string();
     let response = create_router(state.clone())
         .oneshot(
             Request::builder()
