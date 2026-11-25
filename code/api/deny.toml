@@ -26,6 +26,12 @@ id = "RUSTSEC-2026-0173"
 # sqlx allows libsqlite3-sys >= 0.39.
 id = "RUSTSEC-2026-0459"
 
+[[advisories.ignore]]
+# chrono 0.4.x is flagged unmaintained. It is used pervasively (sea-orm,
+# serde, sqlx) and has no maintained drop-in replacement; no patched version
+# exists. Track migration to jiff separately.
+id = "RUSTSEC-2026-0543"
+
 [licenses]
 version = 2
 # Skip license check for private (publish = false) packages like the root crate
