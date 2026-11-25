@@ -187,6 +187,8 @@ describe('NotificationsTab', () => {
   const routes = [
     { event_type: 'login_failed', channels: { telegram: true, email: true, messagebird: true } },
     { event_type: 'app_installed', channels: { telegram: false, email: false, messagebird: false } },
+    // app_installed is off, so its routes never fire and are not counted.
+    { event_type: 'system_setting_changed', channels: { telegram: false, email: false, messagebird: false } },
   ];
 
   it('routes each event to channels and badges the number of routes', () => {
@@ -219,10 +221,15 @@ describe('NotificationsTab', () => {
     fireEvent.click(screen.getByRole('tab', { name: /What you get/ }));
     const panel = screen.getByRole('tabpanel');
 
-    const bell = within(panel).getByRole('checkbox', { name: 'App Installed in the bell' });
+    const bell = within(panel).getByRole('checkbox', { name: 'Login Failed in the bell' });
     expect(bell).toBeChecked();
     expect(bell).toBeDisabled();
     expect(bell).toHaveAttribute('title', 'The bell always shows every enabled event');
+    // A disabled event is not in the bell either.
+    const offBell = within(panel).getByRole('checkbox', { name: 'App Installed in the bell' });
+    expect(offBell).not.toBeChecked();
+    expect(offBell).toBeDisabled();
+    expect(offBell).toHaveAttribute('title', 'Turn the event on to show it in the bell');
 
     const email = within(panel).getByRole('checkbox', { name: 'Login Failed via Email' });
     expect(email).toBeDisabled();
@@ -230,6 +237,17 @@ describe('NotificationsTab', () => {
     expect(email).toHaveAttribute('title', 'Set up this channel first');
     fireEvent.click(email);
     expect(onToggleRoute).not.toHaveBeenCalled();
+  });
+
+  it('counts only routes on enabled events in the badge', () => {
+    renderTab({
+      notificationRoutes: [
+        { event_type: 'login_failed', channels: { telegram: true, email: false, messagebird: false } },
+        { event_type: 'app_installed', channels: { telegram: true, email: false, messagebird: true } },
+      ],
+      onToggleRoute: vi.fn(),
+    });
+    expect(within(screen.getByRole('tab', { name: /What you get/ })).getByTestId('count-badge')).toHaveTextContent('1');
   });
 
   it('makes routes read-only without settings.manage', () => {

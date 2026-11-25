@@ -297,13 +297,15 @@ impl NotificationService {
         // Create notification title and body
         let title = format_event_title(action);
         let body = format_event_body(action, username, details);
+        // External channels this event is routed to; the bell is not affected.
+        let routed = routing::routed_channels(db, &event_type).await?;
 
         let Some(uid) = user_id else {
             // System-wide events go to everyone who manages settings. One failing
             // recipient must not stop the others.
             for uid in settings_managers(db).await? {
                 if let Err(e) = self
-                    .notify_user(db, uid, &title, &body, &event_type, severity)
+                    .notify_user(db, uid, &title, &body, &event_type, severity, &routed)
                     .await
                 {
                     tracing::warn!(user_id = uid, "System notification failed: {}", e);
@@ -311,11 +313,12 @@ impl NotificationService {
             }
             return Ok(());
         };
-        self.notify_user(db, uid, &title, &body, &event_type, severity)
+        self.notify_user(db, uid, &title, &body, &event_type, severity, &routed)
             .await
     }
 
-    /// In-app notification plus the user's verified external channels.
+    /// In-app notification plus the user's verified destinations on `routed` channels.
+    #[allow(clippy::too_many_arguments)]
     async fn notify_user(
         &self,
         db: &DatabaseConnection,
@@ -324,11 +327,20 @@ impl NotificationService {
         body: &str,
         event_type: &str,
         severity: NotificationSeverity,
+        routed: &std::collections::HashSet<ChannelType>,
     ) -> Result<()> {
         self.create_user_notification(db, user_id, title, body, event_type, severity)
             .await?;
-        self.send_external_notifications(db, Some(user_id), title, body, event_type, severity)
-            .await
+        self.send_external_notifications(
+            db,
+            Some(user_id),
+            title,
+            body,
+            event_type,
+            severity,
+            routed,
+        )
+        .await
     }
 
     /// Create an in-app notification for a user
@@ -355,7 +367,8 @@ impl NotificationService {
         Ok(())
     }
 
-    /// Send notifications through external channels
+    /// Send notifications through the external channels in `routed`.
+    #[allow(clippy::too_many_arguments)]
     async fn send_external_notifications(
         &self,
         db: &DatabaseConnection,
@@ -364,6 +377,7 @@ impl NotificationService {
         body: &str,
         event_type: &str,
         severity: NotificationSeverity,
+        routed: &std::collections::HashSet<ChannelType>,
     ) -> Result<()> {
         // If we have a specific user, check their preferences
         if let Some(uid) = user_id {
@@ -373,9 +387,6 @@ impl NotificationService {
                 .filter(user_notification_pref::Column::Verified.eq(true))
                 .all(db)
                 .await?;
-            // Only channels this event is routed to; the bell is not affected.
-            let routed = routing::routed_channels(db, event_type).await?;
-
             for pref in prefs.into_iter().filter(|pref| {
                 ChannelType::parse(&pref.channel_type).is_some_and(|c| routed.contains(&c))
             }) {

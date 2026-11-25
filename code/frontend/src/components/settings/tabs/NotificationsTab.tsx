@@ -58,6 +58,7 @@ const input = `w-full rounded-md border border-gray-200 dark:border-gray-700 bg-
 const ROUTE_COLUMN_NAMES: Record<RouteChannel, string> = { telegram: 'Telegram', email: 'Email', messagebird: 'SMS' };
 const SET_UP_FIRST = 'Set up this channel first';
 const BELL_ALWAYS_ON = 'The bell always shows every enabled event';
+const BELL_EVENT_OFF = 'Turn the event on to show it in the bell';
 const checkbox = `h-4 w-4 rounded border-gray-300 text-blue-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-600 ${focusRing}`;
 
 const th = 'px-3 py-2 text-left font-mono text-[0.7rem] font-semibold uppercase tracking-[0.05em] text-gray-500 dark:text-gray-400';
@@ -134,7 +135,10 @@ export function NotificationsTab({
   const available = (channel: RouteChannel) => statuses.some((s) => s.channel.channel_type === channel && s.status !== 'unset');
   const routeOn = (eventType: string, channel: RouteChannel) =>
     available(channel) && !!notificationRoutes.find((r) => r.event_type === eventType)?.channels[channel];
-  const routeCount = notificationEvents.reduce((n, e) => n + ROUTE_CHANNELS.filter((c) => routeOn(e.event_type, c)).length, 0);
+  // Only routes that can fire: the event is on and the channel is set up.
+  const routeCount = notificationEvents
+    .filter((e) => e.enabled)
+    .reduce((n, e) => n + ROUTE_CHANNELS.filter((c) => routeOn(e.event_type, c)).length, 0);
 
   const tabs: { id: TabId; label: string; badge: number; badgeTitle: string }[] = [
     { id: 'channels', label: 'Channels', badge: problems, badgeTitle: `${problems} with a problem` },
@@ -374,7 +378,15 @@ export function NotificationsTab({
                                 />
                               </td>
                               <td className="px-3 py-2 text-center">
-                                <input type="checkbox" className={checkbox} checked readOnly disabled aria-label={`${label} in the bell`} title={BELL_ALWAYS_ON} />
+                                <input
+                                  type="checkbox"
+                                  className={checkbox}
+                                  checked={event.enabled}
+                                  readOnly
+                                  disabled
+                                  aria-label={`${label} in the bell`}
+                                  title={event.enabled ? BELL_ALWAYS_ON : BELL_EVENT_OFF}
+                                />
                               </td>
                               {ROUTE_CHANNELS.map((c) => {
                                 const on = routeOn(event.event_type, c);

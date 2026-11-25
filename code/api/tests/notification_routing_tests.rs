@@ -229,3 +229,112 @@ async fn update_route_rejects_unknown_channel_event_or_empty_body() {
     .await;
     assert!(status.is_client_error());
 }
+
+async fn channels_of(app: &axum::Router, cookie: &str, event_type: &str) -> serde_json::Value {
+    let (status, body) = send(
+        app.clone(),
+        "GET",
+        "/api/notifications/routes",
+        Some(cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let routes: serde_json::Value = serde_json::from_str(&body).unwrap();
+    route_for(&routes, event_type)["channels"].clone()
+}
+
+async fn put_event(app: &axum::Router, cookie: &str, event_type: &str, body: serde_json::Value) {
+    let (status, response) = send(
+        app.clone(),
+        "PUT",
+        &format!("/api/notifications/events/{event_type}"),
+        Some(cookie),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+}
+
+#[tokio::test]
+async fn creating_an_event_seeds_severity_defaults_and_severity_changes_keep_them() {
+    let (app, cookie, _) = login_as("admin", "routeseeder").await;
+    put_event(
+        &app,
+        &cookie,
+        "login",
+        serde_json::json!({ "enabled": true, "severity": "warning" }),
+    )
+    .await;
+    let telegram = serde_json::json!({ "email": false, "telegram": true, "messagebird": false });
+    assert_eq!(channels_of(&app, &cookie, "login").await, telegram);
+
+    put_event(
+        &app,
+        &cookie,
+        "login",
+        serde_json::json!({ "severity": "critical" }),
+    )
+    .await;
+    assert_eq!(channels_of(&app, &cookie, "login").await, telegram);
+}
+
+#[tokio::test]
+async fn turning_on_an_unrouted_event_seeds_its_defaults() {
+    use kubarr::models::notification_event;
+    use sea_orm::{ActiveModelTrait, Set};
+    let (app, cookie, db) = login_as("admin", "routeenabler").await;
+    // An existing disabled row with no routes (as left by the migration for info).
+    notification_event::ActiveModel {
+        event_type: Set("user_deleted".to_string()),
+        enabled: Set(false),
+        severity: Set("critical".to_string()),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let off = serde_json::json!({ "email": false, "telegram": false, "messagebird": false });
+    assert_eq!(channels_of(&app, &cookie, "user_deleted").await, off);
+
+    put_event(
+        &app,
+        &cookie,
+        "user_deleted",
+        serde_json::json!({ "enabled": true }),
+    )
+    .await;
+    assert_eq!(
+        channels_of(&app, &cookie, "user_deleted").await,
+        serde_json::json!({ "email": true, "telegram": true, "messagebird": true })
+    );
+
+    // An admin's choice survives turning the event off and on again.
+    let (status, body) = send(
+        app.clone(),
+        "PUT",
+        "/api/notifications/routes/user_deleted",
+        Some(&cookie),
+        Some(serde_json::json!({ "channels": { "email": false } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    put_event(
+        &app,
+        &cookie,
+        "user_deleted",
+        serde_json::json!({ "enabled": false }),
+    )
+    .await;
+    put_event(
+        &app,
+        &cookie,
+        "user_deleted",
+        serde_json::json!({ "enabled": true }),
+    )
+    .await;
+    assert_eq!(
+        channels_of(&app, &cookie, "user_deleted").await,
+        serde_json::json!({ "email": false, "telegram": true, "messagebird": true })
+    );
+}

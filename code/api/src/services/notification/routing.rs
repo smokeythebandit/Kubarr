@@ -60,6 +60,30 @@ pub async fn all_routes<C: ConnectionTrait>(
     Ok(routes)
 }
 
+/// Give `event_type` the default routes for `severity` if it has no route rows
+/// yet. Every channel gets a row (on or off), so this happens at most once and
+/// later severity changes leave the routes alone. Returns whether it seeded.
+pub async fn seed_defaults_if_unrouted<C: ConnectionTrait>(
+    db: &C,
+    event_type: &str,
+    severity: NotificationSeverity,
+) -> Result<bool> {
+    let existing = notification_route::Entity::find()
+        .filter(notification_route::Column::EventType.eq(event_type))
+        .one(db)
+        .await?;
+    if existing.is_some() {
+        return Ok(false);
+    }
+    let defaults = default_channels(severity);
+    let channels: HashMap<ChannelType, bool> = ChannelType::all()
+        .into_iter()
+        .map(|c| (c, defaults.contains(&c)))
+        .collect();
+    set_routes(db, event_type, &channels).await?;
+    Ok(true)
+}
+
 /// Insert or update the routes of `event_type` for the given channels.
 pub async fn set_routes<C: ConnectionTrait>(
     db: &C,
@@ -106,9 +130,18 @@ mod tests {
     }
 
     async fn insert_event(db: &DatabaseConnection, event_type: &str, severity: &str) {
+        insert_event_with(db, event_type, severity, true).await;
+    }
+
+    async fn insert_event_with(
+        db: &DatabaseConnection,
+        event_type: &str,
+        severity: &str,
+        enabled: bool,
+    ) {
         notification_event::ActiveModel {
             event_type: Set(event_type.to_string()),
-            enabled: Set(true),
+            enabled: Set(enabled),
             severity: Set(severity.to_string()),
             ..Default::default()
         }
@@ -191,40 +224,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_seeds_existing_events_by_severity() {
+    async fn migration_keeps_enabled_events_on_every_channel_and_defaults_the_rest() {
         let db = Database::connect("sqlite::memory:").await.expect("db");
         let before = Migrator::migrations()
             .iter()
             .position(|m| m.name().contains("notification_routes"))
             .expect("routes migration registered") as u32;
         Migrator::up(&db, Some(before)).await.expect("migrate");
-        insert_event(&db, "login_failed", "Critical").await;
-        insert_event(&db, "user_deleted", "warning").await;
-        insert_event(&db, "login", "info").await;
+        // Enabled rows were created lazily as "info": today they go everywhere.
+        insert_event_with(&db, "login", "info", true).await;
+        insert_event_with(&db, "login_failed", "Critical", false).await;
+        insert_event_with(&db, "user_deleted", "warning", false).await;
+        insert_event_with(&db, "logout", "info", false).await;
         Migrator::up(&db, None).await.expect("migrate rest");
 
-        let routes = all_routes(&db).await.expect("routes");
-        for (event_type, severity) in [
-            ("login_failed", NotificationSeverity::Critical),
-            ("user_deleted", NotificationSeverity::Warning),
-            ("login", NotificationSeverity::Info),
-            ("app_update_rollback_failed", NotificationSeverity::Critical),
-            ("app_update_failed", NotificationSeverity::Warning),
-            ("app_updated", NotificationSeverity::Info),
+        let every: HashSet<ChannelType> = ChannelType::all().into_iter().collect();
+        let defaults = |s| default_channels(s).iter().copied().collect::<HashSet<_>>();
+        for (event_type, expected) in [
+            ("login", every.clone()),
+            ("login_failed", defaults(NotificationSeverity::Critical)),
+            ("user_deleted", defaults(NotificationSeverity::Warning)),
+            ("logout", HashSet::new()),
+            // Seeded by 000036: two enabled, `app_updated` disabled info.
+            ("app_update_rollback_failed", every.clone()),
+            ("app_update_failed", every.clone()),
+            ("app_updated", HashSet::new()),
         ] {
-            let expected: HashSet<ChannelType> =
-                default_channels(severity).iter().copied().collect();
-            let actual: HashSet<ChannelType> = routes
-                .get(event_type)
-                .map(|m| m.iter().filter(|(_, on)| **on).map(|(c, _)| *c).collect())
-                .unwrap_or_default();
-            assert_eq!(actual, expected, "{event_type}");
             assert_eq!(
                 routed_channels(&db, event_type).await.expect("routed"),
                 expected,
                 "{event_type}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn seed_defaults_only_when_unrouted() {
+        let db = migrated_db().await;
+        assert!(
+            seed_defaults_if_unrouted(&db, "login", NotificationSeverity::Warning)
+                .await
+                .expect("seed")
+        );
+        assert_eq!(
+            routed_channels(&db, "login").await.expect("routed"),
+            HashSet::from([ChannelType::Telegram])
+        );
+        // Every channel has a row, so a later severity never reseeds.
+        assert_eq!(all_routes(&db).await.expect("all")["login"].len(), 3);
+        assert!(
+            !seed_defaults_if_unrouted(&db, "login", NotificationSeverity::Critical)
+                .await
+                .expect("seed")
+        );
+        assert_eq!(
+            routed_channels(&db, "login").await.expect("routed"),
+            HashSet::from([ChannelType::Telegram])
+        );
     }
 
     #[tokio::test]
