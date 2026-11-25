@@ -56,19 +56,19 @@ test.describe('Global Navigation', () => {
     test('clicking opens notification dropdown', async ({ page }) => {
       const bellButton = page.locator('nav button').filter({ has: page.locator('svg.lucide-bell') }).first();
       await bellButton.click();
-      await expect(page.locator('text=Notifications')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('dialog', { name: 'Notifications' })).toBeVisible({ timeout: 5000 });
     });
 
     test('notification dropdown shows heading', async ({ page }) => {
       const bellButton = page.locator('nav button').filter({ has: page.locator('svg.lucide-bell') }).first();
       await bellButton.click();
-      await expect(page.locator('text=Notifications')).toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Notifications' }).getByRole('heading', { name: 'Notifications', exact: true })).toBeVisible();
     });
 
-    test('notification preferences link is present', async ({ page }) => {
+    test('open notifications link is present', async ({ page }) => {
       const bellButton = page.locator('nav button').filter({ has: page.locator('svg.lucide-bell') }).first();
       await bellButton.click();
-      await expect(page.locator('text=Notification preferences')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('link', { name: 'Open notifications' })).toBeVisible({ timeout: 5000 });
     });
   });
 

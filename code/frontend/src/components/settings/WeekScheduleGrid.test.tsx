@@ -139,4 +139,38 @@ describe('WeekScheduleGrid', () => {
     expect(onChange).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /^Remove / })).not.toBeInTheDocument();
   });
+
+  it('moves focus with arrows, Home/End and Ctrl+Home/End', () => {
+    render(<Harness initial={emptySchedule()} />);
+    cell('Wed', 5).focus();
+    fireEvent.keyDown(cell('Wed', 5), { key: 'ArrowRight' });
+    expect(cell('Wed', 6)).toHaveFocus();
+    fireEvent.keyDown(cell('Wed', 6), { key: 'ArrowDown' });
+    expect(cell('Thu', 6)).toHaveFocus();
+    fireEvent.keyDown(cell('Thu', 6), { key: 'Home' });
+    expect(cell('Thu', 0)).toHaveFocus();
+    fireEvent.keyDown(cell('Thu', 0), { key: 'End' });
+    expect(cell('Thu', 23)).toHaveFocus();
+    fireEvent.keyDown(cell('Thu', 23), { key: 'Home', ctrlKey: true });
+    expect(cell('Mon', 0)).toHaveFocus();
+    expect(cell('Mon', 0)).toHaveAttribute('tabindex', '0');
+    fireEvent.keyDown(cell('Mon', 0), { key: 'End', ctrlKey: true });
+    expect(cell('Sun', 23)).toHaveFocus();
+    expect(cell('Mon', 0)).toHaveAttribute('tabindex', '-1');
+  });
+
+  it('keeps keyboard navigation when read-only but blocks toggling', () => {
+    const onChange = vi.fn();
+    render(<Harness initial={emptySchedule()} onChange={onChange} readOnly />);
+    cell('Mon', 0).focus();
+    fireEvent.keyDown(cell('Mon', 0), { key: 'ArrowRight' });
+    expect(cell('Mon', 1)).toHaveFocus();
+    expect(cell('Mon', 1)).toHaveAttribute('tabindex', '0');
+    fireEvent.keyDown(cell('Mon', 1), { key: 'End' });
+    expect(cell('Mon', 23)).toHaveFocus();
+    fireEvent.keyDown(cell('Mon', 23), { key: 'Enter' });
+    fireEvent.keyDown(cell('Mon', 23), { key: ' ' });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(selected('Mon', 23)).toBe(false);
+  });
 });

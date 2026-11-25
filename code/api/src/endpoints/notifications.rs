@@ -136,6 +136,10 @@ async fn get_inbox(
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct UnreadCountResponse {
     pub count: u64,
+    /// Unread notifications with severity `critical`; the bell turns red.
+    pub critical: u64,
+    /// Unread notifications with severity `warning` or `critical` ("needs you").
+    pub attention: u64,
 }
 
 #[utoipa::path(
@@ -151,7 +155,26 @@ async fn get_unread_count(
     auth: Authenticated,
 ) -> Result<Json<UnreadCountResponse>> {
     let count = state.notification.get_unread_count(auth.user_id()).await?;
-    Ok(Json(UnreadCountResponse { count }))
+    let db = state.get_db().await?;
+    use crate::models::user_notification::{Column, Entity};
+    let unread = || {
+        Entity::find()
+            .filter(Column::UserId.eq(auth.user_id()))
+            .filter(Column::Read.eq(false))
+    };
+    let critical = unread()
+        .filter(Column::Severity.eq("critical"))
+        .count(&db)
+        .await?;
+    let attention = unread()
+        .filter(Column::Severity.is_in(["warning", "critical"]))
+        .count(&db)
+        .await?;
+    Ok(Json(UnreadCountResponse {
+        count,
+        critical,
+        attention,
+    }))
 }
 
 #[utoipa::path(
@@ -1342,9 +1365,15 @@ mod tests {
 
     #[test]
     fn unread_count_response_ser() {
-        let r = UnreadCountResponse { count: 5 };
+        let r = UnreadCountResponse {
+            count: 5,
+            critical: 1,
+            attention: 2,
+        };
         let json = serde_json::to_string(&r).expect("ser");
         assert!(json.contains("\"count\":5"));
+        assert!(json.contains("\"critical\":1"));
+        assert!(json.contains("\"attention\":2"));
     }
 
     #[test]
