@@ -1,4 +1,4 @@
-//! Settings for automatic nightly app updates (`/api/updates`).
+//! Settings for scheduled automatic app updates (`/api/updates`).
 
 use axum::{extract::State, routing::get, Json, Router};
 use chrono::{DateTime, Utc};
@@ -22,7 +22,8 @@ pub fn updates_routes(state: AppState) -> Router {
 pub struct AutoUpdateSettingsResponse {
     #[serde(flatten)]
     pub settings: AutoUpdateSettings,
-    /// Start (UTC) of the running or next update window.
+    /// Start (UTC) of the open run of scheduled hours containing now, otherwise
+    /// of the next one; null when the schedule has no hours enabled.
     pub next_window_start: Option<DateTime<Utc>>,
     /// False until an owner has saved a timezone; the reported one is then a default.
     pub timezone_saved: bool,
