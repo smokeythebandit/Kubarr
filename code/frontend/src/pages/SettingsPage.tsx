@@ -30,7 +30,7 @@ import { getCatalog, App } from '../api/apps';
 import { getSettings, updateSetting, Setting } from '../api/settings';
 import { Users, Link, UserPlus, Settings, Sliders, Lock, Menu, X, FileText, CheckCircle, XCircle, LayoutDashboard, Shield, Bell, Mail, Send, MessageSquare, Globe, Network, RefreshCw } from 'lucide-react';
 import { auditApi, AuditLog, AuditStats, AuditLogQuery } from '../api/audit';
-import { notificationsApi, NotificationChannel, NotificationEvent, NotificationLog } from '../api/notifications';
+import { notificationsApi, NotificationChannel, NotificationEvent, NotificationLog, NotificationRoute, RouteChannel } from '../api/notifications';
 import { oauthApi, OAuthProvider } from '../api/oauth';
 import { VpnTab } from '../components/vpn';
 import { AuditTab } from '../components/settings/tabs/AuditTab';
@@ -155,6 +155,7 @@ const SettingsPage: React.FC = () => {
   // Notification state
   const [notificationChannels, setNotificationChannels] = useState<NotificationChannel[]>([]);
   const [notificationEvents, setNotificationEvents] = useState<NotificationEvent[]>([]);
+  const [notificationRoutes, setNotificationRoutes] = useState<NotificationRoute[]>([]);
   const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
   const [notificationLogsTotal, setNotificationLogsTotal] = useState(0);
   const [notificationLoading, setNotificationLoading] = useState(false);
@@ -199,6 +200,7 @@ const SettingsPage: React.FC = () => {
     if (canViewSettings && activeSection === 'notifications') {
       loadNotificationChannels();
       loadNotificationEvents();
+      loadNotificationRoutes();
       if (canViewAudit) loadNotificationLogs();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -408,6 +410,28 @@ const SettingsPage: React.FC = () => {
       setNotificationEvents(events);
     } catch (err: unknown) {
       console.error('Failed to load notification events:', err);
+    }
+  };
+
+  const loadNotificationRoutes = async () => {
+    try {
+      setNotificationRoutes(await notificationsApi.getRoutes());
+    } catch (err: unknown) {
+      console.error('Failed to load notification routes:', err);
+    }
+  };
+
+  const handleToggleRoute = async (eventType: string, channel: RouteChannel, enabled: boolean) => {
+    try {
+      const updated = await notificationsApi.updateRoute(eventType, { [channel]: enabled });
+      setNotificationRoutes((prev) =>
+        prev.some((r) => r.event_type === eventType)
+          ? prev.map((r) => (r.event_type === eventType ? updated : r))
+          : [...prev, updated],
+      );
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } };
+      setError(error.response?.data?.detail || 'Failed to update where this event is sent');
     }
   };
 
@@ -1005,6 +1029,8 @@ const SettingsPage: React.FC = () => {
                 onToggleChannel={handleToggleChannel}
                 onToggleEvent={handleToggleEvent}
                 onUpdateEventSeverity={handleUpdateEventSeverity}
+                notificationRoutes={notificationRoutes}
+                onToggleRoute={handleToggleRoute}
                 onTestChannel={handleTestChannel}
                 onSaveChannelConfig={handleSaveChannelConfig}
                 getChannelIcon={getChannelIcon}
