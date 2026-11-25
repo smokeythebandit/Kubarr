@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     http::{header, HeaderMap, Request, StatusCode},
-    routing::post,
+    routing::get,
     Json, Router,
 };
 use http_body_util::BodyExt;
@@ -19,8 +19,9 @@ mod common;
 use common::{build_test_app_state_with_db, create_test_db_with_seed, create_test_user_with_role};
 
 use kubarr::endpoints::create_router;
+use kubarr::error::AppError;
 use kubarr::models::{assistant_usage, audit_log, role, role_permission};
-use kubarr::services::assistant::{AssistantDeps, MemoryKeyStore, MessagesClient};
+use kubarr::services::assistant::{AssistantDeps, KeyStore, MemoryKeyStore, MessagesClient};
 use kubarr::state::AppState;
 
 static JWT_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
@@ -45,7 +46,7 @@ struct Harness {
     app: Router,
     cookie: String,
     db: DatabaseConnection,
-    store: Arc<MemoryKeyStore>,
+    store: Arc<dyn KeyStore>,
 }
 
 async fn login(app: Router, username: &str, password: &str) -> String {
@@ -73,14 +74,18 @@ async fn login(app: Router, username: &str, password: &str) -> String {
         .expect("login must set a session cookie")
 }
 
-async fn harness_with(role: &str, store: MemoryKeyStore, base_url: Option<&str>) -> Harness {
+async fn harness_with(
+    role: &str,
+    store: impl KeyStore + 'static,
+    base_url: Option<&str>,
+) -> Harness {
     ensure_jwt_keys().await;
     let db = create_test_db_with_seed().await;
     let name = format!("{role}-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
     let password = uuid::Uuid::new_v4().to_string();
     create_test_user_with_role(&db, &name, &format!("{name}@example.com"), &password, role).await;
     let mut state: AppState = build_test_app_state_with_db(db.clone()).await;
-    let store = Arc::new(store);
+    let store: Arc<dyn KeyStore> = Arc::new(store);
     state.assistant = AssistantDeps {
         key_store: store.clone(),
         client: MessagesClient::new(base_url.unwrap_or("http://127.0.0.1:9")),
@@ -129,28 +134,29 @@ impl Harness {
     }
 }
 
-/// A stand-in for `POST /v1/messages` that records request headers and
-/// bodies and answers with a fixed status and body.
+/// A stand-in for `GET /v1/models/{model}` that records request headers and
+/// paths and answers with a fixed status and body.
 #[derive(Clone, Default)]
 struct Seen {
-    requests: Arc<Mutex<Vec<(HeaderMap, serde_json::Value)>>>,
+    requests: Arc<Mutex<Vec<(HeaderMap, String)>>>,
 }
 
-async fn mock_messages_api(status: StatusCode, reply: serde_json::Value) -> (String, Seen) {
+async fn mock_models_api(status: StatusCode, reply: serde_json::Value) -> (String, Seen) {
     let seen = Seen::default();
     let recorder = seen.clone();
     let app = Router::new().route(
-        "/v1/messages",
-        post(
-            move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
-                let recorder = recorder.clone();
-                let reply = reply.clone();
-                async move {
-                    recorder.requests.lock().push((headers, body));
-                    (status, Json(reply))
-                }
-            },
-        ),
+        "/v1/models/{model}",
+        get(move |headers: HeaderMap, uri: axum::http::Uri| {
+            let recorder = recorder.clone();
+            let reply = reply.clone();
+            async move {
+                recorder
+                    .requests
+                    .lock()
+                    .push((headers, uri.path().to_string()));
+                (status, Json(reply))
+            }
+        }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -160,14 +166,33 @@ async fn mock_messages_api(status: StatusCode, reply: serde_json::Value) -> (Str
     (format!("http://{addr}"), seen)
 }
 
-fn ok_reply() -> serde_json::Value {
+fn model_reply() -> serde_json::Value {
     serde_json::json!({
-        "id": "msg_test", "type": "message", "role": "assistant",
-        "model": "claude-haiku-5-5", "stop_reason": "max_tokens",
-        "content": [{"type": "text", "text": "p"}],
-        "usage": {"input_tokens": 8, "output_tokens": 1,
-                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        "type": "model", "id": "claude-haiku-5-5",
+        "display_name": "Claude Haiku 5.5", "created_at": "2026-10-01T00:00:00Z"
     })
+}
+
+/// A key store whose Secret cannot be read (RBAC, cluster down).
+struct BrokenStore;
+
+#[async_trait::async_trait]
+impl KeyStore for BrokenStore {
+    async fn get(&self) -> kubarr::error::Result<Option<String>> {
+        Err(AppError::Internal(
+            "Failed to read the assistant API key (403)".into(),
+        ))
+    }
+    async fn set(&self, _key: &str) -> kubarr::error::Result<()> {
+        Err(AppError::Internal(
+            "Failed to store the assistant API key (403)".into(),
+        ))
+    }
+    async fn delete(&self) -> kubarr::error::Result<()> {
+        Err(AppError::Internal(
+            "Failed to remove the assistant API key (403)".into(),
+        ))
+    }
 }
 
 async fn grant(db: &DatabaseConnection, role_name: &str, permission: &str) {
@@ -236,7 +261,6 @@ async fn the_key_is_write_only() {
         serde_json::json!({"configured": true})
     );
     // Stored trimmed.
-    use kubarr::services::assistant::KeyStore;
     assert_eq!(h.store.get().await.unwrap().as_deref(), Some(key.as_str()));
 
     for uri in [
@@ -345,7 +369,7 @@ async fn status_reports_settings_spend_and_pause() {
     assert_eq!(
         status,
         serde_json::json!({
-            "configured": true, "enabled": true,
+            "configured": true, "key_error": false, "enabled": true,
             "model": "claude-opus-5-5", "effort": "low",
             "month_spend_usd": 0.0, "monthly_budget_usd": 20.0, "paused": false
         })
@@ -405,8 +429,8 @@ async fn settings_reject_unknown_models_and_bad_values() {
 }
 
 #[tokio::test]
-async fn key_test_calls_the_messages_api_and_records_usage() {
-    let (base_url, seen) = mock_messages_api(StatusCode::OK, ok_reply()).await;
+async fn key_test_checks_the_model_without_spending_tokens() {
+    let (base_url, seen) = mock_models_api(StatusCode::OK, model_reply()).await;
     let key = test_key();
     let h = harness_with("admin", MemoryKeyStore::with_key(&key), Some(&base_url)).await;
     h.json(
@@ -425,19 +449,60 @@ async fn key_test_calls_the_messages_api_and_records_usage() {
 
     let requests = seen.requests.lock().clone();
     assert_eq!(requests.len(), 1);
-    let (headers, body) = &requests[0];
+    let (headers, path) = &requests[0];
+    assert_eq!(path, "/v1/models/claude-haiku-5-5");
     assert_eq!(headers["x-api-key"], key.as_str());
     assert_eq!(headers["anthropic-version"], "2023-06-01");
-    assert_eq!(headers["content-type"], "application/json");
-    assert_eq!(body["model"], "claude-haiku-5-5");
-    assert_eq!(body["max_tokens"], 1);
+    assert!(assistant_usage::Entity::find()
+        .all(&h.db)
+        .await
+        .unwrap()
+        .is_empty());
+}
 
-    let usage = assistant_usage::Entity::find().all(&h.db).await.unwrap();
-    assert_eq!(usage.len(), 1);
-    assert_eq!(usage[0].model, "claude-haiku-5-5");
-    assert_eq!((usage[0].input_tokens, usage[0].output_tokens), (8, 1));
-    // 8 * 0.1 µ$ + 1 * 0.5 µ$ = 1.3 µ$, rounded up.
-    assert_eq!(usage[0].cost_usd_micros, 2);
+#[tokio::test]
+async fn key_test_maps_statuses_to_fixed_messages() {
+    for (status, kind, expected) in [
+        (
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            "Anthropic rejected the API key.",
+        ),
+        (
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            "The selected model is not available for this API key.",
+        ),
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            "Anthropic is temporarily unavailable. Try again later.",
+        ),
+    ] {
+        let reply = serde_json::json!({"type": "error", "error": {"type": kind, "message": "x"}});
+        let (base_url, _) = mock_models_api(status, reply).await;
+        let h = harness_with(
+            "admin",
+            MemoryKeyStore::with_key(&test_key()),
+            Some(&base_url),
+        )
+        .await;
+        assert_eq!(
+            h.json("POST", "/api/assistant/key/test", None).await,
+            serde_json::json!({"ok": false, "error": expected}),
+            "{status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_key_secret_is_reported_not_hidden() {
+    let h = harness_with("admin", BrokenStore, None).await;
+    let status = h.json("GET", "/api/assistant/status", None).await;
+    assert_eq!(status["configured"], false);
+    assert_eq!(status["key_error"], true);
+    let (code, body) = h.call("GET", "/api/assistant/key", None).await;
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{body}");
 }
 
 #[tokio::test]
@@ -448,7 +513,7 @@ async fn key_test_failures_are_generic_and_never_echo_the_key() {
         "type": "error",
         "error": {"type": "authentication_error", "message": format!("invalid x-api-key {key}")}
     });
-    let (base_url, _) = mock_messages_api(StatusCode::UNAUTHORIZED, reply).await;
+    let (base_url, _) = mock_models_api(StatusCode::UNAUTHORIZED, reply).await;
     let h = harness_with("admin", MemoryKeyStore::with_key(&key), Some(&base_url)).await;
     let (status, body) = h.call("POST", "/api/assistant/key/test", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");

@@ -158,15 +158,32 @@ pub async fn warn_if_due(
         state.spend_usd(),
         settings.monthly_budget_usd
     );
-    notifications
+    // The month is claimed first so two replicas cannot both send; if sending
+    // fails the claim is released so a later call retries.
+    if let Err(e) = notifications
         .notify_event(
             &AuditAction::AssistantBudgetWarning,
             None,
             None,
             Some(&details),
         )
-        .await?;
+        .await
+    {
+        release_warning(db, now).await?;
+        return Err(e);
+    }
     Ok(true)
+}
+
+/// Undo [`claim_warning`] for the month containing `now`.
+async fn release_warning<C: ConnectionTrait>(db: &C, now: DateTime<Utc>) -> Result<()> {
+    system_setting::Entity::update_many()
+        .col_expr(system_setting::Column::Value, Expr::value(String::new()))
+        .filter(system_setting::Column::Key.eq(KEY_WARNED_MONTH))
+        .filter(system_setting::Column::Value.eq(month_label(now)))
+        .exec(db)
+        .await?;
+    Ok(())
 }
 
 /// Atomically mark this month as warned; false when it already was (by this
@@ -376,6 +393,29 @@ mod tests {
             (1_000, 100, 10_000, 400)
         );
         assert_eq!(row.cost_usd_micros, 5_000);
+    }
+
+    #[tokio::test]
+    async fn a_released_claim_can_be_taken_again() {
+        let db = db().await;
+        let now = utc("2026-11-10T10:00:00Z");
+        assert!(claim_warning(&db, now).await.unwrap());
+        assert!(!claim_warning(&db, now).await.unwrap());
+        release_warning(&db, now).await.unwrap();
+        assert!(claim_warning(&db, now).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_releases_the_month() {
+        let db = db().await;
+        let now = utc("2026-11-10T10:00:00Z");
+        spend(&db, 17_000_000, now).await;
+        // Fails inside notify_event: the event lookup hits a dropped table.
+        db.execute_unprepared("DROP TABLE notification_events")
+            .await
+            .unwrap();
+        assert!(warn_if_due(&db, &notifier(&db).await, now).await.is_err());
+        assert!(claim_warning(&db, now).await.unwrap(), "month was released");
     }
 
     #[tokio::test]

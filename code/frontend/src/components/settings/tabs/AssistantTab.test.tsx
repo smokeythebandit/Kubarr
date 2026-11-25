@@ -41,6 +41,7 @@ const settings = {
 
 const status = {
   configured: false,
+  key_error: false,
   enabled: true,
   model: 'claude-opus-5-5',
   effort: 'low',
@@ -166,6 +167,13 @@ describe('AssistantTab', () => {
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Model')).toBeDisabled();
     expect(screen.getByRole('switch', { name: 'Enable assistant' })).toBeDisabled();
+  });
+
+  it('says when the key could not be read instead of "not set"', async () => {
+    mocks.getStatus.mockResolvedValue({ ...status, key_error: true });
+    render(<AssistantTab />);
+    expect(await screen.findByTestId('key-status')).toHaveTextContent("Couldn't read the key");
+    expect(screen.getByRole('alert')).toHaveTextContent(/Couldn.t read the key from its Kubernetes Secret/);
   });
 
   it('shows a load error', async () => {

@@ -16,9 +16,8 @@ use crate::middleware::permissions::{
     AssistantUse, Authenticated, Authorized, Permission, SettingsManage, SettingsView,
 };
 use crate::models::audit_log::{AuditAction, ResourceType};
-use crate::services::assistant::client::{Message, MessagesRequest};
 use crate::services::assistant::key_store::normalize_key;
-use crate::services::assistant::{budget, record_usage, settings, AssistantSettings, UsageRecord};
+use crate::services::assistant::{budget, settings, AssistantSettings};
 use crate::state::AppState;
 
 pub fn assistant_routes(state: AppState) -> Router {
@@ -57,6 +56,9 @@ pub struct KeyTestResult {
 pub struct AssistantStatus {
     /// An API key is stored.
     pub configured: bool,
+    /// The key Secret could not be read (RBAC, cluster unreachable), so
+    /// `configured` is unknown and reported as false.
+    pub key_error: bool,
     /// The owner has switched the assistant on.
     pub enabled: bool,
     pub model: crate::services::assistant::AssistantModel,
@@ -68,13 +70,13 @@ pub struct AssistantStatus {
     pub paused: bool,
 }
 
-/// Whether a key is stored; storage failures read as "not configured".
-async fn key_configured(state: &AppState) -> bool {
+/// Whether a key is stored, or `Err(())` when the store could not be read.
+async fn key_configured(state: &AppState) -> std::result::Result<bool, ()> {
     match state.assistant.key_store.get().await {
-        Ok(key) => key.is_some(),
+        Ok(key) => Ok(key.is_some()),
         Err(e) => {
             tracing::warn!("Could not read the assistant API key: {e}");
-            false
+            Err(())
         }
     }
 }
@@ -128,8 +130,10 @@ pub async fn get_status(
     let db = state.get_db().await?;
     let settings = settings::load(&db).await?;
     let budget = budget::budget_state(&db, &settings, Utc::now()).await?;
+    let configured = key_configured(&state).await;
     Ok(Json(AssistantStatus {
-        configured: key_configured(&state).await,
+        configured: configured.unwrap_or(false),
+        key_error: configured.is_err(),
         enabled: settings.enabled,
         model: settings.model,
         effort: settings.effort,
@@ -192,9 +196,10 @@ pub async fn get_key(
     State(state): State<AppState>,
     _auth: Authorized<SettingsView>,
 ) -> Result<Json<KeyStatus>> {
-    Ok(Json(KeyStatus {
-        configured: key_configured(&state).await,
-    }))
+    let configured = key_configured(&state)
+        .await
+        .map_err(|()| AppError::ServiceUnavailable("Couldn't read the assistant API key".into()))?;
+    Ok(Json(KeyStatus { configured }))
 }
 
 /// Store or replace the Anthropic API key
@@ -239,7 +244,7 @@ pub async fn delete_key(
     Ok(Json(KeyStatus { configured: false }))
 }
 
-/// Check the stored key with a one-token request to the selected model
+/// Check the stored key against the selected model (`GET /v1/models/{model}`, free)
 #[utoipa::path(
     post,
     path = "/api/assistant/key/test",
@@ -248,7 +253,7 @@ pub async fn delete_key(
 )]
 pub async fn test_key(
     State(state): State<AppState>,
-    auth: Authorized<SettingsManage>,
+    _auth: Authorized<SettingsManage>,
 ) -> Result<Json<KeyTestResult>> {
     let db = state.get_db().await?;
     let settings = settings::load(&db).await?;
@@ -258,34 +263,16 @@ pub async fn test_key(
             error: Some("No API key is configured.".into()),
         }));
     };
-    let request = MessagesRequest {
-        model: settings.model.id().to_string(),
-        max_tokens: 1,
-        messages: vec![Message::user("ping")],
-        system: None,
-        output_config: None,
-    };
-    match state.assistant.client.create(&key, &request).await {
-        Ok(response) => {
-            let recorded = record_usage(
-                &db,
-                &state.notification,
-                UsageRecord {
-                    user_id: Some(auth.user_id()),
-                    conversation_id: None,
-                    model: settings.model,
-                    usage: response.usage,
-                },
-            )
-            .await;
-            if let Err(e) = recorded {
-                tracing::warn!("Failed to record assistant key test usage: {e}");
-            }
-            Ok(Json(KeyTestResult {
-                ok: true,
-                error: None,
-            }))
-        }
+    match state
+        .assistant
+        .client
+        .check_model(&key, settings.model.id())
+        .await
+    {
+        Ok(()) => Ok(Json(KeyTestResult {
+            ok: true,
+            error: None,
+        })),
         Err(e) => {
             tracing::info!(error = %e, "Assistant API key test failed");
             Ok(Json(KeyTestResult {

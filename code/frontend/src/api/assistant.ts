@@ -14,6 +14,8 @@ export interface AssistantSettings {
 export interface AssistantStatus {
   /** An API key is stored (the key itself is never returned). */
   configured: boolean;
+  /** The key Secret could not be read (permissions, cluster unreachable). */
+  key_error: boolean;
   enabled: boolean;
   model: AssistantModel;
   effort: AssistantEffort;

@@ -190,6 +190,7 @@ export function AssistantTab() {
 
   const disabled = !canManage || saving;
   const configured = status?.configured ?? false;
+  const keyUnreadable = status?.key_error ?? false;
 
   return (
     <SettingsTabLayout
@@ -212,11 +213,17 @@ export function AssistantTab() {
                 </div>
                 <span
                   data-testid="key-status"
-                  className={`shrink-0 px-2.5 py-1 rounded-full text-xs font-medium ${configured ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300' : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'}`}
+                  className={`shrink-0 px-2.5 py-1 rounded-full text-xs font-medium ${keyUnreadable ? 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' : configured ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300' : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'}`}
                 >
-                  {configured ? 'Configured' : 'Not set'}
+                  {keyUnreadable ? "Couldn't read the key" : configured ? 'Configured' : 'Not set'}
                 </span>
               </div>
+
+              {keyUnreadable && (
+                <div role="alert" className="p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded-lg text-sm">
+                  Couldn&apos;t read the key from its Kubernetes Secret. Check that Kubarr can read Secrets in its namespace.
+                </div>
+              )}
 
               {canManage && (
                 <form onSubmit={handleSaveKey} className="flex flex-col gap-2 sm:flex-row">

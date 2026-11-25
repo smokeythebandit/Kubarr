@@ -1,8 +1,8 @@
 //! Minimal client for Anthropic's Messages API (`POST /v1/messages`).
 //!
 //! There is no official Rust SDK, so this speaks the HTTP API directly with
-//! the shared `reqwest` stack. Phase 1 only needs a non-streaming call (the
-//! key test); the request and response types are open enough that streaming
+//! the shared `reqwest` stack. Phase 1 only checks the key against the
+//! Models API ([`MessagesClient::check_model`]); the request and response types are open enough that streaming
 //! and tools can be added beside [`MessagesClient::create`] later.
 //!
 //! The API key is passed per call and only ever placed in the `x-api-key`
@@ -110,9 +110,8 @@ impl ClientError {
     pub fn user_message(&self) -> &'static str {
         match self {
             ClientError::Status { status, error_type } => match (error_type.as_deref(), *status) {
-                (Some("authentication_error"), _) | (_, 401) => "Anthropic rejected the API key.",
-                (Some("permission_error"), _) | (_, 403) => {
-                    "The API key is not allowed to use the selected model."
+                (Some("authentication_error" | "permission_error"), _) | (_, 401 | 403) => {
+                    "Anthropic rejected the API key."
                 }
                 (Some("not_found_error"), _) | (_, 404) => {
                     "The selected model is not available for this API key."
@@ -169,6 +168,29 @@ impl MessagesClient {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Check that `api_key` may use `model` with `GET /v1/models/{model}`.
+    /// Free: no tokens are spent.
+    pub async fn check_model(&self, api_key: &str, model: &str) -> Result<(), ClientError> {
+        let response = self
+            .http
+            .get(format!("{}/v1/models/{model}", self.base_url))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .send()
+            .await
+            .map_err(|_| ClientError::Transport)?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = response.bytes().await.unwrap_or_default();
+        Err(ClientError::Status {
+            status: status.as_u16(),
+            error_type: error_type(&body),
+        })
     }
 
     /// Send one non-streaming request.
@@ -274,6 +296,14 @@ mod tests {
         assert_eq!(
             status(401, Some("authentication_error")).user_message(),
             "Anthropic rejected the API key."
+        );
+        assert_eq!(
+            status(403, Some("permission_error")).user_message(),
+            "Anthropic rejected the API key."
+        );
+        assert_eq!(
+            status(404, Some("not_found_error")).user_message(),
+            "The selected model is not available for this API key."
         );
         assert_eq!(
             status(529, None).user_message(),
