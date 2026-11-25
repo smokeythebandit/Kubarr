@@ -846,16 +846,11 @@ async fn test_update_setting_inserts_new_row_when_row_deleted() {
 async fn login_as(role: &str, name: &str) -> (axum::Router, String) {
     ensure_jwt_keys().await;
     let db = create_test_db_with_seed().await;
-    create_test_user_with_role(
-        &db,
-        name,
-        &format!("{name}@example.com"),
-        "password123",
-        role,
-    )
-    .await;
+    // Random per run: no credential literal in the source.
+    let password = uuid::Uuid::new_v4().to_string();
+    create_test_user_with_role(&db, name, &format!("{name}@example.com"), &password, role).await;
     let state = build_test_app_state_with_db(db).await;
-    let (_, cookie) = do_login(create_router(state.clone()), name, "password123").await;
+    let (_, cookie) = do_login(create_router(state.clone()), name, &password).await;
     (
         create_router(state),
         cookie.expect("Login must set a session cookie"),

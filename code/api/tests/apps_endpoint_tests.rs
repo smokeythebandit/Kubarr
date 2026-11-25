@@ -746,16 +746,18 @@ async fn router_with_user(
     role: &str,
 ) -> (axum::Router, String) {
     ensure_jwt_keys().await;
+    // Random per run: no credential literal in the source.
+    let password = uuid::Uuid::new_v4().to_string();
     create_test_user_with_role(
         &db,
         username,
         &format!("{username}@test.com"),
-        "pass123",
+        &password,
         role,
     )
     .await;
     let app = create_router(build_test_app_state_with_db(db).await);
-    let cookie = do_login(app.clone(), username, "pass123").await.unwrap();
+    let cookie = do_login(app.clone(), username, &password).await.unwrap();
     (app, cookie)
 }
 
