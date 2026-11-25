@@ -54,6 +54,12 @@ export const appsApi = {
     return response.data;
   },
 
+  // Turn automatic updates on or off for one app
+  setAutoUpdate: async (appName: string, enabled: boolean): Promise<AppState> => {
+    const response = await apiClient.put<AppState>(`/apps/${encodeURIComponent(appName)}/auto-update`, { enabled });
+    return response.data;
+  },
+
   // Delete app
   delete: async (appName: string): Promise<AppOperation> => {
     const response = await apiClient.delete<AppOperation>(`/apps/${appName}`);

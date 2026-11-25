@@ -15,6 +15,8 @@ pub struct Model {
     pub custom_config: Option<String>,
     pub attempts: i32,
     pub created_by: Option<i64>,
+    pub trigger: Option<String>,
+    pub diagnostics: Option<String>,
     pub created_at: DateTimeUtc,
     pub started_at: Option<DateTimeUtc>,
     pub finished_at: Option<DateTimeUtc>,

@@ -28,7 +28,7 @@ import {
 } from '../api/roles';
 import { getCatalog, App } from '../api/apps';
 import { getSettings, updateSetting, Setting } from '../api/settings';
-import { Users, Link, UserPlus, Settings, Sliders, Lock, Menu, X, FileText, CheckCircle, XCircle, LayoutDashboard, Shield, Bell, Mail, Send, MessageSquare, Globe, Network } from 'lucide-react';
+import { Users, Link, UserPlus, Settings, Sliders, Lock, Menu, X, FileText, CheckCircle, XCircle, LayoutDashboard, Shield, Bell, Mail, Send, MessageSquare, Globe, Network, RefreshCw } from 'lucide-react';
 import { auditApi, AuditLog, AuditStats, AuditLogQuery } from '../api/audit';
 import { notificationsApi, NotificationChannel, NotificationEvent, NotificationLog } from '../api/notifications';
 import { oauthApi, OAuthProvider } from '../api/oauth';
@@ -44,11 +44,12 @@ import { LetsEncryptTab } from '../components/settings/tabs/LetsEncryptTab';
 import { NotificationsTab } from '../components/settings/tabs/NotificationsTab';
 import { PendingUsersTab } from '../components/settings/tabs/PendingUsersTab';
 import { PermissionsTab } from '../components/settings/tabs/PermissionsTab';
+import { UpdatesTab } from '../components/settings/tabs/UpdatesTab';
 import { UsersTab } from '../components/settings/tabs/UsersTab';
 
 type ViewMode = 'list' | 'create' | 'edit';
 type ApiErr = { response?: { data?: { detail?: string; error?: string } } };
-type SettingsSection = 'dashboard' | 'general' | 'users' | 'pending' | 'invites' | 'permissions' | 'audit' | 'notifications' | 'vpn' | 'domains' | 'ddns' | 'letsencrypt';
+type SettingsSection = 'dashboard' | 'general' | 'users' | 'pending' | 'invites' | 'permissions' | 'audit' | 'notifications' | 'vpn' | 'domains' | 'ddns' | 'letsencrypt' | 'updates';
 
 const SettingsPage: React.FC = () => {
   const { hasPermission } = useAuth();
@@ -69,6 +70,7 @@ const SettingsPage: React.FC = () => {
     domains: canViewSettings,
     ddns: canViewSettings,
     letsencrypt: canViewSettings,
+    updates: canViewSettings,
     vpn: canViewVpn,
     general: canViewSettings,
     users: canViewUsers,
@@ -93,7 +95,7 @@ const SettingsPage: React.FC = () => {
   // Get state from URL params. A section the viewer may not open falls back
   // to the first one they can.
   const requestedSection = (searchParams.get('section') as SettingsSection) || 'dashboard';
-  const sectionOrder: SettingsSection[] = ['dashboard', 'notifications', 'audit', 'domains', 'ddns', 'letsencrypt', 'vpn', 'general', 'users', 'pending', 'invites', 'permissions'];
+  const sectionOrder: SettingsSection[] = ['dashboard', 'notifications', 'audit', 'domains', 'ddns', 'letsencrypt', 'updates', 'vpn', 'general', 'users', 'pending', 'invites', 'permissions'];
   const firstAllowedSection = sectionOrder.find(section => sectionAllowed[section]);
   const activeSection = sectionAllowed[requestedSection] ? requestedSection : (firstAllowedSection ?? requestedSection);
   const viewMode = (searchParams.get('view') as ViewMode) || 'list';
@@ -703,6 +705,7 @@ const SettingsPage: React.FC = () => {
   const systemItems = [
     { id: 'dashboard' as SettingsSection, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'notifications' as SettingsSection, label: 'Notifications', icon: Bell },
+    { id: 'updates' as SettingsSection, label: 'Updates', icon: RefreshCw },
     { id: 'audit' as SettingsSection, label: 'Audit Logs', icon: FileText },
   ].filter(item => sectionAllowed[item.id]);
 
@@ -1018,6 +1021,8 @@ const SettingsPage: React.FC = () => {
             {activeSection === 'ddns' && <DdnsTab />}
 
             {activeSection === 'letsencrypt' && <LetsEncryptTab />}
+
+            {activeSection === 'updates' && <UpdatesTab />}
 
             {/* Create/Edit User Forms */}
             {canManageUsers && activeSection === 'users' && viewMode === 'create' && (

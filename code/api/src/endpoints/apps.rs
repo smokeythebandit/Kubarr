@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::header,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -53,6 +53,7 @@ pub fn apps_routes(state: AppState) -> Router {
         .route("/category/{category}", get(get_apps_by_category))
         .route("/{app_name}/state", get(get_app_state))
         .route("/{app_name}/update", post(update_app))
+        .route("/{app_name}/auto-update", put(set_auto_update))
         .route("/{app_name}", delete(delete_app))
         .route("/{app_name}/restart", post(restart_app))
         .route("/{app_name}/health", get(check_app_health))
@@ -516,6 +517,33 @@ async fn update_app(
         .await?;
     state.endpoint_cache.invalidate(&app_name).await;
     Ok(Json(operation))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct AutoUpdateToggle {
+    pub enabled: bool,
+}
+
+/// Turn automatic updates on or off for one app
+#[utoipa::path(
+    put,
+    path = "/api/apps/{app_name}/auto-update",
+    tag = "Apps",
+    params(("app_name" = String, Path, description = "App name")),
+    request_body = AutoUpdateToggle,
+    responses((status = 200, body = AppStateResponse))
+)]
+pub async fn set_auto_update(
+    State(state): State<AppState>,
+    Path(app_name): Path<String>,
+    _auth: Authorized<AppsInstall>,
+    Json(body): Json<AutoUpdateToggle>,
+) -> Result<Json<AppStateResponse>> {
+    let db = state.get_db().await?;
+    let manager = AppManager::new(db, state.k8s_client.clone(), state.catalog.clone());
+    Ok(Json(
+        manager.set_auto_update(&app_name, body.enabled).await?,
+    ))
 }
 
 /// List app operations

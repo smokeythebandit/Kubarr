@@ -12,6 +12,7 @@ pub mod proxy;
 pub mod roles;
 pub mod settings;
 pub mod storage;
+pub mod updates;
 pub mod users;
 pub mod vpn;
 
@@ -89,6 +90,7 @@ use crate::state::AppState;
         apps::list_app_states,
         apps::get_app_state,
         apps::update_app,
+        apps::set_auto_update,
         apps::delete_app,
         apps::restart_app,
         apps::list_categories,
@@ -153,6 +155,9 @@ use crate::state::AppState;
         settings::list_settings,
         settings::get_setting,
         settings::update_setting,
+        // Auto-update settings
+        updates::get_update_settings,
+        updates::put_update_settings,
         // Domains
         domains::list_domains,
         domains::get_domain,
@@ -212,6 +217,7 @@ use crate::state::AppState;
         (name = "Notifications", description = "Notification channels, events, and inbox"),
         (name = "Storage", description = "File storage management"),
         (name = "Settings", description = "System settings"),
+        (name = "Updates", description = "Automatic app update settings"),
         (name = "Domains", description = "Domains, Dynamic DNS, and Let's Encrypt configuration"),
         (name = "OAuth", description = "OAuth provider configuration and login"),
         (name = "VPN", description = "VPN provider and app VPN configuration"),
@@ -251,6 +257,7 @@ fn api_routes(state: AppState) -> Router {
         .nest("/users", users::users_routes(state.clone()))
         .nest("/roles", roles::roles_routes(state.clone()))
         .nest("/settings", settings::settings_routes(state.clone()))
+        .nest("/updates", updates::updates_routes(state.clone()))
         .nest("/domains", domains::domains_routes(state.clone()))
         .nest("/monitoring", monitoring::monitoring_routes(state.clone()))
         .nest("/networking", networking::networking_routes(state.clone()))

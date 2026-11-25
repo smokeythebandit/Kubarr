@@ -838,3 +838,95 @@ async fn test_update_setting_inserts_new_row_when_row_deleted() {
         "Inserted value must persist on subsequent GET"
     );
 }
+
+// ============================================================================
+// /api/updates/settings — automatic update settings
+// ============================================================================
+
+async fn login_as(role: &str, name: &str) -> (axum::Router, String) {
+    ensure_jwt_keys().await;
+    let db = create_test_db_with_seed().await;
+    // Random per run: no credential literal in the source.
+    let password = uuid::Uuid::new_v4().to_string();
+    create_test_user_with_role(&db, name, &format!("{name}@example.com"), &password, role).await;
+    let state = build_test_app_state_with_db(db).await;
+    let (_, cookie) = do_login(create_router(state.clone()), name, &password).await;
+    (
+        create_router(state),
+        cookie.expect("Login must set a session cookie"),
+    )
+}
+
+#[tokio::test]
+async fn test_update_settings_defaults_and_roundtrip() {
+    let (app, cookie) = login_as("admin", "updadmin").await;
+    let (status, body) = authenticated_get(app.clone(), "/api/updates/settings", &cookie).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["enabled"], true);
+    assert_eq!(json["window_start"], "04:00");
+    assert_eq!(json["window_minutes"], 120);
+    assert_eq!(json["timezone"], "UTC");
+    assert_eq!(json["health_timeout_minutes"], 10);
+    assert!(json["next_window_start"].as_str().unwrap().ends_with('Z'));
+
+    let put = serde_json::json!({
+        "enabled": false, "window_start": "23:00", "window_minutes": 180,
+        "timezone": "Europe/Amsterdam", "health_timeout_minutes": 20
+    })
+    .to_string();
+    let (status, body) =
+        authenticated_put(app.clone(), "/api/updates/settings", &cookie, &put).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = authenticated_get(app, "/api/updates/settings", &cookie).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["enabled"], false);
+    assert_eq!(json["timezone"], "Europe/Amsterdam");
+    assert_eq!(json["window_minutes"], 180);
+}
+
+#[tokio::test]
+async fn test_update_settings_rejects_invalid_with_field_message() {
+    let (app, cookie) = login_as("admin", "updadminbad").await;
+    for (patch, field) in [
+        (serde_json::json!({"timezone": "Nowhere/Land"}), "timezone"),
+        (serde_json::json!({"window_start": "25:61"}), "window_start"),
+        (serde_json::json!({"window_minutes": 5}), "window_minutes"),
+        (
+            serde_json::json!({"health_timeout_minutes": 99}),
+            "health_timeout_minutes",
+        ),
+    ] {
+        let mut body = serde_json::json!({
+            "enabled": true, "window_start": "04:00", "window_minutes": 120,
+            "timezone": "UTC", "health_timeout_minutes": 10
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let (status, text) = authenticated_put(
+            app.clone(),
+            "/api/updates/settings",
+            &cookie,
+            &body.to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {text}");
+        assert!(text.contains(field), "{field}: {text}");
+    }
+}
+
+#[tokio::test]
+async fn test_update_settings_permissions() {
+    let (app, cookie) = login_as("viewer", "updviewer").await;
+    let (status, _) = authenticated_get(app.clone(), "/api/updates/settings", &cookie).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "viewer lacks settings.view");
+    let (status, _) = authenticated_put(
+        app,
+        "/api/updates/settings",
+        &cookie,
+        r#"{"enabled":false,"window_start":"04:00","window_minutes":120,"timezone":"UTC","health_timeout_minutes":10}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

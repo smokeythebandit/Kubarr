@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use crate::error::{AppError, Result};
 use crate::models::{
     audit_log::AuditAction, notification_channel, notification_event, notification_log,
-    user_notification, user_notification_pref,
+    role_permission, user, user_notification, user_notification_pref, user_role,
 };
 
 /// Notification channel types
@@ -297,21 +297,37 @@ impl NotificationService {
         let title = format_event_title(action);
         let body = format_event_body(action, username, details);
 
-        // Create in-app notification for all users or specific user
-        if let Some(uid) = user_id {
-            self.create_user_notification(db, uid, &title, &body, &event_type, severity)
-                .await?;
-        } else {
-            // For system-wide events, notify all admin users
-            // (simplified: just log for now, can be extended)
-            tracing::debug!("System notification: {} - {}", title, body);
-        }
+        let Some(uid) = user_id else {
+            // System-wide events go to everyone who manages settings. One failing
+            // recipient must not stop the others.
+            for uid in settings_managers(db).await? {
+                if let Err(e) = self
+                    .notify_user(db, uid, &title, &body, &event_type, severity)
+                    .await
+                {
+                    tracing::warn!(user_id = uid, "System notification failed: {}", e);
+                }
+            }
+            return Ok(());
+        };
+        self.notify_user(db, uid, &title, &body, &event_type, severity)
+            .await
+    }
 
-        // Send external notifications
-        self.send_external_notifications(db, user_id, &title, &body, &event_type, severity)
+    /// In-app notification plus the user's verified external channels.
+    async fn notify_user(
+        &self,
+        db: &DatabaseConnection,
+        user_id: i64,
+        title: &str,
+        body: &str,
+        event_type: &str,
+        severity: NotificationSeverity,
+    ) -> Result<()> {
+        self.create_user_notification(db, user_id, title, body, event_type, severity)
             .await?;
-
-        Ok(())
+        self.send_external_notifications(db, Some(user_id), title, body, event_type, severity)
+            .await
     }
 
     /// Create an in-app notification for a user
@@ -594,6 +610,39 @@ impl Clone for NotificationService {
     }
 }
 
+/// Active users holding `settings.manage` through any of their roles.
+async fn settings_managers(db: &DatabaseConnection) -> Result<Vec<i64>> {
+    let role_ids: Vec<i64> = role_permission::Entity::find()
+        .filter(role_permission::Column::Permission.eq("settings.manage"))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|permission| permission.role_id)
+        .collect();
+    if role_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let user_ids: Vec<i64> = user_role::Entity::find()
+        .filter(user_role::Column::RoleId.is_in(role_ids))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|assignment| assignment.user_id)
+        .collect();
+    if user_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(user::Entity::find()
+        .filter(user::Column::Id.is_in(user_ids))
+        .filter(user::Column::IsActive.eq(true))
+        .order_by_asc(user::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|user| user.id)
+        .collect())
+}
+
 /// Format a human-readable title for an audit event
 fn format_event_title(action: &AuditAction) -> String {
     match action {
@@ -628,6 +677,9 @@ fn format_event_title(action: &AuditAction) -> String {
         AuditAction::AppRestarted => "App Restarted".to_string(),
         AuditAction::AppConfigured => "App Configured".to_string(),
         AuditAction::AppAccessed => "App Accessed".to_string(),
+        AuditAction::AppUpdated => "App Updated".to_string(),
+        AuditAction::AppUpdateFailed => "App Update Failed".to_string(),
+        AuditAction::AppUpdateRollbackFailed => "App Update Rollback Failed".to_string(),
         // VPN management
         AuditAction::VpnProviderCreated => "VPN Provider Created".to_string(),
         AuditAction::VpnProviderUpdated => "VPN Provider Updated".to_string(),
@@ -799,6 +851,29 @@ fn format_event_body(
                 format!("App accessed by {}", user)
             } else {
                 format!("User {} accessed {}", user, detail)
+            }
+        }
+        // Automatic updates: details carry app, from/to version and first diagnostic line.
+        AuditAction::AppUpdated => {
+            if detail.is_empty() {
+                "App updated".to_string()
+            } else {
+                format!("App updated: {}", detail)
+            }
+        }
+        // Neutral: details say whether it was rolled back or left unchanged.
+        AuditAction::AppUpdateFailed => {
+            if detail.is_empty() {
+                "App update failed".to_string()
+            } else {
+                format!("App update failed: {}", detail)
+            }
+        }
+        AuditAction::AppUpdateRollbackFailed => {
+            if detail.is_empty() {
+                "App update failed and the rollback also failed".to_string()
+            } else {
+                format!("App update failed and the rollback also failed: {}", detail)
             }
         }
         // VPN management: details may contain provider credentials, so never include them.
@@ -1343,6 +1418,20 @@ mod tests {
             Some("editor -> alice"),
         );
         assert_eq!(body, "Role unassigned by admin: editor -> alice");
+    }
+
+    #[test]
+    fn test_update_failed_title_and_body() {
+        let title = format_event_title(&AuditAction::AppUpdateFailed);
+        assert!(title.to_lowercase().contains("update failed"));
+        let body = format_event_body(
+            &AuditAction::AppUpdateFailed,
+            None,
+            Some("sonarr 4.0.1 -> 4.0.2: CrashLoopBackOff"),
+        );
+        assert!(body.contains("sonarr"));
+        assert!(body.contains("4.0.1"));
+        assert!(body.contains("4.0.2"));
     }
 
     #[test]
@@ -2013,6 +2102,87 @@ mod tests {
             .notify_event(&AuditAction::Login, None, Some("system"), None)
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn system_event_fans_out_to_settings_managers_only() {
+        use crate::models::{
+            notification_event, notification_log, role, role_permission, user_role,
+        };
+        use sea_orm::Set;
+        let svc = NotificationService::new();
+        let db = make_db().await;
+        insert_test_user(&db, 71).await; // manages settings
+        insert_test_user(&db, 72).await; // does not
+        let ops = role::ActiveModel {
+            name: Set("fanout-ops".into()),
+            description: Set(None),
+            is_system: Set(false),
+            requires_2fa: Set(false),
+            created_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("role");
+        let viewer = role::ActiveModel {
+            name: Set("fanout-viewer".into()),
+            description: Set(None),
+            is_system: Set(false),
+            requires_2fa: Set(false),
+            created_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("role");
+        for (role_id, permission) in [(ops.id, "settings.manage"), (viewer.id, "settings.view")] {
+            role_permission::ActiveModel {
+                role_id: Set(role_id),
+                permission: Set(permission.into()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("permission");
+        }
+        for (user_id, role_id) in [(71, ops.id), (72, viewer.id)] {
+            user_role::ActiveModel {
+                user_id: Set(user_id),
+                role_id: Set(role_id),
+            }
+            .insert(&db)
+            .await
+            .expect("user role");
+            insert_user_pref(&db, user_id, "telegram", Some("chat"), true, true).await;
+        }
+        notification_event::Entity::update_many()
+            .col_expr(notification_event::Column::Enabled, true.into())
+            .filter(notification_event::Column::EventType.eq("app_update_rollback_failed"))
+            .exec(&db)
+            .await
+            .expect("enable");
+        svc.set_db(db.clone()).await;
+
+        svc.notify_event(
+            &AuditAction::AppUpdateRollbackFailed,
+            None,
+            None,
+            Some("app=sonarr from=1 to=2"),
+        )
+        .await
+        .expect("notify");
+
+        assert_eq!(svc.get_unread_count(71).await.expect("count"), 1);
+        assert_eq!(svc.get_unread_count(72).await.expect("count"), 0);
+        let external: Vec<Option<i64>> = notification_log::Entity::find()
+            .all(&db)
+            .await
+            .expect("logs")
+            .into_iter()
+            .map(|log| log.user_id)
+            .collect();
+        assert_eq!(external, vec![Some(71)]);
     }
 
     #[tokio::test]

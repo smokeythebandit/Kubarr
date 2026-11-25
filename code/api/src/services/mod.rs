@@ -1,6 +1,8 @@
 pub mod app_manager;
 pub mod app_storage;
 pub mod audit;
+pub mod auto_update;
+pub mod auto_update_settings;
 pub mod cadvisor;
 pub mod catalog;
 pub mod chart_sync;
@@ -21,6 +23,8 @@ pub mod pod_watch;
 pub mod scheduler;
 pub mod security;
 pub mod storage_config;
+pub mod update_diagnostics;
+pub mod update_policy;
 pub mod vpn;
 
 pub use app_manager::*;

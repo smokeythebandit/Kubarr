@@ -14,6 +14,7 @@ pub struct Model {
     pub installed_chart_version: Option<String>,
     pub available_chart_version: Option<String>,
     pub update_available: bool,
+    pub auto_update: bool,
     pub last_operation_id: Option<String>,
     pub last_checked_at: Option<DateTimeUtc>,
     pub updated_at: DateTimeUtc,

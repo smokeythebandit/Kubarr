@@ -319,13 +319,18 @@ async fn gpu_disable_survives_queue_and_managed_override_cannot_be_enqueued() {
 
 #[tokio::test]
 async fn audit_enqueue_and_terminal_correlate_without_exposing_config_or_errors() {
-    for (kind, action) in [
-        (OP_INSTALL, "app_installed"),
-        (OP_UPDATE, "app_configured"),
-        (OP_DELETE, "app_uninstalled"),
-        (OP_RESTART, "app_restarted"),
+    for (kind, success_action, failure_action) in [
+        (OP_INSTALL, "app_installed", "app_installed"),
+        (OP_UPDATE, "app_updated", "app_update_failed"),
+        (OP_DELETE, "app_uninstalled", "app_uninstalled"),
+        (OP_RESTART, "app_restarted", "app_restarted"),
     ] {
         for succeeds in [true, false] {
+            let action = if succeeds {
+                success_action
+            } else {
+                failure_action
+            };
             let manager = setup().await;
             let queued = manager
                 .enqueue_operation(
@@ -1056,7 +1061,7 @@ async fn cancelled_operation_loop_does_not_claim_queued_work() {
     manager
         .run_operation_loop_with(Duration::from_millis(1), cancellation, |_, _| async {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok("unexpected execution".into())
+            Ok("unexpected execution".to_string().into())
         })
         .await;
 
@@ -1098,7 +1103,7 @@ async fn cancelled_operation_loop_drains_claimed_work_without_claiming_next() {
                         calls.fetch_add(1, Ordering::SeqCst);
                         started.notify_one();
                         finish.notified().await;
-                        Ok("Executed during shutdown".into())
+                        Ok("Executed during shutdown".to_string().into())
                     }
                 })
                 .await;
@@ -1301,4 +1306,1002 @@ async fn catalog_sync_preserves_queued_operation_intent() {
     assert_eq!(current.observed_state, OBS_DELETING);
     assert_eq!(current.last_operation_id, Some(queued.id));
     assert_eq!(current.available_chart_version.as_deref(), Some("2.0.0"));
+}
+
+#[tokio::test]
+async fn test_migration_adds_auto_update_default_true() {
+    let manager = setup().await;
+    manager
+        .db
+        .execute_unprepared(
+            "INSERT INTO app_states (app_name, namespace, desired_state, observed_state, \
+             healthy, update_available, updated_at) \
+             VALUES ('legacy-app', 'ns', 'installed', 'installed', 1, 0, '2026-01-01 00:00:00')",
+        )
+        .await
+        .unwrap();
+    let state = app_state::Entity::find_by_id("legacy-app")
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.auto_update);
+}
+
+#[tokio::test]
+async fn test_notification_events_seeded() {
+    use crate::models::notification_event;
+    let manager = setup().await;
+    for (event, enabled, severity) in [
+        ("app_updated", false, "info"),
+        ("app_update_failed", true, "warning"),
+        ("app_update_rollback_failed", true, "critical"),
+    ] {
+        let row = notification_event::Entity::find()
+            .filter(notification_event::Column::EventType.eq(event))
+            .one(&manager.db)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing seeded event {event}"));
+        assert_eq!((row.enabled, row.severity.as_str()), (enabled, severity));
+    }
+}
+
+#[tokio::test]
+async fn test_auto_update_migration_down_removes_columns_and_events() {
+    use crate::models::notification_event;
+    let manager = setup().await;
+    crate::migrations::Migrator::down(&manager.db, Some(1))
+        .await
+        .unwrap();
+    let seeded = notification_event::Entity::find()
+        .filter(notification_event::Column::EventType.like("app_update%"))
+        .all(&manager.db)
+        .await
+        .unwrap();
+    assert!(seeded.is_empty());
+    assert!(manager
+        .db
+        .execute_unprepared("SELECT auto_update FROM app_states")
+        .await
+        .is_err());
+    crate::migrations::Migrator::up(&manager.db, None)
+        .await
+        .unwrap();
+}
+
+// ---- Update verification and rollback (Helm and cluster reads are stubbed) ----
+
+const FROM: &str = "1.0.0";
+const TO: &str = "1.1.0";
+const CAPTURED: &str = "=== pods ===\ncaptured evidence";
+/// Scaled-down verification timing: poll 1 ms, settle 20 ms, timeout 300 ms.
+const TEST_POLL: Duration = Duration::from_millis(1);
+const TEST_SETTLE: Duration = Duration::from_millis(20);
+const TEST_HEALTH_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Scripted cluster: each health/snapshot call consumes the next entry; the last repeats.
+struct StubProbe {
+    /// Health before the rollback (first entry) and after it (last entry).
+    health: Vec<bool>,
+    rolled_back: std::sync::atomic::AtomicBool,
+    snapshots: std::sync::Mutex<Vec<RestartSnapshot>>,
+    /// `helm history` before Helm, then after (last entry repeats).
+    histories: std::sync::Mutex<Vec<Vec<(u32, String)>>>,
+    history_fails: bool,
+    rollback_fails: bool,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl StubProbe {
+    /// `deployed`: the live revision before the update. The update adds the next one.
+    fn new(health: &[bool], deployed: Option<u32>) -> Self {
+        let before: Vec<(u32, String)> = deployed
+            .map(|revision| vec![(revision, "deployed".to_string())])
+            .unwrap_or_default();
+        let mut after = before.clone();
+        after.push((deployed.map_or(1, |revision| revision + 1), "failed".into()));
+        Self::with_histories(health, vec![before, after])
+    }
+
+    fn with_histories(health: &[bool], histories: Vec<Vec<(u32, String)>>) -> Self {
+        Self {
+            health: health.to_vec(),
+            rolled_back: std::sync::atomic::AtomicBool::new(false),
+            snapshots: std::sync::Mutex::new(vec![RestartSnapshot::new()]),
+            histories: std::sync::Mutex::new(histories),
+            history_fails: false,
+            rollback_fails: false,
+            calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn record(&self, call: String) {
+        self.calls.lock().unwrap().push(call);
+    }
+}
+
+/// Calls other than the repeated restart/health polls, in order.
+fn key_calls(probe: &StubProbe) -> Vec<String> {
+    probe
+        .calls()
+        .into_iter()
+        .filter(|call| call != "snapshot" && call != "health")
+        .collect()
+}
+
+fn next_scripted<T: Clone>(script: &std::sync::Mutex<Vec<T>>) -> T {
+    let mut script = script.lock().unwrap();
+    if script.len() > 1 {
+        script.remove(0)
+    } else {
+        script[0].clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl UpdateProbe for StubProbe {
+    async fn restart_snapshot(&self) -> Result<RestartSnapshot> {
+        self.record("snapshot".into());
+        Ok(next_scripted(&self.snapshots))
+    }
+
+    async fn health(&self) -> Result<(bool, String)> {
+        self.record("health".into());
+        let healthy = if self.rolled_back.load(Ordering::SeqCst) {
+            self.health[self.health.len() - 1]
+        } else {
+            self.health[0]
+        };
+        Ok((
+            healthy,
+            if healthy { "" } else { "Deployment not ready" }.into(),
+        ))
+    }
+
+    fn history(&self) -> Result<Vec<(u32, String)>> {
+        self.record("history".into());
+        if self.history_fails {
+            return Err(AppError::Internal("helm history unreachable".into()));
+        }
+        Ok(next_scripted(&self.histories))
+    }
+
+    async fn scrub(&self, text: &str) -> String {
+        update_diagnostics::scrub_inline(text)
+    }
+
+    async fn capture(&self, failed: Option<u32>, previous: Option<u32>) -> String {
+        self.record(format!("capture {failed:?} {previous:?}"));
+        CAPTURED.into()
+    }
+
+    fn rollback(&self, revision: u32) -> Result<()> {
+        self.record(format!("rollback {revision}"));
+        if self.rollback_fails {
+            return Err(AppError::Internal(
+                "helm rollback exploded token=rollbacksecret".into(),
+            ));
+        }
+        self.rolled_back.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A manager that announces through the real notification service, plus a user to receive it.
+async fn notifying_setup() -> (AppManager, i64) {
+    let manager = setup().await;
+    let notifications = crate::services::notification::NotificationService::new();
+    notifications.set_db(manager.db.clone()).await;
+    let manager = manager
+        .with_notifications(Arc::new(notifications))
+        .with_update_health_timeout(TEST_HEALTH_TIMEOUT)
+        .with_update_timing(TEST_POLL, TEST_SETTLE);
+    let now = Utc::now();
+    let owner = user::ActiveModel {
+        username: Set("owner".into()),
+        email: Set("owner@example.test".into()),
+        hashed_password: Set("unused".into()),
+        is_active: Set(true),
+        is_approved: Set(true),
+        totp_secret: Set(None),
+        totp_enabled: Set(false),
+        totp_verified_at: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&manager.db)
+    .await
+    .unwrap();
+    (manager, owner.id)
+}
+
+async fn enable_event(manager: &AppManager, event: &str) {
+    use crate::models::notification_event;
+    notification_event::Entity::update_many()
+        .col_expr(notification_event::Column::Enabled, true.into())
+        .filter(notification_event::Column::EventType.eq(event))
+        .exec(&manager.db)
+        .await
+        .unwrap();
+}
+
+async fn notifications(manager: &AppManager) -> Vec<crate::models::user_notification::Model> {
+    crate::models::user_notification::Entity::find()
+        .all(&manager.db)
+        .await
+        .unwrap()
+}
+
+/// Enqueue an update as `owner` and run it through the worker with stubbed Helm.
+async fn run_update(
+    manager: &AppManager,
+    owner: Option<i64>,
+    probe: &StubProbe,
+    helm: Result<String>,
+) -> app_operation::Model {
+    let queued = manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), owner)
+        .await
+        .unwrap();
+    manager
+        .process_next_operation_with_stop(
+            |_, stop| async move {
+                manager
+                    .run_verified_update(
+                        probe,
+                        UpdateVersions {
+                            from: FROM.into(),
+                            to: TO.into(),
+                        },
+                        &stop,
+                        async { helm },
+                    )
+                    .await
+            },
+            RUNNING_HEARTBEAT_INTERVAL,
+        )
+        .await
+        .unwrap();
+    operation(manager, &queued.id).await
+}
+
+#[tokio::test]
+async fn test_update_healthy_succeeds_and_notifies_updated() {
+    let (manager, owner) = notifying_setup().await;
+    enable_event(&manager, "app_updated").await; // seeded disabled
+    let probe = StubProbe::new(&[true], Some(3));
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert_eq!(finished.status, STATUS_SUCCEEDED);
+    assert_eq!(
+        finished.message.as_deref(),
+        Some("Updated operation-test-app 1.0.0 → 1.1.0")
+    );
+    assert_eq!(finished.diagnostics, None);
+    assert_eq!(finished.error, None);
+    assert_eq!(key_calls(&probe), ["history"]);
+    // Not the first healthy poll: it stayed healthy through the settle period.
+    assert!(probe.calls().iter().filter(|c| *c == "health").count() > 1);
+    assert_eq!(audits(&manager).await.last().unwrap().action, "app_updated");
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].event_type.as_deref(), Some("app_updated"));
+    assert_eq!(sent[0].user_id, owner);
+    assert!(sent[0]
+        .message
+        .contains("app=operation-test-app from=1.0.0 to=1.1.0"));
+}
+
+#[tokio::test]
+async fn test_update_unhealthy_rolls_back_and_stores_diagnostics() {
+    let (manager, owner) = notifying_setup().await;
+    let probe = StubProbe::new(&[false, true], Some(3));
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(
+        finished.message.as_deref(),
+        Some("Update to 1.1.0 failed; rolled back to 1.0.0")
+    );
+    let diagnostics = finished.diagnostics.unwrap();
+    let first = diagnostics.lines().next().unwrap();
+    assert!(first.starts_with("Not healthy within "), "{first}");
+    assert!(first.ends_with(": Deployment not ready"), "{first}");
+    assert!(diagnostics.contains("Rolled back to revision 3"));
+    assert!(diagnostics.contains(CAPTURED));
+    assert_eq!(finished.error.as_deref(), Some(first));
+    // Evidence is captured before the rollback replaces the failing pods,
+    // and health is re-checked afterwards against a fresh restart baseline.
+    assert_eq!(
+        key_calls(&probe),
+        [
+            "history",
+            "history",
+            "capture Some(4) Some(3)",
+            "rollback 3"
+        ]
+    );
+    let calls = probe.calls();
+    let rollback = calls.iter().position(|c| c == "rollback 3").unwrap();
+    assert_eq!(calls[rollback - 1], "snapshot");
+    assert!(calls[rollback + 1..].contains(&"health".to_string()));
+    assert_eq!(
+        audits(&manager).await.last().unwrap().action,
+        "app_update_failed"
+    );
+    assert_eq!(state(&manager).await.observed_state, OBS_FAILED);
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].event_type.as_deref(), Some("app_update_failed"));
+    assert_eq!(sent[0].severity, "warning");
+    assert!(sent[0].message.contains(&format!(
+        "app=operation-test-app from=1.0.0 to=1.1.0; rolled back to 1.0.0; {first}"
+    )));
+}
+
+#[tokio::test]
+async fn test_update_restart_limit_rolls_back_even_when_ready() {
+    let (manager, owner) = notifying_setup().await;
+    let probe = StubProbe::new(&[true], Some(3));
+    *probe.snapshots.lock().unwrap() = vec![
+        HashMap::from([("pod/app".to_string(), 1)]), // before Helm
+        HashMap::from([("pod/app".to_string(), 4)]), // +3 after
+        HashMap::new(),                              // after rollback: new pods
+    ];
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert!(finished
+        .diagnostics
+        .unwrap()
+        .starts_with("A container restarted more than 2 times since the update started\n"));
+    assert!(probe.calls().contains(&"rollback 3".to_string()));
+}
+
+#[tokio::test]
+async fn test_update_helm_wait_failure_still_rolls_back() {
+    let (manager, owner) = notifying_setup().await;
+    let probe = StubProbe::new(&[false, true], Some(7));
+
+    let finished = run_update(
+        &manager,
+        Some(owner),
+        &probe,
+        Err(AppError::Internal(
+            "Error: UPGRADE FAILED: context deadline exceeded\nmore".into(),
+        )),
+    )
+    .await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(
+        finished.message.as_deref(),
+        Some("Update to 1.1.0 failed; rolled back to 1.0.0")
+    );
+    let diagnostics = finished.diagnostics.unwrap();
+    let first = diagnostics.lines().next().unwrap();
+    assert!(first.starts_with("Helm upgrade failed: "), "{first}");
+    assert!(first.contains("UPGRADE FAILED: context deadline exceeded"));
+    assert!(probe.calls().contains(&"rollback 7".to_string()));
+    assert_eq!(
+        audits(&manager).await.last().unwrap().action,
+        "app_update_failed"
+    );
+}
+
+#[tokio::test]
+async fn test_helm_failure_with_healthy_app_notifies_not_applied() {
+    let (manager, owner) = notifying_setup().await;
+    let unchanged = vec![(3, "deployed".to_string())];
+    let probe = StubProbe::with_histories(&[true], vec![unchanged.clone(), unchanged]);
+
+    let finished = run_update(
+        &manager,
+        Some(owner),
+        &probe,
+        Err(AppError::Internal("chart pull failed".into())),
+    )
+    .await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(
+        finished.message.as_deref(),
+        Some("Update to 1.1.0 failed; operation-test-app unchanged at 1.0.0")
+    );
+    let diagnostics = finished.diagnostics.unwrap();
+    assert!(
+        diagnostics.starts_with("Helm upgrade failed: "),
+        "{diagnostics}"
+    );
+    assert!(diagnostics.contains("chart pull failed"));
+    assert!(!probe
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("rollback")));
+    assert_eq!(
+        audits(&manager).await.last().unwrap().action,
+        "app_update_failed"
+    );
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].event_type.as_deref(), Some("app_update_failed"));
+    assert!(sent[0]
+        .message
+        .contains("Helm reported an error; the app is still running 1.0.0"));
+    assert!(
+        !sent[0].message.contains("rolled back"),
+        "{}",
+        sent[0].message
+    );
+}
+
+#[tokio::test]
+async fn test_no_new_revision_never_rolls_back_below_pre_update() {
+    // Helm failed before writing a revision while the app was already unhealthy:
+    // rolling back to "the previous deployed revision" would go to 2, older than live 3.
+    let (manager, owner) = notifying_setup().await;
+    let history = vec![(2, "superseded".to_string()), (3, "deployed".to_string())];
+    let probe = StubProbe::with_histories(&[false], vec![history.clone(), history]);
+
+    let finished = run_update(
+        &manager,
+        Some(owner),
+        &probe,
+        Err(AppError::Internal("values validation failed".into())),
+    )
+    .await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    let diagnostics = finished.diagnostics.unwrap();
+    assert!(diagnostics.contains("No new Helm revision was created; nothing to roll back"));
+    assert!(diagnostics.contains(CAPTURED));
+    assert!(!probe
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("rollback")));
+    assert_eq!(
+        audits(&manager).await.last().unwrap().action,
+        "app_update_failed"
+    );
+}
+
+#[tokio::test]
+async fn test_rollback_targets_revision_deployed_before_update() {
+    // A failed earlier attempt (4) is the latest revision; the live one is 3.
+    let (manager, owner) = notifying_setup().await;
+    let before = vec![(3, "deployed".to_string()), (4, "failed".to_string())];
+    let mut after = before.clone();
+    after.push((5, "failed".into()));
+    let probe = StubProbe::with_histories(&[false, true], vec![before, after]);
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    let calls = probe.calls();
+    assert!(
+        calls.contains(&"capture Some(5) Some(3)".to_string()),
+        "{calls:?}"
+    );
+    assert!(calls.contains(&"rollback 3".to_string()), "{calls:?}");
+}
+
+#[tokio::test]
+async fn test_helm_history_failure_skips_rollback() {
+    let (manager, owner) = notifying_setup().await;
+    let mut probe = StubProbe::new(&[false], Some(3));
+    probe.history_fails = true;
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert!(finished
+        .diagnostics
+        .unwrap()
+        .contains("Rollback not attempted: Helm history unavailable"));
+    assert!(!probe
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("rollback")));
+    assert_eq!(
+        audits(&manager).await.last().unwrap().action,
+        "app_update_rollback_failed"
+    );
+}
+
+#[tokio::test]
+async fn test_helm_and_rollback_errors_are_scrubbed_everywhere() {
+    let (manager, owner) = notifying_setup().await;
+    let mut probe = StubProbe::new(&[false], Some(3));
+    probe.rollback_fails = true;
+
+    let finished = run_update(
+        &manager,
+        Some(owner),
+        &probe,
+        Err(AppError::Internal(
+            "Error: UPGRADE FAILED: --set password=hunter22 rejected".into(),
+        )),
+    )
+    .await;
+
+    let diagnostics = finished.diagnostics.clone().unwrap();
+    let error = finished.error.clone().unwrap();
+    let state_message = state(&manager).await.message.unwrap_or_default();
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    let audit = format!("{:?}", audits(&manager).await);
+    for text in [
+        &diagnostics,
+        &error,
+        &state_message,
+        &sent[0].message,
+        &audit,
+    ] {
+        assert!(!text.contains("hunter22"), "{text}");
+        assert!(!text.contains("rollbacksecret"), "{text}");
+    }
+    assert!(error.contains("password=[redacted]"), "{error}");
+    assert!(sent[0].message.contains("password=[redacted]"));
+    assert!(diagnostics.contains("token=[redacted]"), "{diagnostics}");
+}
+
+#[tokio::test]
+async fn test_rollback_without_previous_revision_notifies_critical() {
+    let (manager, owner) = notifying_setup().await;
+    let probe = StubProbe::new(&[false], None);
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(
+        finished.message.as_deref(),
+        Some("Update to 1.1.0 failed; rollback to 1.0.0 failed")
+    );
+    let diagnostics = finished.diagnostics.unwrap();
+    assert!(diagnostics.contains("Rollback not attempted: no deployed revision before the update"));
+    assert!(diagnostics.contains(CAPTURED));
+    assert!(!probe
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("rollback")));
+    assert_eq!(
+        audits(&manager).await.last().unwrap().action,
+        "app_update_rollback_failed"
+    );
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].event_type.as_deref(),
+        Some("app_update_rollback_failed")
+    );
+    assert_eq!(sent[0].severity, "critical");
+}
+
+#[tokio::test]
+async fn test_rollback_error_or_still_unhealthy_is_rollback_failed() {
+    for rollback_fails in [true, false] {
+        let (manager, owner) = notifying_setup().await;
+        let mut probe = StubProbe::new(&[false], Some(2));
+        probe.rollback_fails = rollback_fails;
+
+        let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+        assert_eq!(finished.status, STATUS_FAILED);
+        let diagnostics = finished.diagnostics.unwrap();
+        assert!(diagnostics.contains(if rollback_fails {
+            "Rollback to revision 2 failed"
+        } else {
+            "Still unhealthy after rollback to revision 2"
+        }));
+        assert_eq!(
+            audits(&manager).await.last().unwrap().action,
+            "app_update_rollback_failed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_install_path_unchanged() {
+    let (manager, owner) = notifying_setup().await;
+    for event in [
+        "app_updated",
+        "app_update_failed",
+        "app_update_rollback_failed",
+    ] {
+        enable_event(&manager, event).await;
+    }
+    let queued = manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), Some(owner))
+        .await
+        .unwrap();
+
+    manager
+        .process_next_operation_with(|_| async { Ok("Installed".into()) })
+        .await
+        .unwrap();
+
+    let finished = operation(&manager, &queued.id).await;
+    assert_eq!(finished.status, STATUS_SUCCEEDED);
+    assert_eq!(finished.message.as_deref(), Some("Installed"));
+    assert_eq!(finished.diagnostics, None);
+    assert_eq!(
+        audits(&manager).await.last().unwrap().action,
+        "app_installed"
+    );
+    assert!(notifications(&manager).await.is_empty());
+}
+
+#[test]
+fn test_compose_diagnostics_caps_summary_and_size() {
+    let summary = format!("{}\nRolled back", "x".repeat(1000));
+    let report = compose_diagnostics(&summary, &"y".repeat(70 * 1024));
+    let first = report.lines().next().unwrap();
+    assert_eq!(first.len(), SUMMARY_LINE_MAX);
+    assert!(report.len() <= update_diagnostics::MAX_DIAGNOSTICS_BYTES);
+    assert!(report.ends_with("[truncated]"));
+}
+
+#[tokio::test]
+async fn test_stop_during_verification_abandons_without_rollback() {
+    let manager = setup()
+        .await
+        .with_update_health_timeout(Duration::from_secs(3600));
+    let probe = StubProbe::new(&[false], Some(3));
+    let stop = CancellationToken::new();
+    let stopper = stop.clone();
+    let result = manager
+        .run_verified_update(
+            &probe,
+            UpdateVersions {
+                from: FROM.into(),
+                to: TO.into(),
+            },
+            &stop,
+            async move {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    stopper.cancel();
+                });
+                Ok("helm ok".to_string())
+            },
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(!probe
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("rollback")));
+}
+
+#[tokio::test]
+async fn test_auto_update_outcome_reaches_settings_managers() {
+    use crate::models::{role, role_permission, user_role};
+    let (manager, admin) = notifying_setup().await;
+    let now = Utc::now();
+    let bystander = user::ActiveModel {
+        username: Set("bystander".into()),
+        email: Set("bystander@example.test".into()),
+        hashed_password: Set("unused".into()),
+        is_active: Set(true),
+        is_approved: Set(true),
+        totp_secret: Set(None),
+        totp_enabled: Set(false),
+        totp_verified_at: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&manager.db)
+    .await
+    .unwrap();
+    let ops = role::ActiveModel {
+        name: Set("update-ops".into()),
+        description: Set(None),
+        is_system: Set(false),
+        requires_2fa: Set(false),
+        created_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&manager.db)
+    .await
+    .unwrap();
+    role_permission::ActiveModel {
+        role_id: Set(ops.id),
+        permission: Set("settings.manage".into()),
+        ..Default::default()
+    }
+    .insert(&manager.db)
+    .await
+    .unwrap();
+    user_role::ActiveModel {
+        user_id: Set(admin),
+        role_id: Set(ops.id),
+    }
+    .insert(&manager.db)
+    .await
+    .unwrap();
+    let probe = StubProbe::new(&[false], None);
+
+    run_update(&manager, None, &probe, Ok("helm ok".into())).await;
+
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].user_id, admin);
+    assert_ne!(sent[0].user_id, bystander.id);
+    assert_eq!(
+        sent[0].event_type.as_deref(),
+        Some("app_update_rollback_failed")
+    );
+}
+
+#[tokio::test]
+async fn test_health_timeout_follows_settings_unless_overridden() {
+    let manager = setup().await;
+    assert_eq!(manager.health_timeout().await, Duration::from_secs(600));
+    let settings = auto_update_settings::AutoUpdateSettings {
+        health_timeout_minutes: 25,
+        ..Default::default()
+    };
+    auto_update_settings::save(&manager.db, &settings, None)
+        .await
+        .unwrap();
+    assert_eq!(manager.health_timeout().await, Duration::from_secs(25 * 60));
+    let fixed = manager.with_update_health_timeout(Duration::from_secs(1));
+    assert_eq!(fixed.health_timeout().await, Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn test_auto_op_not_executed_when_chart_moved_since_queued() {
+    let manager = setup().await;
+    // Installed 1.30.0, the loop vetted 1.30.1; the chart on disk is now 2.0.0.
+    manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), None)
+        .await
+        .unwrap();
+    app_operation::Entity::delete_many()
+        .exec(&manager.db)
+        .await
+        .unwrap();
+    let mut row: app_state::ActiveModel = state(&manager).await.into();
+    row.installed_chart_version = Set(Some("1.30.0".into()));
+    row.update(&manager.db).await.unwrap();
+    manager.enqueue_auto_update(APP, "1.30.1").await.unwrap();
+    let helm_calls = AtomicUsize::new(0);
+    let calls = &helm_calls;
+    let manager_ref = &manager;
+    manager
+        .process_next_operation_with_stop(
+            |op, _stop| async move {
+                manager_ref
+                    .guard_auto_target(&op, Some("1.30.1"), Some("2.0.0"))
+                    .await?;
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(OperationOutput::Done("deployed".into()))
+            },
+            RUNNING_HEARTBEAT_INTERVAL,
+        )
+        .await
+        .unwrap();
+    assert_eq!(helm_calls.load(Ordering::SeqCst), 0);
+    let op = app_operation::Entity::find()
+        .one(&manager.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(op.status, STATUS_FAILED);
+    assert!(op.error.as_deref().unwrap().contains(AUTO_SKIPPED_MESSAGE));
+    let mut row: app_state::ActiveModel = state(&manager).await.into();
+    row.installed_chart_version = Set(Some("1.30.0".into()));
+    row.update(&manager.db).await.unwrap();
+    // Still vetted: same chart on disk and an eligible minor update passes.
+    manager
+        .guard_auto_target(&op, Some("1.30.1"), Some("1.30.1"))
+        .await
+        .unwrap();
+    // A major or an unknown target is refused.
+    assert!(manager
+        .guard_auto_target(&op, Some("2.0.0"), Some("2.0.0"))
+        .await
+        .is_err());
+    assert!(manager
+        .guard_auto_target(&op, None, Some("1.30.1"))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn test_restart_breach_during_settle_rolls_back() {
+    // Ready right away, then a container restarts 3 times before the settle period ends.
+    let (manager, owner) = notifying_setup().await;
+    let probe = StubProbe::new(&[true], Some(3));
+    *probe.snapshots.lock().unwrap() = vec![
+        RestartSnapshot::new(),                      // before Helm
+        RestartSnapshot::new(),                      // healthy poll 1
+        RestartSnapshot::new(),                      // healthy poll 2
+        HashMap::from([("pod/app".to_string(), 3)]), // breach inside settle
+        RestartSnapshot::new(),                      // after rollback
+    ];
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(
+        finished.message.as_deref(),
+        Some("Update to 1.1.0 failed; rolled back to 1.0.0")
+    );
+    assert!(finished
+        .diagnostics
+        .unwrap()
+        .starts_with("A container restarted more than 2 times"));
+    let calls = probe.calls();
+    let rollback = calls.iter().position(|c| c == "rollback 3").unwrap();
+    assert!(calls[..rollback].iter().filter(|c| *c == "health").count() >= 2);
+}
+
+#[tokio::test]
+async fn test_timeout_shorter_than_settle_is_unhealthy() {
+    let (manager, owner) = notifying_setup().await;
+    let manager = manager
+        .with_update_health_timeout(Duration::from_millis(10))
+        .with_update_timing(TEST_POLL, Duration::from_millis(200));
+    let probe = StubProbe::new(&[true], Some(3));
+
+    let finished = run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+
+    assert_eq!(finished.status, STATUS_FAILED);
+    let diagnostics = finished.diagnostics.unwrap();
+    assert!(
+        diagnostics
+            .lines()
+            .next()
+            .unwrap()
+            .contains("settle period"),
+        "{diagnostics}"
+    );
+}
+
+#[tokio::test]
+async fn test_failure_notifications_carry_migration_note() {
+    let (manager, owner) = notifying_setup().await;
+    let probe = StubProbe::new(&[false, true], Some(3));
+    run_update(&manager, Some(owner), &probe, Ok("helm ok".into())).await;
+    let sent = notifications(&manager).await;
+    assert!(
+        sent[0].message.ends_with(MIGRATION_NOTE),
+        "{}",
+        sent[0].message
+    );
+
+    // Not applied: nothing changed, so no rollback caveat.
+    let (manager, owner) = notifying_setup().await;
+    let unchanged = vec![(3, "deployed".to_string())];
+    let probe = StubProbe::with_histories(&[true], vec![unchanged.clone(), unchanged]);
+    run_update(
+        &manager,
+        Some(owner),
+        &probe,
+        Err(AppError::Internal("chart pull failed".into())),
+    )
+    .await;
+    assert!(!notifications(&manager).await[0]
+        .message
+        .contains(MIGRATION_NOTE));
+}
+
+#[tokio::test]
+async fn test_not_applied_with_unknown_history_does_not_claim_unchanged() {
+    let (manager, owner) = notifying_setup().await;
+    let mut probe = StubProbe::new(&[true], Some(3));
+    probe.history_fails = true;
+
+    let finished = run_update(
+        &manager,
+        Some(owner),
+        &probe,
+        Err(AppError::Internal("post-upgrade hook failed".into())),
+    )
+    .await;
+
+    assert_eq!(
+        finished.message.as_deref(),
+        Some("Update to 1.1.0 failed; Helm reported an error")
+    );
+    let diagnostics = finished.diagnostics.unwrap();
+    assert!(
+        diagnostics.contains("Helm history unavailable"),
+        "{diagnostics}"
+    );
+    assert!(!diagnostics.contains("No new revision is running"));
+    let sent = notifications(&manager).await;
+    assert!(
+        !sent[0].message.contains("still running"),
+        "{}",
+        sent[0].message
+    );
+}
+
+#[tokio::test]
+async fn test_update_failing_before_helm_notifies_neutral_and_skip_stays_silent() {
+    let (manager, owner) = notifying_setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), Some(owner))
+        .await
+        .unwrap();
+    manager
+        .process_next_operation_with(|_| async {
+            Err(AppError::Internal(
+                "restart counts unavailable: password=hunter22".into(),
+            ))
+        })
+        .await
+        .unwrap();
+    let finished = operation(&manager, &queued.id).await;
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(finished.diagnostics, None); // does not count for the failed-version skip
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].event_type.as_deref(), Some("app_update_failed"));
+    assert!(sent[0]
+        .message
+        .contains("the update failed before Kubarr could verify it"));
+    assert!(sent[0].message.contains("password=[redacted]"));
+    assert!(!sent[0].message.contains("hunter22"));
+    assert!(!sent[0].message.contains("rolled back"));
+
+    // A dropped stale auto target stays silent.
+    manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), Some(owner))
+        .await
+        .unwrap();
+    manager
+        .process_next_operation_with(|_| async {
+            Err(AppError::Conflict(AUTO_SKIPPED_MESSAGE.into()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(notifications(&manager).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_interrupted_update_notifies_critical_and_does_not_count() {
+    let (manager, owner) = notifying_setup().await;
+    let queued = manager
+        .enqueue_operation(APP, OP_UPDATE, HashMap::new(), Some(owner))
+        .await
+        .unwrap();
+    let claimed = manager
+        .claim_operation(operation(&manager, &queued.id).await)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut stale: app_operation::ActiveModel = claimed.into();
+    stale.updated_at = Set(Utc::now() - chrono::Duration::minutes(16));
+    stale.update(&manager.db).await.unwrap();
+
+    manager.recover_stale_operations().await.unwrap();
+
+    let finished = operation(&manager, &queued.id).await;
+    assert_eq!(finished.status, STATUS_FAILED);
+    assert_eq!(finished.diagnostics, None); // the next window re-evaluates the app
+    let sent = notifications(&manager).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].event_type.as_deref(),
+        Some("app_update_rollback_failed")
+    );
+    assert_eq!(sent[0].severity, "critical");
+    assert!(
+        sent[0].message.contains(INTERRUPTED_DETAILS),
+        "{}",
+        sent[0].message
+    );
+    assert!(sent[0].message.contains("app=operation-test-app"));
 }

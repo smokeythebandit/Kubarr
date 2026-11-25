@@ -21,12 +21,16 @@ use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::models::{app_operation, app_state, app_vpn_config, audit_outbox, user};
 use crate::services::app_storage;
 use crate::services::audit::log_on_transaction;
+use crate::services::auto_update_settings;
 use crate::services::catalog::AppCatalog;
 use crate::services::deployment::{DeploymentManager, DeploymentRequest};
 use crate::services::gpu::{self, GpuSelection, QUEUED_GPU_KEY};
 use crate::services::install_options::{self, InstallStorage};
 use crate::services::k8s::K8sClient;
+use crate::services::notification::NotificationService;
 use crate::services::storage_config;
+use crate::services::update_diagnostics::{self, RestartSnapshot};
+use crate::services::update_policy::{update_kind, UpdateKind};
 use crate::state::{SharedCatalog, SharedK8sClient};
 
 pub const OP_INSTALL: &str = "install";
@@ -35,6 +39,9 @@ pub const OP_DELETE: &str = "delete";
 pub const OP_RESTART: &str = "restart";
 const QUEUED_INSTALL_KEY: &str = "__kubarr_install_choices";
 const QUEUED_STORAGE_KEY: &str = "__kubarr_storage_snapshot";
+/// Chart version an update operation was queued for (recorded on every update,
+/// whoever started it); never reaches Helm.
+pub(crate) const AUTO_TARGET_KEY: &str = "__kubarr_auto_target_version";
 
 #[derive(Serialize, Deserialize)]
 struct QueuedInstall {
@@ -64,7 +71,23 @@ const INTERRUPTED_LABEL: &str = "outcome_indeterminate_after_worker_interruption
 const STALE_RUNNING_AFTER: chrono::Duration = chrono::Duration::minutes(15);
 const RUNNING_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Why an automatic update was dropped before Helm ran.
+pub(crate) const AUTO_SKIPPED_MESSAGE: &str =
+    "Skipped: available version changed since it was queued";
 const STOP_ERROR: &str = "Stop requested; external outcome indeterminate";
+const DEFAULT_UPDATE_HEALTH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const UPDATE_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// An updated app must stay healthy this long (inside the health timeout)
+/// before the update counts as good: readiness alone misses late crashes.
+const UPDATE_SETTLE: Duration = Duration::from_secs(180);
+/// Appended to failure notifications (spec: rollback limits).
+const MIGRATION_NOTE: &str = "A rollback restores the previous chart; it cannot undo a one-way data migration the new version may have run.";
+/// Notification details for an update the worker lost track of.
+const INTERRUPTED_DETAILS: &str = "interrupted during verification; state unknown — check the app";
+/// A container restarting more often than this since the update started fails it.
+const UPDATE_RESTART_LIMIT: i32 = 2;
+/// Longest summary line placed above the captured diagnostics.
+const SUMMARY_LINE_MAX: usize = 300;
 
 pub const DESIRED_INSTALLED: &str = "installed";
 pub const DESIRED_REMOVED: &str = "removed";
@@ -124,9 +147,245 @@ pub struct AppStateResponse {
     pub installed_chart_version: Option<String>,
     pub available_chart_version: Option<String>,
     pub update_available: bool,
+    pub auto_update: bool,
+    /// Classification of the pending update; `None` when none is available.
+    pub available_update_kind: Option<UpdateKind>,
     pub last_operation_id: Option<String>,
     pub last_checked_at: Option<chrono::DateTime<Utc>>,
     pub updated_at: chrono::DateTime<Utc>,
+}
+
+/// What happened to an app after an update was applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    Healthy,
+    RolledBack {
+        diagnostics: String,
+    },
+    RollbackFailed {
+        diagnostics: String,
+    },
+    /// Helm failed and no rollback was attempted because the app was not
+    /// changed. `confirmed`: Helm history proved no new revision exists.
+    NotApplied {
+        diagnostics: String,
+        confirmed: bool,
+    },
+}
+
+impl UpdateOutcome {
+    fn diagnostics(&self) -> Option<&str> {
+        match self {
+            UpdateOutcome::Healthy => None,
+            UpdateOutcome::RolledBack { diagnostics }
+            | UpdateOutcome::RollbackFailed { diagnostics }
+            | UpdateOutcome::NotApplied { diagnostics, .. } => Some(diagnostics),
+        }
+    }
+}
+
+struct UpdateVersions {
+    from: String,
+    to: String,
+}
+
+struct UpdateReport {
+    from: String,
+    to: String,
+    outcome: UpdateOutcome,
+}
+
+impl UpdateReport {
+    fn message(&self, app: &str) -> String {
+        let (from, to) = (&self.from, &self.to);
+        match self.outcome {
+            UpdateOutcome::Healthy => format!("Updated {app} {from} → {to}"),
+            UpdateOutcome::RolledBack { .. } => {
+                format!("Update to {to} failed; rolled back to {from}")
+            }
+            UpdateOutcome::RollbackFailed { .. } => {
+                format!("Update to {to} failed; rollback to {from} failed")
+            }
+            UpdateOutcome::NotApplied {
+                confirmed: true, ..
+            } => format!("Update to {to} failed; {app} unchanged at {from}"),
+            UpdateOutcome::NotApplied {
+                confirmed: false, ..
+            } => format!("Update to {to} failed; Helm reported an error"),
+        }
+    }
+
+    fn audit_action(&self) -> AuditAction {
+        match self.outcome {
+            UpdateOutcome::Healthy => AuditAction::AppUpdated,
+            UpdateOutcome::RolledBack { .. } | UpdateOutcome::NotApplied { .. } => {
+                AuditAction::AppUpdateFailed
+            }
+            UpdateOutcome::RollbackFailed { .. } => AuditAction::AppUpdateRollbackFailed,
+        }
+    }
+
+    /// Appended to the event's fixed notification prefix. Diagnostics are
+    /// already scrubbed.
+    fn notification_details(&self, app: &str) -> String {
+        let versions = format!("app={app} from={} to={}", self.from, self.to);
+        let (what, note) = match self.outcome {
+            UpdateOutcome::Healthy => return versions,
+            UpdateOutcome::RolledBack { .. } => {
+                (format!("rolled back to {}; ", self.from), true)
+            }
+            UpdateOutcome::NotApplied {
+                confirmed: true, ..
+            } => (
+                format!(
+                    "Helm reported an error; the app is still running {}; ",
+                    self.from
+                ),
+                false,
+            ),
+            UpdateOutcome::NotApplied {
+                confirmed: false, ..
+            } => (
+                "Helm reported an error; the app is healthy but Helm history could not confirm which version is running; "
+                    .to_string(),
+                false,
+            ),
+            UpdateOutcome::RollbackFailed { .. } => (String::new(), true),
+        };
+        let line = self
+            .outcome
+            .diagnostics()
+            .map(first_line)
+            .unwrap_or_default();
+        if note {
+            format!("{versions}; {what}{line}. {MIGRATION_NOTE}")
+        } else {
+            format!("{versions}; {what}{line}")
+        }
+    }
+}
+
+/// The result an executed operation hands to the worker's completion step.
+enum OperationOutput {
+    Done(String),
+    Update(UpdateReport),
+}
+
+impl From<String> for OperationOutput {
+    fn from(message: String) -> Self {
+        OperationOutput::Done(message)
+    }
+}
+
+/// A terminal write: `action` overrides the audit action derived from the operation.
+struct Terminal {
+    status: &'static str,
+    message: Option<String>,
+    error: Option<String>,
+    diagnostics: Option<String>,
+    action: Option<AuditAction>,
+}
+
+enum HealthVerdict {
+    Healthy,
+    Unhealthy(String),
+}
+
+/// Helm history reduced to what verification needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReleaseRevisions {
+    /// Highest revision, whatever its status.
+    latest: Option<u32>,
+    /// Highest revision Helm reports as `deployed` (the live one).
+    deployed: Option<u32>,
+}
+
+impl ReleaseRevisions {
+    fn from_history(history: &[(u32, String)]) -> Self {
+        Self {
+            latest: history.iter().map(|(revision, _)| *revision).max(),
+            deployed: history
+                .iter()
+                .filter(|(_, status)| status == "deployed")
+                .map(|(revision, _)| *revision)
+                .max(),
+        }
+    }
+}
+
+/// The cluster reads and Helm actions the update verifier needs, behind a seam
+/// so the decision flow is testable without a cluster.
+// async_trait adds #[must_use] to methods that already return Result.
+#[allow(clippy::double_must_use)]
+#[async_trait::async_trait]
+trait UpdateProbe: Send + Sync {
+    async fn restart_snapshot(&self) -> Result<RestartSnapshot>;
+    /// `app_health`'s `healthy` flag and message.
+    async fn health(&self) -> Result<(bool, String)>;
+    /// `helm history` as (revision, status).
+    fn history(&self) -> Result<Vec<(u32, String)>>;
+    async fn capture(&self, failed: Option<u32>, previous: Option<u32>) -> String;
+    fn rollback(&self, revision: u32) -> Result<()>;
+    /// Mask secrets (namespace Secret values and inline patterns) in text that
+    /// leaves the worker.
+    async fn scrub(&self, text: &str) -> String;
+}
+
+struct ClusterUpdateProbe<'a, 'm> {
+    k8s: &'a K8sClient,
+    deploy: &'a DeploymentManager<'m>,
+    app: &'a str,
+    namespace: String,
+}
+
+impl<'a, 'm> ClusterUpdateProbe<'a, 'm> {
+    fn new(k8s: &'a K8sClient, deploy: &'a DeploymentManager<'m>, app: &'a str) -> Self {
+        Self {
+            k8s,
+            deploy,
+            app,
+            namespace: crate::services::catalog::lifecycle_for_app_name(app).namespace,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl UpdateProbe for ClusterUpdateProbe<'_, '_> {
+    async fn restart_snapshot(&self) -> Result<RestartSnapshot> {
+        update_diagnostics::restart_snapshot(self.k8s, &self.namespace).await
+    }
+
+    async fn health(&self) -> Result<(bool, String)> {
+        let health = self.deploy.app_health(self.app).await?;
+        Ok((
+            health["healthy"].as_bool().unwrap_or(false),
+            health["message"].as_str().unwrap_or_default().to_string(),
+        ))
+    }
+
+    fn history(&self) -> Result<Vec<(u32, String)>> {
+        self.deploy.release_revisions(self.app)
+    }
+
+    async fn scrub(&self, text: &str) -> String {
+        update_diagnostics::scrub_for_namespace(self.k8s, &self.namespace, text).await
+    }
+
+    async fn capture(&self, failed: Option<u32>, previous: Option<u32>) -> String {
+        update_diagnostics::capture(
+            self.k8s,
+            self.deploy,
+            self.app,
+            &self.namespace,
+            failed,
+            previous,
+        )
+        .await
+    }
+
+    fn rollback(&self, revision: u32) -> Result<()> {
+        self.deploy.rollback_release(self.app, revision)
+    }
 }
 
 #[derive(Clone)]
@@ -136,6 +395,14 @@ pub struct AppManager {
     pub(super) catalog: SharedCatalog,
     /// Serializes Helm writes between queued operations and the HA rescaler.
     pub(super) helm_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Update outcomes are announced here; absent means no notifications.
+    notifications: Option<Arc<NotificationService>>,
+    /// How long an updated app may take to become healthy before rollback.
+    /// Fixed override; when absent the owner's setting is read per update.
+    update_health_timeout: Option<Duration>,
+    /// Health poll interval and settle period (constants outside tests).
+    update_poll: Duration,
+    update_settle: Duration,
 }
 
 impl AppManager {
@@ -149,7 +416,31 @@ impl AppManager {
             k8s_client,
             catalog,
             helm_lock: Arc::default(),
+            notifications: None,
+            update_health_timeout: None,
+            update_poll: UPDATE_HEALTH_POLL_INTERVAL,
+            update_settle: UPDATE_SETTLE,
         }
+    }
+
+    /// Shrink the health poll interval and settle period so tests run fast.
+    #[cfg(test)]
+    fn with_update_timing(mut self, poll: Duration, settle: Duration) -> Self {
+        self.update_poll = poll;
+        self.update_settle = settle;
+        self
+    }
+
+    /// Announce update outcomes through `notifications`.
+    pub fn with_notifications(mut self, notifications: Arc<NotificationService>) -> Self {
+        self.notifications = Some(notifications);
+        self
+    }
+
+    /// Override how long an updated app may take to become healthy.
+    pub fn with_update_health_timeout(mut self, timeout: Duration) -> Self {
+        self.update_health_timeout = Some(timeout);
+        self
     }
 
     pub async fn enqueue_operation(
@@ -163,10 +454,23 @@ impl AppManager {
         install_options::validate_custom_storage_keys(&custom_config)?;
         if custom_config.contains_key(QUEUED_INSTALL_KEY)
             || custom_config.contains_key(QUEUED_STORAGE_KEY)
+            || custom_config.contains_key(AUTO_TARGET_KEY)
         {
             return Err(AppError::BadRequest("Reserved install key".into()));
         }
         self.enqueue_operation_unchecked(app_name, operation, custom_config, created_by)
+            .await
+    }
+
+    /// Queue an update started by the auto-update loop (no actor, trigger
+    /// "auto"). The target version is recorded so a failure can be tied to it.
+    pub async fn enqueue_auto_update(
+        &self,
+        app_name: &str,
+        target_version: &str,
+    ) -> Result<AppOperationResponse> {
+        let config = HashMap::from([(AUTO_TARGET_KEY.to_string(), target_version.to_string())]);
+        self.persist_operation(app_name, OP_UPDATE, config, None, "auto")
             .await
     }
 
@@ -176,6 +480,7 @@ impl AppManager {
         operation: &str,
         mut custom_config: HashMap<String, String>,
         created_by: Option<i64>,
+        trigger: &str,
     ) -> Result<AppOperationResponse> {
         if operation != OP_DELETE {
             let catalog = self.catalog.read().await;
@@ -184,6 +489,18 @@ impl AppManager {
                     "App '{}' not found in catalog",
                     app_name
                 )));
+            }
+            if operation == OP_UPDATE && !custom_config.contains_key(AUTO_TARGET_KEY) {
+                let version = match catalog.chart_version(app_name) {
+                    Some(version) => Some(version),
+                    None => app_state::Entity::find_by_id(app_name.to_string())
+                        .one(&self.db)
+                        .await?
+                        .and_then(|row| row.available_chart_version),
+                };
+                if let Some(version) = version {
+                    custom_config.insert(AUTO_TARGET_KEY.into(), version);
+                }
             }
         }
 
@@ -208,6 +525,8 @@ impl AppManager {
             )?)),
             attempts: Set(0),
             created_by: Set(created_by),
+            trigger: Set(Some(trigger.to_string())),
+            diagnostics: Set(None),
             created_at: Set(now),
             started_at: Set(None),
             finished_at: Set(None),
@@ -234,6 +553,7 @@ impl AppManager {
         install_options::validate_custom_storage_keys(&custom_config)?;
         if custom_config.contains_key(QUEUED_INSTALL_KEY)
             || custom_config.contains_key(QUEUED_STORAGE_KEY)
+            || custom_config.contains_key(AUTO_TARGET_KEY)
         {
             return Err(AppError::BadRequest("Reserved install key".into()));
         }
@@ -348,6 +668,8 @@ impl AppManager {
             custom_config: Set(Some(serde_json::to_string(&config)?)),
             attempts: Set(0),
             created_by: Set(Some(actor)),
+            trigger: Set(Some("manual".to_string())),
+            diagnostics: Set(None),
             created_at: Set(now),
             started_at: Set(None),
             finished_at: Set(None),
@@ -369,7 +691,7 @@ impl AppManager {
         created_by: Option<i64>,
     ) -> Result<AppOperationResponse> {
         validate_operation(operation)?;
-        self.persist_operation(app_name, operation, custom_config, created_by)
+        self.persist_operation(app_name, operation, custom_config, created_by, "manual")
             .await
     }
 
@@ -416,6 +738,9 @@ impl AppManager {
         let id = Uuid::new_v4().to_string();
         let snapshot = self.storage_snapshot(transaction, app_name).await?;
         let mut queued_config = HashMap::new();
+        if let Some(version) = &available_chart_version {
+            queued_config.insert(AUTO_TARGET_KEY.to_string(), version.clone());
+        }
         if snapshot.storage.is_some() {
             queued_config.insert(
                 QUEUED_STORAGE_KEY.to_string(),
@@ -433,6 +758,8 @@ impl AppManager {
             custom_config: Set(Some(serde_json::to_string(&queued_config)?)),
             attempts: Set(0),
             created_by: Set(created_by),
+            trigger: Set(Some("manual".to_string())),
+            diagnostics: Set(None),
             created_at: Set(now),
             started_at: Set(None),
             finished_at: Set(None),
@@ -467,6 +794,7 @@ impl AppManager {
                 installed_chart_version: Set(None),
                 available_chart_version: Set(available_chart_version),
                 update_available: Set(false),
+                auto_update: Set(true),
                 last_operation_id: Set(Some(id)),
                 last_checked_at: Set(Some(now)),
                 updated_at: Set(now),
@@ -656,6 +984,7 @@ impl AppManager {
         let mut public_config = config.clone();
         let mut promoted_config: Option<String> = None;
         public_config.remove(QUEUED_GPU_KEY);
+        public_config.remove(AUTO_TARGET_KEY);
         if let Some(raw) = public_config.remove(QUEUED_STORAGE_KEY) {
             let snapshot: QueuedStorage = serde_json::from_str(&raw)
                 .map_err(|_| AppError::BadRequest("Invalid stored storage snapshot".into()))?;
@@ -774,6 +1103,8 @@ impl AppManager {
             custom_config: Set(promoted_config.or_else(|| original.custom_config.clone())),
             attempts: Set(0),
             created_by: Set(Some(actor_id)),
+            trigger: Set(Some("manual".to_string())),
+            diagnostics: Set(None),
             created_at: Set(now),
             started_at: Set(None),
             finished_at: Set(None),
@@ -808,6 +1139,17 @@ impl AppManager {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("State for '{}' not found", app_name)))?;
         Ok(state.into())
+    }
+
+    /// Turn automatic updates on or off for one app.
+    pub async fn set_auto_update(&self, app_name: &str, enabled: bool) -> Result<AppStateResponse> {
+        let state = app_state::Entity::find_by_id(app_name.to_string())
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("State for '{}' not found", app_name)))?;
+        let mut active: app_state::ActiveModel = state.into();
+        active.auto_update = Set(enabled);
+        Ok(active.update(&self.db).await?.into())
     }
 
     /// Refresh the catalog version fields without waiting for a worker reconcile.
@@ -953,7 +1295,7 @@ impl AppManager {
         execute: F,
     ) where
         F: Fn(app_operation::Model, CancellationToken) -> Fut,
-        Fut: Future<Output = Result<String>>,
+        Fut: Future<Output = Result<OperationOutput>>,
     {
         let mut ticker = tokio::time::interval(poll_interval);
         loop {
@@ -1000,8 +1342,14 @@ impl AppManager {
         F: FnOnce(app_operation::Model) -> Fut,
         Fut: Future<Output = Result<String>>,
     {
-        self.process_next_operation_with_stop(|operation, _| execute(operation), heartbeat_interval)
-            .await
+        self.process_next_operation_with_stop(
+            |operation, _| {
+                let output = execute(operation);
+                async move { output.await.map(OperationOutput::from) }
+            },
+            heartbeat_interval,
+        )
+        .await
     }
 
     async fn process_next_operation_with_stop<F, Fut>(
@@ -1011,7 +1359,7 @@ impl AppManager {
     ) -> Result<()>
     where
         F: FnOnce(app_operation::Model, CancellationToken) -> Fut,
-        Fut: Future<Output = Result<String>>,
+        Fut: Future<Output = Result<OperationOutput>>,
     {
         let Some(operation) = self.claim_next_operation().await? else {
             return Ok(());
@@ -1076,56 +1424,42 @@ impl AppManager {
             }
         } else {
             match result {
-                Ok(message) => {
-                    let won = self
-                        .finish_operation_if_unstopped(
-                            &operation.id,
-                            STATUS_SUCCEEDED,
-                            Some(message.clone()),
-                            None,
-                        )
-                        .await?;
-                    if won && operation.operation != OP_RESTART {
-                        if let Err(error) = self
-                            .upsert_state(
-                                &operation.app_name,
-                                &crate::services::catalog::lifecycle_for_app_name(
-                                    &operation.app_name,
-                                )
-                                .namespace,
-                                desired_state_for_operation(&operation.operation),
-                                if operation.operation == OP_DELETE {
-                                    OBS_NOT_INSTALLED
-                                } else {
-                                    OBS_INSTALLING
+                Ok(OperationOutput::Done(message)) => {
+                    let action = terminal_action(&operation.operation, true);
+                    self.complete_succeeded(&operation, message, action).await?;
+                }
+                Ok(OperationOutput::Update(report)) => {
+                    let message = report.message(&operation.app_name);
+                    let action = report.audit_action();
+                    let won = match report.outcome.diagnostics() {
+                        None => {
+                            self.complete_succeeded(&operation, message.clone(), action.clone())
+                                .await?
+                        }
+                        Some(diagnostics) => {
+                            let summary = first_line(diagnostics).to_string();
+                            self.complete_failed(
+                                &operation,
+                                Terminal {
+                                    status: STATUS_FAILED,
+                                    message: Some(message.clone()),
+                                    error: Some(summary),
+                                    diagnostics: Some(diagnostics.to_string()),
+                                    action: Some(action.clone()),
                                 },
-                                false,
-                                Some(if operation.operation == OP_DELETE {
-                                    "Removed".to_string()
-                                } else {
-                                    message.clone()
-                                }),
-                                Some(operation.id.clone()),
-                                false,
+                                message.clone(),
                             )
-                            .await
-                        {
-                            tracing::error!(operation_id = %operation.id, %error, "App state update failed after external success");
+                            .await?
                         }
-                    }
+                    };
                     if won {
-                        if let Err(error) = self.reconcile_app(&operation.app_name).await {
-                            tracing::error!(operation_id = %operation.id, %error, "App reconcile failed after terminal commit");
-                        }
-                    } else {
-                        self.finish_stopped(&operation).await?;
+                        self.notify_update(
+                            &operation,
+                            &action,
+                            &report.notification_details(&operation.app_name),
+                        )
+                        .await;
                     }
-                    tracing::info!(
-                        operation_id = %operation.id,
-                        app = %operation.app_name,
-                        operation = %operation.operation,
-                        "App operation finished"
-                    );
                 }
                 Err(e) => {
                     let error = e.to_string();
@@ -1135,42 +1469,32 @@ impl AppManager {
                         format!("{} failed", operation.operation)
                     };
                     let won = self
-                        .finish_operation_if_unstopped(
-                            &operation.id,
-                            STATUS_FAILED,
-                            Some(message),
-                            Some(error.clone()),
+                        .complete_failed(
+                            &operation,
+                            Terminal {
+                                status: STATUS_FAILED,
+                                message: Some(message),
+                                error: Some(error.clone()),
+                                diagnostics: None,
+                                action: None,
+                            },
+                            error.clone(),
                         )
                         .await?;
-                    if !won {
-                        self.finish_stopped(&operation).await?;
+                    // An update that failed before it could be verified (normally
+                    // before Helm ran). A dropped stale auto target stays silent.
+                    if won
+                        && operation.operation == OP_UPDATE
+                        && !error.contains(AUTO_SKIPPED_MESSAGE)
+                    {
+                        let details = format!(
+                            "{}; the update failed before Kubarr could verify it: {}",
+                            update_subject(&operation),
+                            update_diagnostics::scrub_inline(first_line(&error))
+                        );
+                        self.notify_update(&operation, &AuditAction::AppUpdateFailed, &details)
+                            .await;
                     }
-                    if won {
-                        if let Err(state_error) = self
-                            .upsert_state(
-                                &operation.app_name,
-                                &crate::services::catalog::lifecycle_for_app_name(
-                                    &operation.app_name,
-                                )
-                                .namespace,
-                                desired_state_for_operation(&operation.operation),
-                                OBS_FAILED,
-                                false,
-                                Some(error),
-                                Some(operation.id.clone()),
-                                false,
-                            )
-                            .await
-                        {
-                            tracing::error!(operation_id = %operation.id, %state_error, "App failure state update failed after terminal commit");
-                        }
-                    }
-                    tracing::warn!(
-                        operation_id = %operation.id,
-                        app = %operation.app_name,
-                        operation = %operation.operation,
-                        "App operation failed"
-                    );
                 }
             }
         }
@@ -1180,6 +1504,135 @@ impl AppManager {
         }
 
         Ok(())
+    }
+
+    /// Record success, then publish state. Returns whether this worker won the terminal write.
+    async fn complete_succeeded(
+        &self,
+        operation: &app_operation::Model,
+        message: String,
+        action: AuditAction,
+    ) -> Result<bool> {
+        let won = self
+            .finish_operation_with(
+                &operation.id,
+                Terminal {
+                    status: STATUS_SUCCEEDED,
+                    message: Some(message.clone()),
+                    error: None,
+                    diagnostics: None,
+                    action: Some(action),
+                },
+            )
+            .await?;
+        if won && operation.operation != OP_RESTART {
+            if let Err(error) = self
+                .upsert_state(
+                    &operation.app_name,
+                    &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
+                        .namespace,
+                    desired_state_for_operation(&operation.operation),
+                    if operation.operation == OP_DELETE {
+                        OBS_NOT_INSTALLED
+                    } else {
+                        OBS_INSTALLING
+                    },
+                    false,
+                    Some(if operation.operation == OP_DELETE {
+                        "Removed".to_string()
+                    } else {
+                        message
+                    }),
+                    Some(operation.id.clone()),
+                    false,
+                )
+                .await
+            {
+                tracing::error!(operation_id = %operation.id, %error, "App state update failed after external success");
+            }
+        }
+        if won {
+            if let Err(error) = self.reconcile_app(&operation.app_name).await {
+                tracing::error!(operation_id = %operation.id, %error, "App reconcile failed after terminal commit");
+            }
+        } else {
+            self.finish_stopped(operation).await?;
+        }
+        tracing::info!(
+            operation_id = %operation.id,
+            app = %operation.app_name,
+            operation = %operation.operation,
+            "App operation finished"
+        );
+        Ok(won)
+    }
+
+    /// Record failure, then publish `state_message` on the app. Returns whether
+    /// this worker won the terminal write.
+    async fn complete_failed(
+        &self,
+        operation: &app_operation::Model,
+        terminal: Terminal,
+        state_message: String,
+    ) -> Result<bool> {
+        let won = self.finish_operation_with(&operation.id, terminal).await?;
+        if won {
+            if let Err(state_error) = self
+                .upsert_state(
+                    &operation.app_name,
+                    &crate::services::catalog::lifecycle_for_app_name(&operation.app_name)
+                        .namespace,
+                    desired_state_for_operation(&operation.operation),
+                    OBS_FAILED,
+                    false,
+                    Some(state_message),
+                    Some(operation.id.clone()),
+                    false,
+                )
+                .await
+            {
+                tracing::error!(operation_id = %operation.id, %state_error, "App failure state update failed after terminal commit");
+            }
+        } else {
+            self.finish_stopped(operation).await?;
+        }
+        tracing::warn!(
+            operation_id = %operation.id,
+            app = %operation.app_name,
+            operation = %operation.operation,
+            "App operation failed"
+        );
+        Ok(won)
+    }
+
+    /// Best effort: a notification failure never changes the operation's outcome.
+    async fn notify_update(
+        &self,
+        operation: &app_operation::Model,
+        action: &AuditAction,
+        details: &str,
+    ) {
+        let Some(notifications) = &self.notifications else {
+            return;
+        };
+        let username = match actor(&self.db, operation.created_by).await {
+            Ok((_, username)) => username,
+            Err(error) => {
+                tracing::warn!(operation_id = %operation.id, %error, "Update notification actor lookup failed");
+                None
+            }
+        };
+        if let Err(error) = notifications
+            .notify_event(
+                action,
+                operation.created_by,
+                username.as_deref(),
+                Some(details),
+            )
+            .await
+        {
+            tracing::warn!(operation_id = %operation.id, %error, "Update notification failed");
+        }
     }
 
     async fn claim_next_operation(&self) -> Result<Option<app_operation::Model>> {
@@ -1228,7 +1681,7 @@ impl AppManager {
         &self,
         operation: &app_operation::Model,
         stop: &CancellationToken,
-    ) -> Result<String> {
+    ) -> Result<OperationOutput> {
         check_stop(stop)?;
         let k8s_guard = self.k8s_client.read().await;
         let client = k8s_guard
@@ -1250,12 +1703,12 @@ impl AppManager {
                 manager
                     .remove_app_with_stop(&operation.app_name, Some(stop))
                     .await?;
-                Ok(format!("Removed {}", operation.app_name))
+                Ok(format!("Removed {}", operation.app_name).into())
             }
             OP_RESTART => {
                 check_stop(stop)?;
                 self.restart_app(client, &operation.app_name).await?;
-                Ok(format!("Restarted {}", operation.app_name))
+                Ok(format!("Restarted {}", operation.app_name).into())
             }
             _ => Err(AppError::BadRequest(format!(
                 "Unsupported operation '{}'",
@@ -1276,16 +1729,53 @@ impl AppManager {
         outcome
     }
 
+    /// An automatic update only deploys the version the loop vetted: the chart
+    /// on disk must still be that version and the update still auto-eligible.
+    pub(super) async fn guard_auto_target(
+        &self,
+        operation: &app_operation::Model,
+        target: Option<&str>,
+        current: Option<&str>,
+    ) -> Result<()> {
+        let installed = app_state::Entity::find_by_id(operation.app_name.clone())
+            .one(&self.db)
+            .await?
+            .and_then(|row| row.installed_chart_version);
+        let still_vetted = match (target, current, installed.as_deref()) {
+            (Some(target), Some(current), Some(installed)) => {
+                target == current
+                    && crate::services::update_policy::auto_eligible(
+                        crate::services::update_policy::update_kind(installed, target),
+                    )
+            }
+            _ => false,
+        };
+        if still_vetted {
+            Ok(())
+        } else {
+            Err(AppError::Conflict(AUTO_SKIPPED_MESSAGE.into()))
+        }
+    }
+
     async fn execute_install_or_update(
         &self,
         operation: &app_operation::Model,
         client: &K8sClient,
         catalog: &AppCatalog,
         stop: &CancellationToken,
-    ) -> Result<String> {
+    ) -> Result<OperationOutput> {
         // A malformed persisted request must fail rather than silently deploying
         // with defaults (which can reset a queued GPU or other chart settings).
         let mut custom_config = parse_queued_config(operation.custom_config.as_deref())?;
+        let queued_target = custom_config.remove(AUTO_TARGET_KEY);
+        if operation.operation == OP_UPDATE && operation.trigger.as_deref() == Some("auto") {
+            self.guard_auto_target(
+                operation,
+                queued_target.as_deref(),
+                catalog.chart_version(&operation.app_name).as_deref(),
+            )
+            .await?;
+        }
         let gpu: Option<Option<GpuSelection>> = custom_config
             .remove(QUEUED_GPU_KEY)
             .map(|raw| {
@@ -1412,37 +1902,301 @@ impl AppManager {
         } else {
             false
         };
-        let status = manager
-            .deploy_install_with_stop(
-                &request,
-                deployment_storage,
-                Some(stop),
-                install
-                    .as_ref()
-                    .map(|choice| {
-                        (
-                            choice.chart_version.as_str(),
-                            &choice.storage,
-                            Some(choice.vpn_provider_id),
-                            choice.fresh_private_config,
-                        )
-                    })
-                    .or_else(|| {
-                        saved_snapshot.as_ref().and_then(|snapshot| {
-                            snapshot
-                                .storage
-                                .as_ref()
-                                .zip(snapshot.chart_version.as_deref())
-                                .map(|(storage, version)| {
-                                    (version, storage, None, snapshot.fresh_private_config)
-                                })
-                        })
-                    }),
-                proven_fresh,
+        // The worker cannot verify its own replacement (it is deployed without --wait).
+        let verify = operation.operation == OP_UPDATE && request.wait;
+        let versions = if verify {
+            Some(
+                self.update_versions(&manager, catalog, &operation.app_name)
+                    .await?,
             )
-            .await?;
+        } else {
+            None
+        };
+        let deploy = manager.deploy_install_with_stop(
+            &request,
+            deployment_storage,
+            Some(stop),
+            install
+                .as_ref()
+                .map(|choice| {
+                    (
+                        choice.chart_version.as_str(),
+                        &choice.storage,
+                        Some(choice.vpn_provider_id),
+                        choice.fresh_private_config,
+                    )
+                })
+                .or_else(|| {
+                    saved_snapshot.as_ref().and_then(|snapshot| {
+                        snapshot
+                            .storage
+                            .as_ref()
+                            .zip(snapshot.chart_version.as_deref())
+                            .map(|(storage, version)| {
+                                (version, storage, None, snapshot.fresh_private_config)
+                            })
+                    })
+                }),
+            proven_fresh,
+        );
 
-        Ok(status.message)
+        let Some(versions) = versions else {
+            return Ok(deploy.await?.message.into());
+        };
+        let probe = ClusterUpdateProbe::new(client, &manager, &operation.app_name);
+        self.run_verified_update(&probe, versions, stop, async {
+            deploy.await.map(|status| status.message)
+        })
+        .await
+    }
+
+    /// The release's deployed chart version (falling back to the recorded one)
+    /// and the catalog version the update installs.
+    async fn update_versions(
+        &self,
+        manager: &DeploymentManager<'_>,
+        catalog: &AppCatalog,
+        app_name: &str,
+    ) -> Result<UpdateVersions> {
+        let from = match manager.installed_chart_version(app_name) {
+            Some(version) => Some(version),
+            None => app_state::Entity::find_by_id(app_name)
+                .one(&self.db)
+                .await?
+                .and_then(|state| state.installed_chart_version),
+        };
+        Ok(UpdateVersions {
+            from: from.unwrap_or_else(|| "unknown".into()),
+            to: catalog
+                .chart_version(app_name)
+                .unwrap_or_else(|| "unknown".into()),
+        })
+    }
+
+    /// The configured health timeout, or the default when settings cannot be read.
+    async fn health_timeout(&self) -> Duration {
+        if let Some(timeout) = self.update_health_timeout {
+            return timeout;
+        }
+        match auto_update_settings::load(&self.db).await {
+            Ok(settings) => settings.health_timeout(),
+            Err(error) => {
+                tracing::warn!(%error, "Auto-update settings unavailable; using the default health timeout");
+                DEFAULT_UPDATE_HEALTH_TIMEOUT
+            }
+        }
+    }
+
+    /// Snapshot restarts, run Helm, then verify the app and roll back if it is
+    /// unhealthy. The caller holds `helm_lock` throughout.
+    async fn run_verified_update<H>(
+        &self,
+        probe: &dyn UpdateProbe,
+        versions: UpdateVersions,
+        stop: &CancellationToken,
+        helm: H,
+    ) -> Result<OperationOutput>
+    where
+        H: Future<Output = Result<String>>,
+    {
+        // Read per operation so a settings change applies without a restart.
+        let timeout = self.health_timeout().await;
+        let before = probe.restart_snapshot().await?;
+        // The only safe rollback target is what was live before this update.
+        let before_revisions = probe
+            .history()
+            .map(|history| ReleaseRevisions::from_history(&history))
+            .map_err(|error| error.to_string());
+        let helm_result = helm.await;
+        if stop.is_cancelled() {
+            // A stop wins regardless; do not keep the lock for a verdict nobody records.
+            return helm_result.map(OperationOutput::from);
+        }
+        // A stop during verification abandons it (no rollback); the worker records the stop.
+        let outcome = tokio::select! {
+            outcome = self.verify_or_roll_back(probe, &before, before_revisions, helm_result, timeout) => outcome,
+            _ = stop.cancelled() => return Err(AppError::Internal(STOP_ERROR.into())),
+        };
+        Ok(OperationOutput::Update(UpdateReport {
+            from: versions.from,
+            to: versions.to,
+            outcome,
+        }))
+    }
+
+    /// Wait up to `timeout` for the app to be healthy continuously for the
+    /// settle period (3 min), with no container restarted more than twice since
+    /// `before`. A restart breach at any point fails at once; a timeout shorter
+    /// than time-to-healthy plus settle fails. Polls every 10 s.
+    async fn verify_update(
+        &self,
+        probe: &dyn UpdateProbe,
+        before: &RestartSnapshot,
+        timeout: Duration,
+    ) -> HealthVerdict {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut healthy_since: Option<tokio::time::Instant> = None;
+        loop {
+            let reason = match probe.restart_snapshot().await {
+                Ok(now)
+                    if update_diagnostics::restarts_exceeded(
+                        before,
+                        &now,
+                        UPDATE_RESTART_LIMIT,
+                    ) =>
+                {
+                    return HealthVerdict::Unhealthy(format!(
+                        "A container restarted more than {UPDATE_RESTART_LIMIT} times since the update started"
+                    ));
+                }
+                Ok(_) => match probe.health().await {
+                    Ok((true, _)) => {
+                        let now = tokio::time::Instant::now();
+                        let since = *healthy_since.get_or_insert(now);
+                        if now.duration_since(since) >= self.update_settle {
+                            return HealthVerdict::Healthy;
+                        }
+                        None
+                    }
+                    Ok((false, message)) if message.is_empty() => {
+                        Some("app health check failing".to_string())
+                    }
+                    Ok((false, message)) => Some(message),
+                    Err(error) => Some(format!("health check error: {error}")),
+                },
+                Err(error) => Some(format!("restart counts unavailable: {error}")),
+            };
+            if reason.is_some() {
+                healthy_since = None;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                let within = describe_duration(timeout);
+                return HealthVerdict::Unhealthy(match reason {
+                    Some(reason) => format!("Not healthy within {within}: {reason}"),
+                    None => format!(
+                        "Not healthy for the {} settle period within {within}",
+                        describe_duration(self.update_settle)
+                    ),
+                });
+            }
+            tokio::time::sleep(self.update_poll.min(deadline - now)).await;
+        }
+    }
+
+    /// Decide the outcome after Helm returned. Rolls back only to the revision
+    /// that was deployed before the update, and only when Helm created a newer one.
+    async fn verify_or_roll_back(
+        &self,
+        probe: &dyn UpdateProbe,
+        before: &RestartSnapshot,
+        before_revisions: std::result::Result<ReleaseRevisions, String>,
+        helm_result: Result<String>,
+        timeout: Duration,
+    ) -> UpdateOutcome {
+        let verdict = self.verify_update(probe, before, timeout).await;
+        let helm_error = helm_result.err().map(|error| error.to_string());
+        if matches!(verdict, HealthVerdict::Healthy) && helm_error.is_none() {
+            return UpdateOutcome::Healthy;
+        }
+        let after_revisions = probe
+            .history()
+            .map(|history| ReleaseRevisions::from_history(&history))
+            .map_err(|error| error.to_string());
+        // `None` when either side of the comparison is unknown.
+        let applied = match (&before_revisions, &after_revisions) {
+            (Ok(before), Ok(after)) => Some(after.latest > before.latest),
+            _ => None,
+        };
+        let helm_line = helm_error
+            .as_deref()
+            .map(|error| format!("Helm upgrade failed: {}", first_line(error)));
+
+        let reason = match (verdict, &helm_line) {
+            (HealthVerdict::Healthy, Some(helm_line)) => {
+                if applied == Some(true) {
+                    // A new revision is deployed and healthy; Helm's error was spurious.
+                    tracing::warn!(error = %helm_line, "Helm reported an error but the updated app is healthy");
+                    return UpdateOutcome::Healthy;
+                }
+                let confirmed = applied == Some(false);
+                let note = if confirmed {
+                    "No new revision is running; nothing to roll back"
+                } else {
+                    "Helm history unavailable; the app is healthy, so no rollback was attempted"
+                };
+                return UpdateOutcome::NotApplied {
+                    diagnostics: self.compose(probe, &[helm_line, note], "").await,
+                    confirmed,
+                };
+            }
+            (HealthVerdict::Healthy, None) => return UpdateOutcome::Healthy,
+            (HealthVerdict::Unhealthy(reason), None) => reason,
+            (HealthVerdict::Unhealthy(reason), Some(helm_line)) => format!("{helm_line}; {reason}"),
+        };
+
+        let failed_revision = after_revisions.as_ref().ok().and_then(|r| r.latest);
+        let target = before_revisions.as_ref().ok().and_then(|r| r.deployed);
+        // Evidence first: the rollback replaces the pods whose logs explain the failure.
+        let captured = probe.capture(failed_revision, target).await;
+
+        if applied == Some(false) {
+            let note = "No new Helm revision was created; nothing to roll back";
+            return UpdateOutcome::NotApplied {
+                diagnostics: self.compose(probe, &[&reason, note], &captured).await,
+                confirmed: true,
+            };
+        }
+
+        let rollback: std::result::Result<u32, String> = match (applied, target) {
+            (None, _) => Err(format!(
+                "Rollback not attempted: Helm history unavailable: {}",
+                before_revisions
+                    .err()
+                    .or(after_revisions.err())
+                    .unwrap_or_default()
+            )),
+            (_, None) => {
+                Err("Rollback not attempted: no deployed revision before the update".into())
+            }
+            (_, Some(revision)) => {
+                let before_rollback = match probe.restart_snapshot().await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        tracing::warn!(%error, "Restart snapshot before rollback failed; using the pre-update baseline");
+                        before.clone()
+                    }
+                };
+                match probe.rollback(revision) {
+                    Err(error) => Err(format!("Rollback to revision {revision} failed: {error}")),
+                    Ok(()) => match self.verify_update(probe, &before_rollback, timeout).await {
+                        HealthVerdict::Healthy => Ok(revision),
+                        HealthVerdict::Unhealthy(reason) => Err(format!(
+                            "Still unhealthy after rollback to revision {revision}: {reason}"
+                        )),
+                    },
+                }
+            }
+        };
+
+        let rollback_line = match &rollback {
+            Ok(revision) => format!("Rolled back to revision {revision}"),
+            Err(problem) => problem.clone(),
+        };
+        let diagnostics = self
+            .compose(probe, &[&reason, &rollback_line], &captured)
+            .await;
+        match rollback {
+            Ok(_) => UpdateOutcome::RolledBack { diagnostics },
+            Err(_) => UpdateOutcome::RollbackFailed { diagnostics },
+        }
+    }
+
+    /// Summary lines (scrubbed, one line each) above the already-scrubbed capture.
+    async fn compose(&self, probe: &dyn UpdateProbe, lines: &[&str], captured: &str) -> String {
+        let summary: Vec<&str> = lines.iter().map(|line| first_line(line)).collect();
+        let scrubbed = probe.scrub(&summary.join("\n")).await;
+        compose_diagnostics(&scrubbed, captured)
     }
 
     async fn restart_app(&self, client: &K8sClient, app_name: &str) -> Result<()> {
@@ -1460,7 +2214,7 @@ impl AppManager {
     async fn finish_operation(
         &self,
         id: &str,
-        status: &str,
+        status: &'static str,
         message: Option<String>,
         error: Option<String>,
     ) -> Result<()> {
@@ -1493,8 +2247,14 @@ impl AppManager {
             .exec(&transaction)
             .await?;
         if changed.rows_affected == 1 {
-            self.queue_terminal_audit(&transaction, operation, false, "indeterminate")
-                .await?;
+            self.queue_terminal_audit(
+                &transaction,
+                operation,
+                terminal_action(&operation.operation, false),
+                false,
+                "indeterminate",
+            )
+            .await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -1503,10 +2263,31 @@ impl AppManager {
     async fn finish_operation_if_unstopped(
         &self,
         id: &str,
-        status: &str,
+        status: &'static str,
         message: Option<String>,
         error: Option<String>,
     ) -> Result<bool> {
+        self.finish_operation_with(
+            id,
+            Terminal {
+                status,
+                message,
+                error,
+                diagnostics: None,
+                action: None,
+            },
+        )
+        .await
+    }
+
+    async fn finish_operation_with(&self, id: &str, terminal: Terminal) -> Result<bool> {
+        let Terminal {
+            status,
+            message,
+            error,
+            diagnostics,
+            action,
+        } = terminal;
         let transaction = self.db.begin().await?;
         let operation = app_operation::Entity::find_by_id(id.to_string())
             .one(&transaction)
@@ -1525,6 +2306,9 @@ impl AppManager {
             "completed"
         };
         active.error = Set(error);
+        if diagnostics.is_some() {
+            active.diagnostics = Set(diagnostics);
+        }
         active.finished_at = Set(Some(now));
         active.updated_at = Set(now);
         let changed = app_operation::Entity::update_many()
@@ -1537,7 +2321,9 @@ impl AppManager {
         if changed.rows_affected != 1 {
             return Ok(false);
         }
-        self.queue_terminal_audit(&transaction, &operation, status == STATUS_SUCCEEDED, phase)
+        let success = status == STATUS_SUCCEEDED;
+        let action = action.unwrap_or_else(|| terminal_action(&operation.operation, success));
+        self.queue_terminal_audit(&transaction, &operation, action, success, phase)
             .await?;
         transaction.commit().await?;
         Ok(true)
@@ -1547,15 +2333,10 @@ impl AppManager {
         &self,
         transaction: &DatabaseTransaction,
         operation: &app_operation::Model,
+        action: AuditAction,
         success: bool,
         phase: &str,
     ) -> Result<()> {
-        let action = match operation.operation.as_str() {
-            OP_INSTALL => AuditAction::AppInstalled,
-            OP_DELETE => AuditAction::AppUninstalled,
-            OP_RESTART => AuditAction::AppRestarted,
-            _ => AuditAction::AppConfigured,
-        };
         let (_, username) = actor(transaction, operation.created_by).await?;
         audit_outbox::ActiveModel {
             operation_id: Set(operation.id.clone()),
@@ -1659,10 +2440,25 @@ impl AppManager {
         if changed.rows_affected == 0 {
             return Ok(());
         }
-        self.queue_terminal_audit(&transaction, &operation, false, "indeterminate")
-            .await?;
+        self.queue_terminal_audit(
+            &transaction,
+            &operation,
+            terminal_action(&operation.operation, false),
+            false,
+            "indeterminate",
+        )
+        .await?;
         transaction.commit().await?;
         tracing::error!(operation_id = %operation.id, "Recovered interrupted app operation with unknown external outcome");
+        // The worker died holding an update: the app may be on a broken new
+        // revision or half rolled back, and nobody else will say so. No
+        // diagnostics are stored, so the failed-version skip ignores it and the
+        // next window re-evaluates the app.
+        if operation.operation == OP_UPDATE && !operation.stop_requested {
+            let details = format!("{}; {INTERRUPTED_DETAILS}", update_subject(&operation));
+            self.notify_update(&operation, &AuditAction::AppUpdateRollbackFailed, &details)
+                .await;
+        }
         Ok(())
     }
 
@@ -1693,6 +2489,9 @@ impl AppManager {
             "app_uninstalled" => AuditAction::AppUninstalled,
             "app_restarted" => AuditAction::AppRestarted,
             "app_configured" => AuditAction::AppConfigured,
+            "app_updated" => AuditAction::AppUpdated,
+            "app_update_failed" => AuditAction::AppUpdateFailed,
+            "app_update_rollback_failed" => AuditAction::AppUpdateRollbackFailed,
             _ => return Err(AppError::Internal("Invalid app audit outbox action".into())),
         };
         log_on_transaction(
@@ -1774,6 +2573,7 @@ impl AppManager {
                 installed_chart_version: Set(None),
                 available_chart_version: Set(version),
                 update_available: Set(false),
+                auto_update: Set(true),
                 last_operation_id: Set(Some(id.into())),
                 last_checked_at: Set(Some(now)),
                 updated_at: Set(now),
@@ -1979,6 +2779,7 @@ impl AppManager {
             installed_chart_version: Set(installed_chart_version),
             available_chart_version: Set(available_chart_version),
             update_available: Set(update_available),
+            auto_update: Set(true),
             last_operation_id: Set(operation_id),
             last_checked_at: Set(Some(now)),
             updated_at: Set(now),
@@ -2051,6 +2852,67 @@ async fn watch_stop(db: DatabaseConnection, id: String, stop: CancellationToken)
             }
         }
     }
+}
+
+fn terminal_action(operation: &str, success: bool) -> AuditAction {
+    match operation {
+        OP_INSTALL => AuditAction::AppInstalled,
+        OP_DELETE => AuditAction::AppUninstalled,
+        OP_RESTART => AuditAction::AppRestarted,
+        OP_UPDATE if success => AuditAction::AppUpdated,
+        OP_UPDATE => AuditAction::AppUpdateFailed,
+        _ => AuditAction::AppConfigured,
+    }
+}
+
+/// `app=<app>`, plus `to=<version>` when the operation recorded its target.
+fn update_subject(operation: &app_operation::Model) -> String {
+    let target = parse_queued_config(operation.custom_config.as_deref())
+        .ok()
+        .and_then(|mut config| config.remove(AUTO_TARGET_KEY));
+    match target {
+        Some(target) => format!("app={} to={target}", operation.app_name),
+        None => format!("app={}", operation.app_name),
+    }
+}
+
+/// "10 min" for whole minutes, otherwise seconds ("90 s").
+fn describe_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs > 0 && secs.is_multiple_of(60) {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{secs} s")
+    }
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
+}
+
+/// One line, at most `SUMMARY_LINE_MAX` bytes.
+fn summary_line(text: &str) -> &str {
+    let line = first_line(text);
+    let mut end = line.len().min(SUMMARY_LINE_MAX);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+/// The scrubbed summary lines lead, so the first one is the "first diagnostic
+/// line" notifications quote. Each is capped at `SUMMARY_LINE_MAX` bytes.
+fn compose_diagnostics(summary: &str, captured: &str) -> String {
+    let mut report = summary
+        .lines()
+        .map(summary_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !captured.is_empty() {
+        report.push_str("\n\n");
+        report.push_str(captured);
+    }
+    update_diagnostics::truncate_report(report)
 }
 
 #[cfg(test)]
@@ -2165,6 +3027,14 @@ impl From<app_operation::Model> for AppOperationResponse {
 
 impl From<app_state::Model> for AppStateResponse {
     fn from(model: app_state::Model) -> Self {
+        let available_update_kind = match (
+            model.update_available,
+            model.installed_chart_version.as_deref(),
+            model.available_chart_version.as_deref(),
+        ) {
+            (true, Some(installed), Some(available)) => Some(update_kind(installed, available)),
+            _ => None,
+        };
         Self {
             app_name: model.app_name,
             namespace: model.namespace,
@@ -2175,6 +3045,8 @@ impl From<app_state::Model> for AppStateResponse {
             installed_chart_version: model.installed_chart_version,
             available_chart_version: model.available_chart_version,
             update_available: model.update_available,
+            auto_update: model.auto_update,
+            available_update_kind,
             last_operation_id: model.last_operation_id,
             last_checked_at: model.last_checked_at,
             updated_at: model.updated_at,

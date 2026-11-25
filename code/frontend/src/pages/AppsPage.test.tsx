@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   assignVpn: vi.fn(),
   removeVpn: vi.fn(),
   refreshAppStatuses: vi.fn(),
+  setAutoUpdate: vi.fn(),
+  sonarrState: {} as Partial<AppState>,
   canRestart: true,
   canInstall: true,
   canDelete: false,
@@ -48,6 +50,7 @@ vi.mock('../api/apps', () => ({
     getInstallOptions: (...args: unknown[]) => mocks.getInstallOptions(...args),
     update: (...args: unknown[]) => mocks.update(...args),
     getGpus: (...args: unknown[]) => mocks.getGpus(...args),
+    setAutoUpdate: (...args: unknown[]) => mocks.setAutoUpdate(...args),
     delete: vi.fn(),
     logAccess: vi.fn().mockResolvedValue(undefined),
   },
@@ -123,6 +126,8 @@ const appState: AppState = {
   installed_chart_version: '1.0.0',
   available_chart_version: '1.0.0',
   update_available: false,
+  auto_update: true,
+  available_update_kind: null,
   last_operation_id: null,
   last_checked_at: null,
   updated_at: new Date().toISOString(),
@@ -150,7 +155,7 @@ vi.mock('../contexts/MonitoringContext', () => ({
       ...(mocks.showDevelopment ? [{ ...app, name: 'redmine', display_name: 'Redmine', category: 'development' }] : []),
       ...(mocks.showSystemExporter ? [{ ...app, name: 'node-exporter', display_name: 'Node Exporter', category: 'monitoring', is_system: true, is_browseable: false }] : [])],
     installedApps: mocks.plexInstalled ? ['sonarr', 'plex'] : ['sonarr'],
-    appStates: mocks.plexInstalled ? { sonarr: appState, plex: { ...appState, app_name: 'plex' } } : { sonarr: appState },
+    appStates: mocks.plexInstalled ? { sonarr: { ...appState, ...mocks.sonarrState }, plex: { ...appState, app_name: 'plex' } } : { sonarr: { ...appState, ...mocks.sonarrState } },
     appStatuses: { sonarr: { healthy: true, loading: false, pods: [] } },
     refreshAppStatuses: mocks.refreshAppStatuses,
   }),
@@ -663,5 +668,49 @@ describe('AppsPage compact view', () => {
     renderPage()
     await screen.findByRole('heading', { name: 'Sonarr', level: 3 })
     expect(screen.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true')
+  })
+})
+
+describe('AppsPage automatic updates', () => {
+  beforeEach(() => {
+    mocks.showPlex = false
+    mocks.plexInstalled = false
+    mocks.canInstall = true
+    mocks.sonarrState = {}
+    mocks.setAutoUpdate.mockReset().mockResolvedValue({ ...appState, auto_update: false })
+    mocks.getOperations.mockResolvedValue([])
+    localStorage.clear()
+  })
+
+  async function openSonarr() {
+    renderPage()
+    fireEvent.click(await screen.findByRole('heading', { name: 'Sonarr', level: 3 }))
+    return screen.getByRole('region', { name: 'Sonarr details' })
+  }
+
+  it('toggles automatic updates for the app', async () => {
+    const panel = await openSonarr()
+    const toggle = within(panel).getByRole('switch', { name: 'Automatic updates' })
+    expect(toggle).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(toggle)
+    await waitFor(() => expect(mocks.setAutoUpdate).toHaveBeenCalledWith('sonarr', false))
+  })
+
+  it('does not let a viewer without install permission change it', async () => {
+    mocks.canInstall = false
+    const panel = await openSonarr()
+    expect(within(panel).getByRole('switch', { name: 'Automatic updates' })).toBeDisabled()
+  })
+
+  it('flags a major update for review', async () => {
+    mocks.sonarrState = { update_available: true, available_chart_version: '2.0.0', available_update_kind: 'major' }
+    const panel = await openSonarr()
+    expect(within(panel).getByText('Major update — review before updating')).toBeVisible()
+  })
+
+  it('does not flag a minor update as major', async () => {
+    mocks.sonarrState = { update_available: true, available_chart_version: '1.1.0', available_update_kind: 'minor' }
+    const panel = await openSonarr()
+    expect(within(panel).queryByText('Major update — review before updating')).not.toBeInTheDocument()
   })
 })
