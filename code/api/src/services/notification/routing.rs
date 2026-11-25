@@ -334,6 +334,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bell_survives_a_failed_route_lookup() {
+        use sea_orm::ConnectionTrait;
+        let db = migrated_db().await;
+        insert_event(&db, "login", "info").await;
+        let uid = user_with_all_channels(&db).await;
+        db.execute_unprepared("DROP TABLE notification_routes")
+            .await
+            .expect("drop routes");
+        let svc = NotificationService::new();
+        svc.set_db(db.clone()).await;
+        svc.notify_event(&AuditAction::Login, Some(uid), Some("routed"), None)
+            .await
+            .expect("notify");
+        assert_eq!(bell_count(&db, uid).await, 1);
+        assert!(attempted_channels(&db).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn routes_of_another_event_do_not_leak() {
         let db = migrated_db().await;
         insert_event(&db, "login", "info").await;

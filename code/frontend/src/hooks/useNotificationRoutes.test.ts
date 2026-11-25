@@ -85,4 +85,39 @@ describe('useNotificationRoutes', () => {
     expect(onError).toHaveBeenCalledWith('Invalid channel type');
     expect(result.current.routes).toEqual([route(false)]);
   });
+
+  it('does not let an error reload overwrite a newer toggle on another event', async () => {
+    const other: NotificationRoute = { event_type: 'app_installed', channels: { telegram: false, email: false, messagebird: false } };
+    getRoutes.mockResolvedValueOnce([route(false), other]);
+    const reload = deferred<NotificationRoute[]>();
+    getRoutes.mockReturnValueOnce(reload.promise);
+    const otherPut = deferred<NotificationRoute>();
+    updateRoute
+      .mockRejectedValueOnce({ response: { data: { detail: 'nope' } } })
+      .mockReturnValueOnce(otherPut.promise);
+    const { result } = renderHook(() => useNotificationRoutes(vi.fn()));
+    await act(() => result.current.load());
+
+    let failed!: Promise<void>;
+    await act(async () => {
+      failed = result.current.toggle('login_failed', 'email', true);
+      await Promise.resolve();
+    });
+    // The failed toggle's reload is in flight; toggle another event meanwhile.
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.toggle('app_installed', 'telegram', true);
+    });
+    await act(async () => {
+      reload.resolve([route(false), other]);
+      await failed;
+    });
+    expect(result.current.routes.find((r) => r.event_type === 'app_installed')?.channels.telegram).toBe(true);
+    expect(result.current.routes.find((r) => r.event_type === 'login_failed')?.channels.email).toBe(false);
+    await act(async () => {
+      otherPut.resolve({ ...other, channels: { ...other.channels, telegram: true } });
+      await pending;
+    });
+    expect(result.current.routes.find((r) => r.event_type === 'app_installed')?.channels.telegram).toBe(true);
+  });
 });

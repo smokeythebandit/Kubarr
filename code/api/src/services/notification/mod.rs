@@ -297,8 +297,15 @@ impl NotificationService {
         // Create notification title and body
         let title = format_event_title(action);
         let body = format_event_body(action, username, details);
-        // External channels this event is routed to; the bell is not affected.
-        let routed = routing::routed_channels(db, &event_type).await?;
+        // External channels this event is routed to. A failed lookup must not
+        // cost the bell, so it only skips the external channels.
+        let routed = match routing::routed_channels(db, &event_type).await {
+            Ok(routed) => routed,
+            Err(e) => {
+                tracing::warn!(event_type = %event_type, "Notification route lookup failed: {}", e);
+                std::collections::HashSet::new()
+            }
+        };
 
         let Some(uid) = user_id else {
             // System-wide events go to everyone who manages settings. One failing
