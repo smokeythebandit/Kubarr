@@ -4,7 +4,6 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use chrono_tz::Tz;
 use sea_orm::{
     ActiveModelTrait, ConnectionTrait, EntityTrait, Set, TransactionSession, TransactionTrait,
 };
@@ -15,7 +14,7 @@ use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::models::system_setting;
 use crate::services::audit::log_on_transaction;
 use crate::services::update_policy::{
-    parse_window_start, resolve_local, window_bounds, UpdateWindow,
+    parse_window_start, resolve_local, window_bounds, Tz, UpdateWindow,
 };
 
 const KEY_ENABLED: &str = "auto_update.enabled";
@@ -99,10 +98,10 @@ impl AutoUpdateSettings {
         if let Some((start, _)) = window_bounds(&window, now) {
             return Some(start);
         }
-        let today = now.with_timezone(&window.tz).date_naive();
+        let today = window.tz.local_date(now)?;
         (0..=2)
             .filter_map(|days| {
-                resolve_local(window.tz, today + ChronoDuration::days(days), window.start)
+                resolve_local(&window.tz, today + ChronoDuration::days(days), window.start)
             })
             .find(|start| *start >= now)
     }

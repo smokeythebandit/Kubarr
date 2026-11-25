@@ -1,8 +1,7 @@
 //! Pure policy for automatic app updates: classify a pending chart update and
 //! decide whether "now" falls inside the owner's update window.
 
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use chrono_tz::Tz;
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
@@ -70,7 +69,30 @@ pub fn auto_eligible(kind: UpdateKind) -> bool {
     )
 }
 
-#[derive(Debug, Clone, Copy)]
+/// An IANA time zone backed by jiff's bundled tz database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tz(jiff::tz::TimeZone);
+
+impl Tz {
+    /// The local calendar date at the given instant.
+    pub fn local_date(&self, now: DateTime<Utc>) -> Option<NaiveDate> {
+        let ts = jiff::Timestamp::new(now.timestamp(), 0).ok()?;
+        let d = ts.to_zoned(self.0.clone()).date();
+        NaiveDate::from_ymd_opt(d.year().into(), d.month() as u32, d.day() as u32)
+    }
+}
+
+impl std::str::FromStr for Tz {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        jiff::tz::TimeZone::get(s)
+            .map(Tz)
+            .map_err(|e| format!("unknown time zone '{s}': {e}"))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct UpdateWindow {
     pub start: NaiveTime,
     pub minutes: u32,
@@ -78,16 +100,24 @@ pub struct UpdateWindow {
 }
 
 /// Resolve a local wall-clock time to UTC. A time skipped by a DST jump
-/// resolves to one hour later (the first valid instant after the gap).
-pub(crate) fn resolve_local(tz: Tz, date: NaiveDate, time: NaiveTime) -> Option<DateTime<Utc>> {
-    let naive = NaiveDateTime::new(date, time);
-    tz.from_local_datetime(&naive)
-        .earliest()
-        .or_else(|| {
-            tz.from_local_datetime(&(naive + Duration::hours(1)))
-                .earliest()
-        })
-        .map(|d| d.with_timezone(&Utc))
+/// resolves to one hour later (the first valid instant after the gap); an
+/// ambiguous time (DST fall back) resolves to the earlier instant.
+pub fn resolve_local(tz: &Tz, date: NaiveDate, time: NaiveTime) -> Option<DateTime<Utc>> {
+    use chrono::{Datelike, Timelike};
+    let civil = jiff::civil::DateTime::new(
+        i16::try_from(date.year()).ok()?,
+        i8::try_from(date.month()).ok()?,
+        i8::try_from(date.day()).ok()?,
+        i8::try_from(time.hour()).ok()?,
+        i8::try_from(time.minute()).ok()?,
+        i8::try_from(time.second()).ok()?,
+        0,
+    )
+    .ok()?;
+    // jiff's default disambiguation ("compatible") picks the earlier instant
+    // for ambiguous times and shifts forward across a gap, matching the policy.
+    let ts = tz.0.to_zoned(civil).ok()?.timestamp();
+    DateTime::from_timestamp(ts.as_second(), 0)
 }
 
 /// The window containing `now` as `(start, end)` in UTC, or `None` when outside.
@@ -96,9 +126,9 @@ pub fn window_bounds(
     w: &UpdateWindow,
     now: DateTime<Utc>,
 ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let today = now.with_timezone(&w.tz).date_naive();
+    let today = w.tz.local_date(now)?;
     [today.pred_opt()?, today].into_iter().find_map(|date| {
-        let start = resolve_local(w.tz, date, w.start)?;
+        let start = resolve_local(&w.tz, date, w.start)?;
         let end = start + Duration::minutes(i64::from(w.minutes));
         (start <= now && now < end).then_some((start, end))
     })
@@ -140,7 +170,7 @@ mod tests {
         let w = UpdateWindow {
             start: parse_window_start("04:00").unwrap(),
             minutes: 120,
-            tz: chrono_tz::Europe::Amsterdam,
+            tz: "Europe/Amsterdam".parse().unwrap(),
         };
         // 2026-11-24 is CET (UTC+1): 04:30 local = 03:30Z, 06:01 local = 05:01Z.
         let (s, e) = window_bounds(&w, utc("2026-11-24T03:30:00Z")).unwrap();
@@ -155,7 +185,7 @@ mod tests {
         let w = UpdateWindow {
             start: parse_window_start("23:00").unwrap(),
             minutes: 180,
-            tz: chrono_tz::UTC,
+            tz: "UTC".parse().unwrap(),
         };
         let (s, e) = window_bounds(&w, utc("2026-11-25T01:30:00Z")).unwrap();
         assert_eq!(s, utc("2026-11-24T23:00:00Z"));
@@ -169,7 +199,7 @@ mod tests {
         let w = UpdateWindow {
             start: parse_window_start("02:30").unwrap(),
             minutes: 60,
-            tz: chrono_tz::Europe::Amsterdam,
+            tz: "Europe/Amsterdam".parse().unwrap(),
         };
         // Resolves to 03:30 CEST = 01:30Z.
         let (s, e) = window_bounds(&w, utc("2027-03-28T01:45:00Z")).unwrap();
