@@ -43,6 +43,11 @@ export const test = base.extend<{ api: MockApi }>({
     api.get('/api/apps/states', []);
     api.get('/api/monitoring/vm/available', { available: false });
     api.get('/api/notifications/inbox/count', { count: 0 });
+    // The assistant is unconfigured by default, so its button stays hidden.
+    api.get('/api/assistant/status', {
+      configured: false, key_error: false, enabled: true, model: 'claude-opus-5-5', effort: 'low',
+      month_spend_usd: 0, monthly_budget_usd: 20, paused: false,
+    });
 
     context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
     await context.route('**/*', async route => {
