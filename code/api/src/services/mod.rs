@@ -1,3 +1,4 @@
+pub mod app_install;
 pub mod app_manager;
 pub mod app_storage;
 pub mod assistant;

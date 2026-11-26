@@ -5,6 +5,7 @@ pub mod app_storage_config;
 pub mod app_vpn_config;
 pub mod assistant_conversation;
 pub mod assistant_message;
+pub mod assistant_pending_action;
 pub mod assistant_request;
 pub mod assistant_usage;
 pub mod audit_log;
@@ -44,6 +45,7 @@ pub mod prelude {
     pub use super::app_vpn_config::{self, Entity as AppVpnConfig};
     pub use super::assistant_conversation::{self, Entity as AssistantConversation};
     pub use super::assistant_message::{self, Entity as AssistantMessage};
+    pub use super::assistant_pending_action::{self, Entity as AssistantPendingAction};
     pub use super::assistant_request::{self, Entity as AssistantRequest};
     pub use super::assistant_usage::{self, Entity as AssistantUsage};
     pub use super::audit_log::{self, Entity as AuditLog};

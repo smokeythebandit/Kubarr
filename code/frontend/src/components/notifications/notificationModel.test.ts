@@ -45,6 +45,7 @@ describe('categoryOf', () => {
     ['app_updated', 'updates'],
     ['app_update_failed', 'updates'],
     ['app_update_rollback_failed', 'updates'],
+    ['app_rollback_failed', 'updates'],
     ['app_installed', 'apps'],
     ['app_restarted', 'apps'],
     ['login', 'security'],
@@ -218,6 +219,8 @@ const BACKEND_EVENT_TYPES: Record<string, 'updates' | 'apps' | 'security' | 'sys
   app_updated: 'updates',
   app_update_failed: 'updates',
   app_update_rollback_failed: 'updates',
+  app_rolled_back: 'updates',
+  app_rollback_failed: 'updates',
   vpn_provider_created: 'system',
   vpn_provider_updated: 'system',
   vpn_provider_deleted: 'system',
@@ -231,9 +234,9 @@ const BACKEND_EVENT_TYPES: Record<string, 'updates' | 'apps' | 'security' | 'sys
 };
 
 describe('event labels', () => {
-  it('covers all 38 backend event types with a label and category', () => {
+  it('covers all 40 backend event types with a label and category', () => {
     const types = Object.keys(BACKEND_EVENT_TYPES);
-    expect(types).toHaveLength(38);
+    expect(types).toHaveLength(40);
     for (const type of types) {
       expect(EVENT_LABELS[type], type).toBeTruthy();
       expect(categoryOf(type), type).toBe(BACKEND_EVENT_TYPES[type]);

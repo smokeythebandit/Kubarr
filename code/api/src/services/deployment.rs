@@ -214,6 +214,20 @@ impl<'a> DeploymentManager<'a> {
         parse_history(output.as_bytes())
     }
 
+    /// `helm history` with the chart and app version of each revision.
+    pub fn release_history(&self, app_name: &str) -> Result<Vec<HelmRevision>> {
+        let lifecycle = lifecycle_for_app_name(app_name);
+        let output = self.run_helm_command(&[
+            "history",
+            lifecycle.release_name.as_str(),
+            "-n",
+            lifecycle.release_namespace.as_str(),
+            "-o",
+            "json",
+        ])?;
+        parse_release_history(output.as_bytes())
+    }
+
     /// Highest revision below the current one that was deployed or superseded.
     pub fn previous_deployed_revision(&self, app_name: &str) -> Result<Option<u32>> {
         Ok(previous_deployed(&self.release_revisions(app_name)?))
@@ -1338,6 +1352,40 @@ fn rollback_args<'a>(release: &'a str, revision: &'a str, namespace: &'a str) ->
 struct HistoryEntry {
     revision: u32,
     status: String,
+}
+
+/// One revision of a Helm release.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HelmRevision {
+    pub revision: u32,
+    pub status: String,
+    /// `<chart name>-<chart version>`, as Helm reports it.
+    #[serde(default)]
+    pub chart: String,
+    #[serde(default)]
+    pub app_version: String,
+    /// e.g. "Upgrade complete" or "Rollback to 3".
+    #[serde(default)]
+    pub description: String,
+}
+
+impl HelmRevision {
+    /// The chart version from `chart` (the part after the name, which is
+    /// where the first `-<digit>` starts).
+    pub fn chart_version(&self) -> Option<String> {
+        let bytes = self.chart.as_bytes();
+        (1..bytes.len())
+            .find(|&i| bytes[i - 1] == b'-' && bytes[i].is_ascii_digit())
+            .map(|i| self.chart[i..].to_string())
+    }
+}
+
+/// Parse `helm history -o json` with chart details, ascending by revision.
+pub fn parse_release_history(bytes: &[u8]) -> Result<Vec<HelmRevision>> {
+    let mut entries: Vec<HelmRevision> = serde_json::from_slice(bytes)
+        .map_err(|error| AppError::Internal(format!("Invalid Helm history: {error}")))?;
+    entries.sort_by_key(|e| e.revision);
+    Ok(entries)
 }
 
 /// Parse `helm history -o json` into `(revision, status)` ascending.

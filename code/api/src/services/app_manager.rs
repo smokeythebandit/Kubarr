@@ -37,11 +37,42 @@ pub const OP_INSTALL: &str = "install";
 pub const OP_UPDATE: &str = "update";
 pub const OP_DELETE: &str = "delete";
 pub const OP_RESTART: &str = "restart";
+/// Roll an app back to the Helm release before its current one.
+pub const OP_ROLLBACK: &str = "rollback";
 const QUEUED_INSTALL_KEY: &str = "__kubarr_install_choices";
 const QUEUED_STORAGE_KEY: &str = "__kubarr_storage_snapshot";
 /// Chart version an update operation was queued for (recorded on every update,
 /// whoever started it); never reaches Helm.
 pub(crate) const AUTO_TARGET_KEY: &str = "__kubarr_auto_target_version";
+/// The Helm revisions (and versions) a rollback was confirmed for.
+pub(crate) const ROLLBACK_PLAN_KEY: &str = "__kubarr_rollback_plan";
+/// Operations the person confirmed in the assistant: the worker re-checks
+/// that they still do what the card said before deploying anything.
+pub const TRIGGER_ASSISTANT: &str = "assistant";
+/// Prefix of the error when a confirmed update's target moved before it ran.
+pub const CONFIRMED_TARGET_CHANGED: &str = "The update target changed after it was confirmed";
+
+/// What a rollback was confirmed for: from the live revision to an earlier one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackPlan {
+    /// The revision live when the rollback was confirmed.
+    pub from_revision: u32,
+    /// The earlier revision to restore.
+    pub to_revision: u32,
+    /// Chart version of `from_revision` (auto-update skips it afterwards).
+    #[serde(default)]
+    pub from_version: Option<String>,
+    #[serde(default)]
+    pub to_version: Option<String>,
+}
+
+impl RollbackPlan {
+    /// The rollback recorded in an operation's config, if any.
+    pub fn from_config(raw: Option<&str>) -> Option<RollbackPlan> {
+        let config: HashMap<String, String> = serde_json::from_str(raw?).ok()?;
+        serde_json::from_str(config.get(ROLLBACK_PLAN_KEY)?).ok()
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct QueuedInstall {
@@ -326,6 +357,10 @@ trait UpdateProbe: Send + Sync {
     fn history(&self) -> Result<Vec<(u32, String)>>;
     async fn capture(&self, failed: Option<u32>, previous: Option<u32>) -> String;
     fn rollback(&self, revision: u32) -> Result<()>;
+    /// The Helm description of `revision` (e.g. "Rollback to 3"), if known.
+    fn description(&self, _revision: u32) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Mask secrets (namespace Secret values and inline patterns) in text that
     /// leaves the worker.
     async fn scrub(&self, text: &str) -> String;
@@ -385,6 +420,15 @@ impl UpdateProbe for ClusterUpdateProbe<'_, '_> {
 
     fn rollback(&self, revision: u32) -> Result<()> {
         self.deploy.rollback_release(self.app, revision)
+    }
+
+    fn description(&self, revision: u32) -> Result<Option<String>> {
+        Ok(self
+            .deploy
+            .release_history(self.app)?
+            .into_iter()
+            .find(|r| r.revision == revision)
+            .map(|r| r.description))
     }
 }
 
@@ -455,6 +499,7 @@ impl AppManager {
         if custom_config.contains_key(QUEUED_INSTALL_KEY)
             || custom_config.contains_key(QUEUED_STORAGE_KEY)
             || custom_config.contains_key(AUTO_TARGET_KEY)
+            || custom_config.contains_key(ROLLBACK_PLAN_KEY)
         {
             return Err(AppError::BadRequest("Reserved install key".into()));
         }
@@ -490,15 +535,9 @@ impl AppManager {
                     app_name
                 )));
             }
+            drop(catalog);
             if operation == OP_UPDATE && !custom_config.contains_key(AUTO_TARGET_KEY) {
-                let version = match catalog.chart_version(app_name) {
-                    Some(version) => Some(version),
-                    None => app_state::Entity::find_by_id(app_name.to_string())
-                        .one(&self.db)
-                        .await?
-                        .and_then(|row| row.available_chart_version),
-                };
-                if let Some(version) = version {
+                if let Some(version) = self.update_target(app_name).await? {
                     custom_config.insert(AUTO_TARGET_KEY.into(), version);
                 }
             }
@@ -541,6 +580,50 @@ impl AppManager {
         Ok(inserted.into())
     }
 
+    /// Queue an update the person confirmed in the assistant for `target`.
+    /// The worker refuses to deploy if the chart moved or became a major.
+    pub async fn enqueue_confirmed_update(
+        &self,
+        app_name: &str,
+        target: &str,
+        actor: i64,
+    ) -> Result<AppOperationResponse> {
+        let config = HashMap::from([(AUTO_TARGET_KEY.to_string(), target.to_string())]);
+        self.persist_operation(app_name, OP_UPDATE, config, Some(actor), TRIGGER_ASSISTANT)
+            .await
+    }
+
+    /// Queue a rollback the person confirmed: exactly `plan`, or nothing.
+    pub async fn enqueue_rollback(
+        &self,
+        app_name: &str,
+        plan: &RollbackPlan,
+        actor: i64,
+    ) -> Result<AppOperationResponse> {
+        let config = HashMap::from([(ROLLBACK_PLAN_KEY.to_string(), serde_json::to_string(plan)?)]);
+        self.persist_operation(
+            app_name,
+            OP_ROLLBACK,
+            config,
+            Some(actor),
+            TRIGGER_ASSISTANT,
+        )
+        .await
+    }
+
+    /// The chart version a manual update of `app_name` deploys: the chart on
+    /// disk, or else the last known available version.
+    pub async fn update_target(&self, app_name: &str) -> Result<Option<String>> {
+        let on_disk = self.catalog.read().await.chart_version(app_name);
+        Ok(match on_disk {
+            Some(version) => Some(version),
+            None => app_state::Entity::find_by_id(app_name.to_string())
+                .one(&self.db)
+                .await?
+                .and_then(|row| row.available_chart_version),
+        })
+    }
+
     pub async fn enqueue_gpu_operation(
         &self,
         app_name: &str,
@@ -554,6 +637,7 @@ impl AppManager {
         if custom_config.contains_key(QUEUED_INSTALL_KEY)
             || custom_config.contains_key(QUEUED_STORAGE_KEY)
             || custom_config.contains_key(AUTO_TARGET_KEY)
+            || custom_config.contains_key(ROLLBACK_PLAN_KEY)
         {
             return Err(AppError::BadRequest("Reserved install key".into()));
         }
@@ -939,6 +1023,18 @@ impl AppManager {
     }
 
     pub async fn retry_operation(&self, id: &str, actor_id: i64) -> Result<AppOperationResponse> {
+        self.retry_operation_as(id, actor_id, None).await
+    }
+
+    /// Retry a failed operation. With `confirmed_target` (a retry confirmed in
+    /// the assistant) an update is pinned to that version and re-checked by the
+    /// worker like any assistant update.
+    pub async fn retry_operation_as(
+        &self,
+        id: &str,
+        actor_id: i64,
+        confirmed_target: Option<&str>,
+    ) -> Result<AppOperationResponse> {
         let transaction = self.db.begin().await?;
         let original = app_operation::Entity::find_by_id(id)
             .one(&transaction)
@@ -1100,10 +1196,24 @@ impl AppManager {
             stop_requested: Set(false),
             message: Set(Some(format!("Retry of {id}"))),
             error: Set(None),
-            custom_config: Set(promoted_config.or_else(|| original.custom_config.clone())),
+            custom_config: Set(match confirmed_target {
+                Some(target) if original.operation == OP_UPDATE => {
+                    let mut pinned = config.clone();
+                    pinned.insert(AUTO_TARGET_KEY.into(), target.to_string());
+                    Some(serde_json::to_string(&pinned)?)
+                }
+                _ => promoted_config.or_else(|| original.custom_config.clone()),
+            }),
             attempts: Set(0),
             created_by: Set(Some(actor_id)),
-            trigger: Set(Some("manual".to_string())),
+            trigger: Set(Some(
+                if confirmed_target.is_some() {
+                    TRIGGER_ASSISTANT
+                } else {
+                    "manual"
+                }
+                .to_string(),
+            )),
             diagnostics: Set(None),
             created_at: Set(now),
             started_at: Set(None),
@@ -1495,6 +1605,15 @@ impl AppManager {
                         self.notify_update(&operation, &AuditAction::AppUpdateFailed, &details)
                             .await;
                     }
+                    if won && operation.operation == OP_ROLLBACK {
+                        let details = format!(
+                            "app={}: {}",
+                            operation.app_name,
+                            update_diagnostics::scrub_inline(first_line(&error))
+                        );
+                        self.notify_update(&operation, &AuditAction::AppRollbackFailed, &details)
+                            .await;
+                    }
                 }
             }
         }
@@ -1710,6 +1829,11 @@ impl AppManager {
                 self.restart_app(client, &operation.app_name).await?;
                 Ok(format!("Restarted {}", operation.app_name).into())
             }
+            OP_ROLLBACK => {
+                let manager = DeploymentManager::new(client, &catalog);
+                self.execute_rollback(operation, client, &manager, stop)
+                    .await
+            }
             _ => Err(AppError::BadRequest(format!(
                 "Unsupported operation '{}'",
                 operation.operation
@@ -1757,6 +1881,42 @@ impl AppManager {
         }
     }
 
+    /// An update confirmed in the assistant only deploys the version on the
+    /// card: the chart on disk must still be `target`, and not a major.
+    pub(super) async fn guard_confirmed_target(
+        &self,
+        operation: &app_operation::Model,
+        target: Option<&str>,
+        current: Option<&str>,
+    ) -> Result<()> {
+        let installed = app_state::Entity::find_by_id(operation.app_name.clone())
+            .one(&self.db)
+            .await?
+            .and_then(|row| row.installed_chart_version);
+        let kind = match (target, installed.as_deref()) {
+            (Some(target), Some(installed)) => Some(update_kind(installed, target)),
+            _ => None,
+        };
+        let allowed = matches!(
+            kind,
+            Some(UpdateKind::Revision | UpdateKind::Patch | UpdateKind::Minor)
+        );
+        if target.is_some() && target == current && allowed {
+            return Ok(());
+        }
+        Err(AppError::Conflict(format!(
+            "{CONFIRMED_TARGET_CHANGED} (confirmed {}, the chart is now {}{}); nothing was \
+             deployed. Ask the assistant again or update from the app page.",
+            target.unwrap_or("unknown"),
+            current.unwrap_or("unavailable"),
+            if kind == Some(UpdateKind::Major) {
+                ", a major update"
+            } else {
+                ""
+            }
+        )))
+    }
+
     async fn execute_install_or_update(
         &self,
         operation: &app_operation::Model,
@@ -1768,13 +1928,23 @@ impl AppManager {
         // with defaults (which can reset a queued GPU or other chart settings).
         let mut custom_config = parse_queued_config(operation.custom_config.as_deref())?;
         let queued_target = custom_config.remove(AUTO_TARGET_KEY);
-        if operation.operation == OP_UPDATE && operation.trigger.as_deref() == Some("auto") {
-            self.guard_auto_target(
-                operation,
-                queued_target.as_deref(),
-                catalog.chart_version(&operation.app_name).as_deref(),
-            )
-            .await?;
+        if operation.operation == OP_UPDATE {
+            let current = catalog.chart_version(&operation.app_name);
+            match operation.trigger.as_deref() {
+                Some("auto") => {
+                    self.guard_auto_target(operation, queued_target.as_deref(), current.as_deref())
+                        .await?
+                }
+                Some(TRIGGER_ASSISTANT) => {
+                    self.guard_confirmed_target(
+                        operation,
+                        queued_target.as_deref(),
+                        current.as_deref(),
+                    )
+                    .await?
+                }
+                _ => {}
+            }
         }
         let gpu: Option<Option<GpuSelection>> = custom_config
             .remove(QUEUED_GPU_KEY)
@@ -2199,6 +2369,86 @@ impl AppManager {
         compose_diagnostics(&scrubbed, captured)
     }
 
+    /// Roll back exactly as confirmed (see [`AppManager::roll_back`]).
+    async fn execute_rollback(
+        &self,
+        operation: &app_operation::Model,
+        client: &K8sClient,
+        deploy: &DeploymentManager<'_>,
+        stop: &CancellationToken,
+    ) -> Result<OperationOutput> {
+        let plan =
+            RollbackPlan::from_config(operation.custom_config.as_deref()).ok_or_else(|| {
+                AppError::BadRequest("This rollback has no confirmed target revision".into())
+            })?;
+        let probe = ClusterUpdateProbe::new(client, deploy, &operation.app_name);
+        self.roll_back(&probe, &operation.app_name, &plan, stop)
+            .await
+    }
+
+    /// Restore `plan.to_revision`, but only while the live revision is still
+    /// `plan.from_revision` (so a retry or resume after a rollback, or after
+    /// any other change, does nothing), then hold the app to the update
+    /// health check. Never touches PVCs or shared data.
+    async fn roll_back(
+        &self,
+        probe: &dyn UpdateProbe,
+        app: &str,
+        plan: &RollbackPlan,
+        stop: &CancellationToken,
+    ) -> Result<OperationOutput> {
+        check_stop(stop)?;
+        let live = ReleaseRevisions::from_history(&probe.history()?).deployed;
+        // A resume after the Helm step: Helm recorded the rollback as a new
+        // revision above the one it was confirmed from.
+        let helm_done = match live {
+            Some(revision) if revision > plan.from_revision => {
+                probe.description(revision)?.as_deref()
+                    == Some(format!("Rollback to {}", plan.to_revision).as_str())
+            }
+            _ => false,
+        };
+        if !helm_done && live == Some(plan.to_revision) {
+            return Err(AppError::Conflict(format!(
+                "{app} already runs Helm revision {}; nothing was rolled back",
+                plan.to_revision
+            )));
+        }
+        if !helm_done && live != Some(plan.from_revision) {
+            return Err(AppError::Conflict(format!(
+                "{app}'s release changed since this rollback was confirmed (live revision {}, \
+                 expected {}); nothing was rolled back",
+                live.map_or_else(|| "unknown".to_string(), |r| r.to_string()),
+                plan.from_revision
+            )));
+        }
+        let before = probe.restart_snapshot().await?;
+        check_stop(stop)?;
+        if !helm_done {
+            probe.rollback(plan.to_revision)?;
+        }
+        let to = plan
+            .to_version
+            .as_deref()
+            .map(|v| format!(" ({v})"))
+            .unwrap_or_default();
+        match self
+            .verify_update(probe, &before, self.health_timeout().await)
+            .await
+        {
+            HealthVerdict::Healthy => Ok(format!(
+                "Rolled back {app} to Helm revision {}{to}",
+                plan.to_revision
+            )
+            .into()),
+            HealthVerdict::Unhealthy(reason) => Err(AppError::Internal(format!(
+                "Rolled back {app} to Helm revision {}{to}, but it is not healthy: {}",
+                plan.to_revision,
+                probe.scrub(&reason).await
+            ))),
+        }
+    }
+
     async fn restart_app(&self, client: &K8sClient, app_name: &str) -> Result<()> {
         let pods = client.get_pod_status(app_name, Some(app_name)).await?;
         let pod_api: Api<Pod> = Api::namespaced(client.client().clone(), app_name);
@@ -2492,6 +2742,8 @@ impl AppManager {
             "app_updated" => AuditAction::AppUpdated,
             "app_update_failed" => AuditAction::AppUpdateFailed,
             "app_update_rollback_failed" => AuditAction::AppUpdateRollbackFailed,
+            "app_rolled_back" => AuditAction::AppRolledBack,
+            "app_rollback_failed" => AuditAction::AppRollbackFailed,
             _ => return Err(AppError::Internal("Invalid app audit outbox action".into())),
         };
         log_on_transaction(
@@ -2861,6 +3113,8 @@ fn terminal_action(operation: &str, success: bool) -> AuditAction {
         OP_RESTART => AuditAction::AppRestarted,
         OP_UPDATE if success => AuditAction::AppUpdated,
         OP_UPDATE => AuditAction::AppUpdateFailed,
+        OP_ROLLBACK if success => AuditAction::AppRolledBack,
+        OP_ROLLBACK => AuditAction::AppRollbackFailed,
         _ => AuditAction::AppConfigured,
     }
 }
@@ -2969,9 +3223,46 @@ async fn log_control<C: ConnectionTrait>(
     Ok(())
 }
 
+/// The permission needed to control (pause, resume, cancel, retry) an
+/// operation of this type: the permission of the original action.
+pub fn operation_control_permission(operation: &str) -> Result<&'static str> {
+    Ok(match operation {
+        OP_DELETE => "apps.delete",
+        OP_RESTART => "apps.restart",
+        OP_INSTALL | OP_UPDATE | OP_ROLLBACK => "apps.install",
+        _ => return Err(AppError::BadRequest("Unsupported operation type".into())),
+    })
+}
+
+/// Whether a user with `permissions` may retry `operation`: the permission of
+/// the original action, and never a delete of a system app. Shared by the
+/// retry endpoint and the assistant.
+pub async fn check_retry_allowed(
+    catalog: &SharedCatalog,
+    operation: &AppOperationResponse,
+    permissions: &[String],
+) -> Result<()> {
+    let needed = operation_control_permission(&operation.operation)?;
+    if !permissions.iter().any(|p| p == needed) {
+        return Err(AppError::Forbidden(format!(
+            "Permission denied: {needed} required"
+        )));
+    }
+    if operation.operation == OP_DELETE
+        && catalog
+            .read()
+            .await
+            .get_app(&operation.app_name)
+            .is_some_and(|app| app.is_system)
+    {
+        return Err(AppError::Forbidden("Cannot delete system app".into()));
+    }
+    Ok(())
+}
+
 fn validate_operation(operation: &str) -> Result<()> {
     match operation {
-        OP_INSTALL | OP_UPDATE | OP_DELETE | OP_RESTART => Ok(()),
+        OP_INSTALL | OP_UPDATE | OP_DELETE | OP_RESTART | OP_ROLLBACK => Ok(()),
         _ => Err(AppError::BadRequest(format!(
             "Unsupported operation '{}'",
             operation

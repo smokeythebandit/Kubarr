@@ -89,6 +89,7 @@ async fn harness_with(
     state.assistant = AssistantDeps {
         key_store: store.clone(),
         client: MessagesClient::new(base_url.unwrap_or("http://127.0.0.1:9")),
+        releases: std::sync::Arc::new(kubarr::services::assistant::actions::HelmReleaseHistory),
     };
     let cookie = login(create_router(state.clone()), &name, &password).await;
     Harness {

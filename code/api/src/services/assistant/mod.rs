@@ -5,6 +5,7 @@
 //! builds on these; the auto-update AI recovery shares the same key and
 //! budget.
 
+pub mod actions;
 pub mod budget;
 pub mod chat;
 pub mod client;
@@ -34,6 +35,8 @@ pub use settings::{AssistantSettings, Effort};
 pub struct AssistantDeps {
     pub key_store: Arc<dyn KeyStore>,
     pub client: MessagesClient,
+    /// Helm release history for rollbacks.
+    pub releases: Arc<dyn actions::ReleaseHistory>,
 }
 
 impl AssistantDeps {
@@ -42,6 +45,7 @@ impl AssistantDeps {
         Self {
             key_store: Arc::new(SecretKeyStore::from_env(k8s)),
             client: MessagesClient::anthropic(),
+            releases: Arc::new(actions::HelmReleaseHistory),
         }
     }
 }

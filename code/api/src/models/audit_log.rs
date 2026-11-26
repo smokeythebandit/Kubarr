@@ -68,6 +68,10 @@ pub enum AuditAction {
     AppUpdated,
     AppUpdateFailed,
     AppUpdateRollbackFailed,
+    /// A requested rollback finished and the app is healthy.
+    AppRolledBack,
+    /// A requested rollback failed or left the app unhealthy.
+    AppRollbackFailed,
 
     // VPN management
     VpnProviderCreated,
@@ -85,6 +89,12 @@ pub enum AuditAction {
     AssistantBudgetWarning,
     /// The assistant ran a read tool for a user (not notifiable).
     AssistantToolCall,
+    /// The assistant proposed an action (not notifiable).
+    AssistantActionProposed,
+    /// The person clicked Run on a proposed action (not notifiable).
+    AssistantActionConfirmed,
+    /// The person cancelled a proposed action (not notifiable).
+    AssistantActionCancelled,
 
     // Notification destinations
     NotificationVerificationSent,
@@ -118,7 +128,12 @@ impl AuditAction {
             | AuditAction::AppAccessed
             | AuditAction::NotificationVerificationSent
             | AuditAction::NotificationDestinationVerified
-            | AuditAction::AssistantToolCall => false,
+            | AuditAction::AssistantToolCall
+            | AuditAction::AssistantActionProposed
+            | AuditAction::AssistantActionConfirmed
+            | AuditAction::AssistantActionCancelled
+            // The person asked for it and is watching the card.
+            | AuditAction::AppRolledBack => false,
             AuditAction::Login
             | AuditAction::LoginFailed
             | AuditAction::Logout
@@ -147,6 +162,7 @@ impl AuditAction {
             | AuditAction::AppUpdated
             | AuditAction::AppUpdateFailed
             | AuditAction::AppUpdateRollbackFailed
+            | AuditAction::AppRollbackFailed
             | AuditAction::VpnProviderCreated
             | AuditAction::VpnProviderUpdated
             | AuditAction::VpnProviderDeleted
@@ -199,6 +215,8 @@ impl std::fmt::Display for AuditAction {
             AuditAction::AppUpdated => write!(f, "app_updated"),
             AuditAction::AppUpdateFailed => write!(f, "app_update_failed"),
             AuditAction::AppUpdateRollbackFailed => write!(f, "app_update_rollback_failed"),
+            AuditAction::AppRolledBack => write!(f, "app_rolled_back"),
+            AuditAction::AppRollbackFailed => write!(f, "app_rollback_failed"),
             AuditAction::VpnProviderCreated => write!(f, "vpn_provider_created"),
             AuditAction::VpnProviderUpdated => write!(f, "vpn_provider_updated"),
             AuditAction::VpnProviderDeleted => write!(f, "vpn_provider_deleted"),
@@ -210,6 +228,9 @@ impl std::fmt::Display for AuditAction {
             AuditAction::InviteDeleted => write!(f, "invite_deleted"),
             AuditAction::AssistantBudgetWarning => write!(f, "assistant_budget_warning"),
             AuditAction::AssistantToolCall => write!(f, "assistant_tool_call"),
+            AuditAction::AssistantActionProposed => write!(f, "assistant_action_proposed"),
+            AuditAction::AssistantActionConfirmed => write!(f, "assistant_action_confirmed"),
+            AuditAction::AssistantActionCancelled => write!(f, "assistant_action_cancelled"),
             AuditAction::NotificationVerificationSent => {
                 write!(f, "notification_verification_sent")
             }
@@ -337,6 +358,18 @@ mod tests {
             AuditAction::AssistantToolCall.to_string(),
             "assistant_tool_call"
         );
+        assert_eq!(
+            AuditAction::AssistantActionProposed.to_string(),
+            "assistant_action_proposed"
+        );
+        assert_eq!(
+            AuditAction::AssistantActionConfirmed.to_string(),
+            "assistant_action_confirmed"
+        );
+        assert_eq!(
+            AuditAction::AssistantActionCancelled.to_string(),
+            "assistant_action_cancelled"
+        );
         assert_eq!(AuditAction::InviteDeleted.to_string(), "invite_deleted");
         assert_eq!(AuditAction::ApiAccess.to_string(), "api_access");
     }
@@ -362,14 +395,19 @@ mod tests {
             "notification_verification_sent",
             "notification_destination_verified",
             "assistant_tool_call",
+            "assistant_action_proposed",
+            "assistant_action_confirmed",
+            "assistant_action_cancelled",
+            "app_rolled_back",
         ] {
             assert!(
                 !names.iter().any(|n| n == noise),
                 "{noise} must be excluded"
             );
         }
-        assert_eq!(names.len(), AuditAction::all().count() - 6);
+        assert_eq!(names.len(), AuditAction::all().count() - 10);
         assert!(names.iter().any(|n| n == "assistant_budget_warning"));
+        assert!(names.iter().any(|n| n == "app_rollback_failed"));
     }
 
     // -------------------------------------------------------------------------

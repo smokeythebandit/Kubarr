@@ -755,6 +755,8 @@ fn format_event_title(action: &AuditAction) -> String {
         AuditAction::AppUpdated => "App Updated".to_string(),
         AuditAction::AppUpdateFailed => "App Update Failed".to_string(),
         AuditAction::AppUpdateRollbackFailed => "App Update Rollback Failed".to_string(),
+        AuditAction::AppRolledBack => "App Rolled Back".to_string(),
+        AuditAction::AppRollbackFailed => "App Rollback Failed".to_string(),
         // VPN management
         AuditAction::VpnProviderCreated => "VPN Provider Created".to_string(),
         AuditAction::VpnProviderUpdated => "VPN Provider Updated".to_string(),
@@ -768,6 +770,9 @@ fn format_event_title(action: &AuditAction) -> String {
         AuditAction::InviteDeleted => "Invite Link Deleted".to_string(),
         AuditAction::AssistantBudgetWarning => "Assistant Budget Almost Used".to_string(),
         AuditAction::AssistantToolCall => "Assistant Looked Something Up".to_string(),
+        AuditAction::AssistantActionProposed => "Assistant Proposed an Action".to_string(),
+        AuditAction::AssistantActionConfirmed => "Assistant Action Run".to_string(),
+        AuditAction::AssistantActionCancelled => "Assistant Action Cancelled".to_string(),
         // Notification destinations
         AuditAction::NotificationVerificationSent => "Verification Code Sent".to_string(),
         AuditAction::NotificationDestinationVerified => {
@@ -958,6 +963,20 @@ fn format_event_body(
                 format!("App update failed and the rollback also failed: {}", detail)
             }
         }
+        AuditAction::AppRolledBack => {
+            if detail.is_empty() {
+                "App rolled back".to_string()
+            } else {
+                format!("App rolled back: {}", detail)
+            }
+        }
+        AuditAction::AppRollbackFailed => {
+            if detail.is_empty() {
+                "App rollback failed".to_string()
+            } else {
+                format!("App rollback failed: {}", detail)
+            }
+        }
         // VPN management: details may contain provider credentials, so never include them.
         AuditAction::VpnProviderCreated => format!("User {} created a VPN provider", user),
         AuditAction::VpnProviderUpdated => format!("User {} changed VPN provider settings", user),
@@ -998,6 +1017,27 @@ fn format_event_body(
                 format!("The AI assistant looked something up for {user}")
             } else {
                 format!("The AI assistant looked something up for {user}: {detail}")
+            }
+        }
+        AuditAction::AssistantActionProposed => {
+            if detail.is_empty() {
+                format!("The AI assistant proposed an action to {user}")
+            } else {
+                format!("The AI assistant proposed an action to {user}: {detail}")
+            }
+        }
+        AuditAction::AssistantActionConfirmed => {
+            if detail.is_empty() {
+                format!("{user} ran an action the AI assistant proposed")
+            } else {
+                format!("{user} ran an action the AI assistant proposed: {detail}")
+            }
+        }
+        AuditAction::AssistantActionCancelled => {
+            if detail.is_empty() {
+                format!("{user} cancelled an action the AI assistant proposed")
+            } else {
+                format!("{user} cancelled an action the AI assistant proposed: {detail}")
             }
         }
         AuditAction::AssistantBudgetWarning => {

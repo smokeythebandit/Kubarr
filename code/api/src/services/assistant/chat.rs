@@ -5,7 +5,7 @@
 //! context message. While the model calls tools, Kubarr runs them with the
 //! user's permissions and sends the results back, until the model ends its
 //! turn or a limit is reached. The UI receives server-sent events:
-//! `status`, `text_delta`, `sources`, `done` and `error`.
+//! `status`, `text_delta`, `action_card`, `sources`, `done` and `error`.
 //!
 //! The budget is checked before, and usage recorded after, every API call.
 //! The partial answer is saved as it streams; if the browser goes away the
@@ -17,6 +17,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+use super::actions::ActionCard;
 use super::client::{ClientError, Message, MessagesRequest, OutputConfig};
 use super::conversations::{self, ChatContext, MessageContent};
 use super::pricing::AssistantModel;
@@ -53,6 +54,8 @@ pub enum ChatEvent {
     Status(String),
     TextDelta(String),
     Sources(Vec<Source>),
+    /// A proposed action waiting for Run or Cancel.
+    ActionCard(Box<ActionCard>),
     Done(i64),
     Error(String),
 }
@@ -63,6 +66,7 @@ impl ChatEvent {
             ChatEvent::Status(_) => "status",
             ChatEvent::TextDelta(_) => "text_delta",
             ChatEvent::Sources(_) => "sources",
+            ChatEvent::ActionCard(_) => "action_card",
             ChatEvent::Done(_) => "done",
             ChatEvent::Error(_) => "error",
         }
@@ -72,6 +76,7 @@ impl ChatEvent {
         match self {
             ChatEvent::Status(text) | ChatEvent::TextDelta(text) => json!({ "text": text }),
             ChatEvent::Sources(items) => json!({ "items": items }),
+            ChatEvent::ActionCard(card) => serde_json::to_value(card).unwrap_or(Value::Null),
             ChatEvent::Done(id) => json!({ "message_id": id }),
             ChatEvent::Error(message) => json!({ "message": message }),
         }
@@ -663,6 +668,11 @@ async fn run_loop<W: AsyncWrite + Unpin>(
                     }
                     let outcome = tools::execute(&turn.ctx, &call.name, call.input.as_ref()).await;
                     answer.push_source(outcome.source.clone());
+                    if let Some(card) = outcome.card.clone() {
+                        if !sink.send(ChatEvent::ActionCard(Box::new(card))).await {
+                            return TurnEnd::Interrupted;
+                        }
+                    }
                     results.push(outcome.result_block(&call.id));
                     // Heartbeat: this replica is still working on the answer.
                     flush(turn, answer).await;

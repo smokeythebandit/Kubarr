@@ -20,6 +20,7 @@ use crate::middleware::permissions::{
     AssistantUse, Authenticated, Authorized, Permission, SettingsManage, SettingsView,
 };
 use crate::models::audit_log::{AuditAction, ResourceType};
+use crate::services::assistant::actions::{self, RunResult};
 use crate::services::assistant::chat::{run_turn, EventSink, Turn};
 use crate::services::assistant::cluster;
 use crate::services::assistant::conversations::{
@@ -48,6 +49,8 @@ pub fn assistant_routes(state: AppState) -> Router {
             get(get_conversation).delete(delete_conversation),
         )
         .route("/conversations/{id}/messages", post(post_message))
+        .route("/actions/{id}/run", post(run_action))
+        .route("/actions/{id}/cancel", post(cancel_action))
         .with_state(state)
 }
 
@@ -424,7 +427,9 @@ pub async fn delete_conversation(
 /// Ask a question; the answer streams back as server-sent events
 ///
 /// Events: `status` `{text}` while tools run, `text_delta` `{text}`,
-/// `sources` `{items}`, then `done` `{message_id}` or `error` `{message}`.
+/// `action_card` `{id, kind, app, summary, status, expires_at, ...}` when the
+/// assistant proposes an action, `sources` `{items}`, then `done`
+/// `{message_id}` or `error` `{message}`.
 #[utoipa::path(
     post,
     path = "/api/assistant/conversations/{id}/messages",
@@ -504,6 +509,7 @@ pub async fn post_message(
         conversation_id: conversation.id.clone(),
         monitoring: Monitoring::detect(&db).await,
         cluster: false,
+        message_id: Some(answer_id),
     };
     ctx.cluster = cluster::available(&ctx).await;
     let turn = Turn {
@@ -528,4 +534,55 @@ pub async fn post_message(
         .header("x-accel-buffering", "no")
         .body(Body::from_stream(ReaderStream::new(reader)))
         .map_err(|e| AppError::Internal(format!("Could not start the stream: {e}")))
+}
+
+/// Run an action the assistant proposed (the caller's own, once, before it expires)
+///
+/// This is the only way a proposed action is carried out. Permissions and
+/// the app rules are checked again now; the work goes through Kubarr's
+/// operation queue. The outcome is added to the conversation.
+#[utoipa::path(
+    post,
+    path = "/api/assistant/actions/{id}/run",
+    tag = "Assistant",
+    params(("id" = String, Path, description = "Action id")),
+    responses(
+        (status = 200, body = RunResult),
+        (status = 403, description = "No longer permitted (the action is marked failed)"),
+        (status = 404, description = "No such action of the caller"),
+        (status = 409, description = "Already run or cancelled, expired, or the app changed")
+    )
+)]
+pub async fn run_action(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<String>,
+) -> Result<Json<RunResult>> {
+    require_use(&auth)?;
+    let db = state.get_db().await?;
+    let result = actions::run(&state, &db, auth.user_id(), &auth.user().username, &id).await?;
+    Ok(Json(result))
+}
+
+/// Cancel an action the assistant proposed (the caller's own, while pending)
+#[utoipa::path(
+    post,
+    path = "/api/assistant/actions/{id}/cancel",
+    tag = "Assistant",
+    params(("id" = String, Path, description = "Action id")),
+    responses(
+        (status = 204, description = "Cancelled"),
+        (status = 404, description = "No such action of the caller"),
+        (status = 409, description = "Already run, cancelled or expired")
+    )
+)]
+pub async fn cancel_action(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    require_use(&auth)?;
+    let db = state.get_db().await?;
+    actions::cancel(&state, &db, auth.user_id(), &auth.user().username, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

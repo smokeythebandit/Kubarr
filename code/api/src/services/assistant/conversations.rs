@@ -7,12 +7,15 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::actions::{cards_for_conversation, ActionCard};
 use super::tools::Source;
 use crate::error::{AppError, Result};
 use crate::models::assistant_message::{
     STATUS_COMPLETE, STATUS_ERROR, STATUS_INTERRUPTED, STATUS_STREAMING,
 };
-use crate::models::{assistant_conversation, assistant_message, assistant_request, user};
+use crate::models::{
+    assistant_conversation, assistant_message, assistant_pending_action, assistant_request, user,
+};
 
 /// Questions per user per [`RATE_WINDOW_MINUTES`].
 pub const RATE_LIMIT: u64 = 30;
@@ -165,6 +168,9 @@ pub struct ConversationDetail {
     #[serde(flatten)]
     pub conversation: ConversationSummary,
     pub messages: Vec<MessageView>,
+    /// Actions the assistant proposed, with their current status; each
+    /// names the answer (`message_id`) that proposed it.
+    pub actions: Vec<ActionCard>,
 }
 
 pub async fn list<C: ConnectionTrait>(db: &C, user_id: i64) -> Result<Vec<ConversationSummary>> {
@@ -250,15 +256,21 @@ pub async fn detail<C: ConnectionTrait>(
         .into_iter()
         .map(|m| MessageView::from_model(m, now))
         .collect();
+    let actions = cards_for_conversation(db, &conversation.id).await?;
     Ok(ConversationDetail {
         conversation: conversation.into(),
         messages,
+        actions,
     })
 }
 
 /// Delete a conversation and its messages.
 pub async fn delete(db: &DatabaseConnection, id: &str) -> Result<()> {
     let txn = db.begin().await?;
+    assistant_pending_action::Entity::delete_many()
+        .filter(assistant_pending_action::Column::ConversationId.eq(id))
+        .exec(&txn)
+        .await?;
     assistant_message::Entity::delete_many()
         .filter(assistant_message::Column::ConversationId.eq(id))
         .exec(&txn)
@@ -433,6 +445,10 @@ pub async fn delete_expired(
     let txn = db.begin().await?;
     let mut deleted = 0;
     for ids in expired.chunks(500) {
+        assistant_pending_action::Entity::delete_many()
+            .filter(assistant_pending_action::Column::ConversationId.is_in(ids.to_vec()))
+            .exec(&txn)
+            .await?;
         assistant_message::Entity::delete_many()
             .filter(assistant_message::Column::ConversationId.is_in(ids.to_vec()))
             .exec(&txn)

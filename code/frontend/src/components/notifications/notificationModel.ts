@@ -15,9 +15,18 @@ export const CATEGORY_LABELS: Record<NotificationCategory, string> = {
 
 export const CATEGORY_ORDER: NotificationCategory[] = ['updates', 'apps', 'security', 'system'];
 
-/** App update results: `app_updated`, `app_update_failed`, `app_update_rollback_failed`. */
+/**
+ * App update results: `app_updated`, `app_update_failed`, `app_update_rollback_failed`,
+ * and requested rollbacks (`app_rolled_back`, `app_rollback_failed`).
+ */
 export function isUpdateEvent(eventType: string | null | undefined): boolean {
-  return !!eventType && (eventType.startsWith('app_update') || eventType === 'app_updated');
+  return (
+    !!eventType &&
+    (eventType.startsWith('app_update') ||
+      eventType === 'app_updated' ||
+      eventType === 'app_rolled_back' ||
+      eventType === 'app_rollback_failed')
+  );
 }
 
 /**
@@ -85,6 +94,8 @@ export const EVENT_LABELS: Record<string, string> = {
   app_updated: 'App Updated',
   app_update_failed: 'App Update Failed',
   app_update_rollback_failed: 'App Update Rollback Failed',
+  app_rolled_back: 'App Rolled Back',
+  app_rollback_failed: 'App Rollback Failed',
   // System
   vpn_provider_created: 'VPN Provider Created',
   vpn_provider_updated: 'VPN Provider Updated',
