@@ -21,6 +21,7 @@ use crate::middleware::permissions::{
 };
 use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::services::assistant::chat::{run_turn, EventSink, Turn};
+use crate::services::assistant::cluster;
 use crate::services::assistant::conversations::{
     self, ChatContext, ConversationDetail, ConversationSummary,
 };
@@ -494,7 +495,7 @@ pub async fn post_message(
         .sanitized()
         .or(&stored.sanitized());
     let (question_id, answer_id) = conversations::start_turn(&db, &conversation, &question).await?;
-    let ctx = ToolContext {
+    let mut ctx = ToolContext {
         state: state.clone(),
         db: db.clone(),
         user_id: auth.user_id(),
@@ -502,7 +503,9 @@ pub async fn post_message(
         permissions: auth.permissions().to_vec(),
         conversation_id: conversation.id.clone(),
         monitoring: Monitoring::detect(&db).await,
+        cluster: false,
     };
+    ctx.cluster = cluster::available(&ctx).await;
     let turn = Turn {
         ctx,
         conversation,
