@@ -17,6 +17,7 @@ pub mod letsencrypt_profile;
 pub mod notification_channel;
 pub mod notification_event;
 pub mod notification_log;
+pub mod notification_outbox;
 pub mod notification_route;
 pub mod notification_verification;
 pub mod oauth_account;
@@ -33,6 +34,7 @@ pub mod user;
 pub mod user_notification;
 pub mod user_notification_pref;
 pub mod user_preferences;
+pub mod user_quiet_hours;
 pub mod user_role;
 pub mod vpn_provider;
 
@@ -57,6 +59,7 @@ pub mod prelude {
     pub use super::notification_channel::{self, Entity as NotificationChannel};
     pub use super::notification_event::{self, Entity as NotificationEvent};
     pub use super::notification_log::{self, Entity as NotificationLog};
+    pub use super::notification_outbox::{self, Entity as NotificationOutbox};
     pub use super::notification_route::{self, Entity as NotificationRoute};
     pub use super::notification_verification::{self, Entity as NotificationVerification};
     pub use super::oauth_account::{self, Entity as OauthAccount};
@@ -73,6 +76,7 @@ pub mod prelude {
     pub use super::user_notification::{self, Entity as UserNotification};
     pub use super::user_notification_pref::{self, Entity as UserNotificationPref};
     pub use super::user_preferences::{self, Entity as UserPreferences};
+    pub use super::user_quiet_hours::{self, Entity as UserQuietHours};
     pub use super::user_role::{self, Entity as UserRole};
     pub use super::vpn_provider::{self, Entity as VpnProvider};
 }

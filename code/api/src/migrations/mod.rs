@@ -38,6 +38,7 @@ mod m20260226_000038_notification_routes;
 mod m20260226_000039_assistant;
 mod m20260226_000040_assistant_chat;
 mod m20260226_000041_assistant_actions;
+mod m20260226_000042_notification_quiet_hours;
 
 pub struct Migrator;
 
@@ -83,6 +84,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260226_000039_assistant::Migration),
             Box::new(m20260226_000040_assistant_chat::Migration),
             Box::new(m20260226_000041_assistant_actions::Migration),
+            Box::new(m20260226_000042_notification_quiet_hours::Migration),
         ]
     }
 }

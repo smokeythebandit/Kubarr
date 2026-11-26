@@ -20,6 +20,7 @@ use crate::models::{
 use crate::services::notification::{verification, ChannelType};
 use crate::state::AppState;
 
+pub(crate) mod quiet_hours;
 pub(crate) mod routing;
 
 pub fn notifications_routes(state: AppState) -> Router {
@@ -41,6 +42,11 @@ pub fn notifications_routes(state: AppState) -> Router {
         // Admin: per-event channel routing
         .route("/routes", get(routing::list_routes))
         .route("/routes/{event_type}", put(routing::update_route))
+        // User: own quiet hours
+        .route(
+            "/quiet-hours",
+            get(quiet_hours::get_quiet_hours).put(quiet_hours::update_quiet_hours),
+        )
         // User preferences
         .route("/preferences", get(get_preferences))
         .route("/preferences/{channel_type}", put(update_preference))

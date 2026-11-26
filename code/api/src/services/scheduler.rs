@@ -11,6 +11,7 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
 use super::audit::{clear_old_logs_with, log_on_transaction};
+use super::notification::{quiet_hours::QuietHoursFlushTask, NotificationService};
 use crate::models::audit_log::{AuditAction, ResourceType};
 
 const DEFAULT_AUDIT_RETENTION_DAYS: i64 = 90;
@@ -83,9 +84,14 @@ pub trait PeriodicTask: Send + Sync {
     async fn run(&self, db: &DatabaseConnection) -> anyhow::Result<()>;
 }
 
-/// Start the leader-only periodic tasks (session cleanup, audit retention).
+/// Start the leader-only periodic tasks (session cleanup, audit retention,
+/// delivery of notifications held for quiet hours through `notifications`).
 /// Chart sync is not here: each process refreshes its own catalog.
-pub fn start_scheduler(db: Arc<DatabaseConnection>, cancel: CancellationToken) {
+pub fn start_scheduler(
+    db: Arc<DatabaseConnection>,
+    notifications: NotificationService,
+    cancel: CancellationToken,
+) {
     let days = match std::env::var("KUBARR_AUDIT_RETENTION_DAYS") {
         Ok(value) => parse_audit_retention_days(Some(&value)),
         Err(std::env::VarError::NotPresent) => parse_audit_retention_days(None),
@@ -98,6 +104,7 @@ pub fn start_scheduler(db: Arc<DatabaseConnection>, cancel: CancellationToken) {
         Box::new(SessionCleanupTask),
         Box::new(AuditRetentionTask { days }),
         Box::new(super::assistant::retention::AssistantRetentionTask),
+        Box::new(QuietHoursFlushTask::new(notifications)),
     ];
 
     for task in tasks {
@@ -266,7 +273,11 @@ mod tests {
         let db_arc = Arc::new(db);
 
         // Just verify start_scheduler doesn't panic; tasks are spawned in background
-        start_scheduler(db_arc, tokio_util::sync::CancellationToken::new());
+        start_scheduler(
+            db_arc,
+            NotificationService::new(),
+            tokio_util::sync::CancellationToken::new(),
+        );
         // Yield so spawned tasks get a chance to start (but not to tick)
         tokio::task::yield_now().await;
     }

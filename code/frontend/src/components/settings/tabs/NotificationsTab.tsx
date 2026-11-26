@@ -2,6 +2,8 @@ import { useRef, useState, type Dispatch, type KeyboardEvent, type ReactNode, ty
 import { Bell } from 'lucide-react';
 import { ROUTE_CHANNELS, type NotificationChannel, type NotificationEvent, type NotificationLog, type NotificationRoute, type RouteChannel } from '../../../api/notifications';
 import { CountBadge } from '../../notifications/NotificationParts';
+import { QuietHoursForm } from '../../notifications/QuietHoursSection';
+import { QUIET_HOURS_DESCRIPTION } from '../../notifications/quietHoursModel';
 import { CATEGORY_LABELS, CATEGORY_ORDER, categoryOf, eventLabel } from '../../notifications/notificationModel';
 import { channelStatus, CHANNEL_NAMES, unresolvedFailures, type ChannelStatus, type ChannelTestResult } from './notificationChannelStatus';
 import { SettingsTabLayout } from './SettingsTabLayout';
@@ -40,7 +42,7 @@ type NotificationsTabProps = {
   testResults?: Record<string, ChannelTestResult>;
 };
 
-type TabId = 'channels' | 'rules' | 'history';
+type TabId = 'channels' | 'rules' | 'quiet' | 'history';
 
 const STATUS_STYLE: Record<ChannelStatus, { label: string; className: string }> = {
   enabled: { label: 'Enabled', className: 'text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-900/40' },
@@ -121,7 +123,7 @@ export function NotificationsTab({
   testResults = {},
 }: NotificationsTabProps) {
   const [tab, setTab] = useState<TabId>('channels');
-  const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({ channels: null, rules: null, history: null });
+  const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({ channels: null, rules: null, quiet: null, history: null });
 
   const statuses = notificationChannels.map((c) => ({
     channel: c,
@@ -143,6 +145,7 @@ export function NotificationsTab({
   const tabs: { id: TabId; label: string; badge: number; badgeTitle: string }[] = [
     { id: 'channels', label: 'Channels', badge: problems, badgeTitle: `${problems} with a problem` },
     { id: 'rules', label: 'What you get', badge: routeCount, badgeTitle: `${routeCount} routes to Telegram, email or SMS` },
+    { id: 'quiet', label: 'Quiet hours', badge: 0, badgeTitle: '' },
     ...(canViewHistory ? [{ id: 'history' as TabId, label: 'Delivery history', badge: failed, badgeTitle: `${failed} failed since the last successful delivery` }] : []),
   ];
 
@@ -412,6 +415,21 @@ export function NotificationsTab({
                   </tbody>
                 </table>
               </div>
+            </section>
+          )}
+
+          {tab === 'quiet' && (
+            <section
+              role="tabpanel"
+              id="notif-panel-quiet"
+              aria-labelledby="notif-tab-quiet"
+              className="grid gap-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5"
+            >
+              <div>
+                <h4 className="text-lg font-semibold text-gray-900 dark:text-white">Quiet hours</h4>
+                <p className="text-sm text-gray-500 dark:text-gray-400">{QUIET_HOURS_DESCRIPTION} These are your own quiet hours; everyone sets theirs in Account.</p>
+              </div>
+              <QuietHoursForm />
             </section>
           )}
 

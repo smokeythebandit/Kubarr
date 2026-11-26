@@ -9,6 +9,7 @@ import { oauthApi, type LinkedAccount, type AvailableProvider } from '../api/oau
 import { getSessions, revokeSession, type SessionInfo } from '../api/auth'
 import { auditApi, type AuditLog } from '../api/audit'
 import NotificationDestinations from '../components/notifications/NotificationDestinations'
+import QuietHoursSection from '../components/notifications/QuietHoursSection'
 
 export default function AccountPage() {
   const { user, isAdmin, checkAuth, logout } = useAuth()
@@ -810,6 +811,9 @@ export default function AccountPage() {
 
         {/* Notification destinations */}
         <NotificationDestinations />
+
+        {/* Quiet hours */}
+        <QuietHoursSection />
 
         {/* Active Sessions Panel */}
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">

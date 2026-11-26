@@ -43,6 +43,10 @@ export const test = base.extend<{ api: MockApi }>({
     api.get('/api/apps/states', []);
     api.get('/api/monitoring/vm/available', { available: false });
     api.get('/api/notifications/inbox/count', { count: 0 });
+    // Own quiet hours (Account page and Settings → Notifications): never saved.
+    api.get('/api/notifications/quiet-hours', {
+      enabled: false, from_minute: 1380, to_minute: 420, timezone: 'UTC', critical_bypass: true, configured: false,
+    });
     // The assistant is unconfigured by default, so its button stays hidden.
     api.get('/api/assistant/status', {
       configured: false, key_error: false, enabled: true, model: 'claude-opus-5-5', effort: 'low',

@@ -53,6 +53,19 @@ export type RouteChannel = 'telegram' | 'email' | 'messagebird';
 
 export const ROUTE_CHANNELS: RouteChannel[] = ['telegram', 'email', 'messagebird'];
 
+/** The signed-in user's quiet hours. Minutes are after local midnight. */
+export interface QuietHours {
+  enabled: boolean;
+  from_minute: number;
+  to_minute: number;
+  /** IANA time zone, e.g. Europe/Amsterdam. */
+  timezone: string;
+  /** Critical notifications are sent straight away during quiet hours. */
+  critical_bypass: boolean;
+  /** False until the user saves; the values are then server defaults. */
+  configured: boolean;
+}
+
 /** Which external channels an event is delivered to. */
 export interface NotificationRoute {
   event_type: string;
@@ -239,6 +252,21 @@ export const notificationsApi = {
   // Confirm the code; resolves with the now-verified preference, 400 otherwise.
   confirmVerification: async (channelType: string, code: string): Promise<UserNotificationPref> => {
     const response = await apiClient.post(`/notifications/preferences/${channelType}/verify/confirm`, { code });
+    return response.data;
+  },
+
+  // ============================================================================
+  // Quiet hours (own user)
+  // ============================================================================
+
+  getQuietHours: async (): Promise<QuietHours> => {
+    const response = await apiClient.get('/notifications/quiet-hours');
+    return response.data;
+  },
+
+  // Rejects with 400 for equal start/end times or an unknown time zone.
+  updateQuietHours: async (data: Omit<QuietHours, 'configured'>): Promise<QuietHours> => {
+    const response = await apiClient.put('/notifications/quiet-hours', data);
     return response.data;
   },
 

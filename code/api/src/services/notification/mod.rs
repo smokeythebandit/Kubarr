@@ -1,5 +1,6 @@
 mod email;
 mod messagebird;
+pub mod quiet_hours;
 pub mod routing;
 mod telegram;
 pub mod verification;
@@ -439,10 +440,32 @@ impl NotificationService {
                 .filter(user_notification_pref::Column::Verified.eq(true))
                 .all(db)
                 .await?;
+            // Quiet hours hold external messages; the bell was already written.
+            // A failed lookup sends rather than risk losing the message.
+            let now = chrono::Utc::now();
+            let hold_until = match quiet_hours::hold_until(db, uid, severity, now).await {
+                Ok(until) => until,
+                Err(e) => {
+                    tracing::warn!(user_id = uid, "Quiet hours lookup failed: {}", e);
+                    None
+                }
+            };
             for pref in prefs.into_iter().filter(|pref| {
                 ChannelType::parse(&pref.channel_type).is_some_and(|c| routed.contains(&c))
             }) {
                 if let Some(destination) = &pref.destination {
+                    if let Some(deliver_after) = hold_until {
+                        let held = quiet_hours::HeldMessage {
+                            user_id: uid,
+                            channel_type: &pref.channel_type,
+                            event_type,
+                            title,
+                            body,
+                            severity,
+                        };
+                        quiet_hours::hold(db, &held, now, deliver_after).await?;
+                        continue;
+                    }
                     let message = NotificationMessage {
                         recipient: destination.clone(),
                         title: title.to_string(),

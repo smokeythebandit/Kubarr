@@ -144,6 +144,8 @@ use crate::state::AppState;
         notifications::update_event,
         notifications::routing::list_routes,
         notifications::routing::update_route,
+        notifications::quiet_hours::get_quiet_hours,
+        notifications::quiet_hours::update_quiet_hours,
         notifications::get_preferences,
         notifications::update_preference,
         notifications::start_verification,
