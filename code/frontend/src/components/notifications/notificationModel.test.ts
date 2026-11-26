@@ -5,6 +5,8 @@ import {
   bellLabel,
   buildRows,
   categoryOf,
+  EVENT_LABELS,
+  eventLabel,
   dayGroupOf,
   formatCount,
   formatPartialCount,
@@ -183,5 +185,69 @@ describe('filters', () => {
     expect(all.filter((n) => matchesPageFilter(n, 'security', NOW))).toEqual([login]);
     expect(all.filter((n) => matchesPageFilter(n, 'system', NOW))).toEqual([crit, readCrit]);
     expect(all.filter((n) => matchesPageFilter(n, 'updates', NOW))).toEqual([update]);
+  });
+});
+
+// Mirrors `AuditAction::notifiable()` in code/api (GET /api/notifications/events).
+const BACKEND_EVENT_TYPES: Record<string, 'updates' | 'apps' | 'security' | 'system'> = {
+  login: 'security',
+  login_failed: 'security',
+  logout: 'security',
+  '2fa_enabled': 'security',
+  '2fa_disabled': 'security',
+  '2fa_verified': 'security',
+  '2fa_failed': 'security',
+  password_changed: 'security',
+  user_created: 'security',
+  user_updated: 'security',
+  user_deleted: 'security',
+  user_approved: 'security',
+  user_deactivated: 'security',
+  user_activated: 'security',
+  role_created: 'security',
+  role_updated: 'security',
+  role_deleted: 'security',
+  role_assigned: 'security',
+  role_unassigned: 'security',
+  app_installed: 'apps',
+  app_uninstalled: 'apps',
+  app_started: 'apps',
+  app_stopped: 'apps',
+  app_restarted: 'apps',
+  app_configured: 'apps',
+  app_updated: 'updates',
+  app_update_failed: 'updates',
+  app_update_rollback_failed: 'updates',
+  vpn_provider_created: 'system',
+  vpn_provider_updated: 'system',
+  vpn_provider_deleted: 'system',
+  vpn_assigned: 'system',
+  vpn_removed: 'system',
+  system_setting_changed: 'system',
+  invite_created: 'security',
+  invite_used: 'security',
+  invite_deleted: 'security',
+  assistant_budget_warning: 'system',
+};
+
+describe('event labels', () => {
+  it('covers all 38 backend event types with a label and category', () => {
+    const types = Object.keys(BACKEND_EVENT_TYPES);
+    expect(types).toHaveLength(38);
+    for (const type of types) {
+      expect(EVENT_LABELS[type], type).toBeTruthy();
+      expect(categoryOf(type), type).toBe(BACKEND_EVENT_TYPES[type]);
+    }
+    expect(Object.keys(EVENT_LABELS).sort()).toEqual([...types].sort());
+  });
+
+  it('spells acronyms properly', () => {
+    expect(eventLabel('2fa_failed')).toBe('2FA Verification Failed');
+    expect(eventLabel('vpn_provider_created')).toBe('VPN Provider Created');
+    expect(eventLabel('app_update_rollback_failed')).toBe('App Update Rollback Failed');
+  });
+
+  it('falls back to a title-cased identifier', () => {
+    expect(eventLabel('node_rebooted')).toBe('Node Rebooted');
   });
 });

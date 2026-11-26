@@ -174,7 +174,7 @@ describe('NotificationsTab', () => {
     fireEvent.click(tab);
     expect(tab).toHaveAttribute('aria-selected', 'true');
     const panel = screen.getByRole('tabpanel');
-    expect(within(panel).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Event', 'Severity', 'On']);
+    expect(within(panel).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Event', 'Severity', 'On', 'Bell', 'Telegram', 'Email ·', 'SMS']);
     expect(within(panel).getAllByTestId('category-row').map((h) => h.textContent)).toEqual(['Apps', 'Security', 'System']);
     fireEvent.change(within(panel).getByRole('combobox', { name: 'Login Failed severity' }), { target: { value: 'critical' } });
     expect(props.onUpdateEventSeverity).toHaveBeenCalledWith('login_failed', 'critical');
@@ -182,6 +182,78 @@ describe('NotificationsTab', () => {
     expect(toggle).toHaveAttribute('aria-checked', 'false');
     fireEvent.click(toggle);
     expect(props.onToggleEvent).toHaveBeenCalledWith('app_installed', true);
+  });
+
+  const routes = [
+    { event_type: 'login_failed', channels: { telegram: true, email: true, messagebird: true } },
+    { event_type: 'app_installed', channels: { telegram: false, email: false, messagebird: false } },
+    // app_installed is off, so its routes never fire and are not counted.
+    { event_type: 'system_setting_changed', channels: { telegram: false, email: false, messagebird: false } },
+  ];
+
+  it('routes each event to channels and badges the number of routes', () => {
+    const onToggleRoute = vi.fn();
+    renderTab({ notificationRoutes: routes, onToggleRoute });
+    // Email is not set up, so its route does not count: Telegram + SMS for login_failed.
+    const tab = screen.getByRole('tab', { name: /What you get/ });
+    expect(within(tab).getByTestId('count-badge')).toHaveTextContent('2');
+    expect(within(tab).getByTestId('count-badge')).toHaveAttribute('data-kind', 'neutral');
+    fireEvent.click(tab);
+    const panel = screen.getByRole('tabpanel');
+
+    const telegram = within(panel).getByRole('checkbox', { name: 'Login Failed via Telegram' });
+    expect(telegram).toBeChecked();
+    fireEvent.click(telegram);
+    expect(onToggleRoute).toHaveBeenCalledWith('login_failed', 'telegram', false);
+
+    const sms = within(panel).getByRole('checkbox', { name: 'App Installed via SMS' });
+    expect(sms).not.toBeChecked();
+    fireEvent.click(sms);
+    expect(onToggleRoute).toHaveBeenCalledWith('app_installed', 'messagebird', true);
+
+    // An event with no route entry is off everywhere but the bell.
+    expect(within(panel).getByRole('checkbox', { name: 'System Setting Changed via Telegram' })).not.toBeChecked();
+  });
+
+  it('keeps the bell always on and channels without settings disabled', () => {
+    const onToggleRoute = vi.fn();
+    renderTab({ notificationRoutes: routes, onToggleRoute });
+    fireEvent.click(screen.getByRole('tab', { name: /What you get/ }));
+    const panel = screen.getByRole('tabpanel');
+
+    const bell = within(panel).getByRole('checkbox', { name: 'Login Failed in the bell' });
+    expect(bell).toBeChecked();
+    expect(bell).toBeDisabled();
+    expect(bell).toHaveAttribute('title', 'The bell always shows every enabled event');
+    // A disabled event is not in the bell either.
+    const offBell = within(panel).getByRole('checkbox', { name: 'App Installed in the bell' });
+    expect(offBell).not.toBeChecked();
+    expect(offBell).toBeDisabled();
+    expect(offBell).toHaveAttribute('title', 'Turn the event on to show it in the bell');
+
+    const email = within(panel).getByRole('checkbox', { name: 'Login Failed via Email' });
+    expect(email).toBeDisabled();
+    expect(email).not.toBeChecked();
+    expect(email).toHaveAttribute('title', 'Set up this channel first');
+    fireEvent.click(email);
+    expect(onToggleRoute).not.toHaveBeenCalled();
+  });
+
+  it('counts only routes on enabled events in the badge', () => {
+    renderTab({
+      notificationRoutes: [
+        { event_type: 'login_failed', channels: { telegram: true, email: false, messagebird: false } },
+        { event_type: 'app_installed', channels: { telegram: true, email: false, messagebird: true } },
+      ],
+      onToggleRoute: vi.fn(),
+    });
+    expect(within(screen.getByRole('tab', { name: /What you get/ })).getByTestId('count-badge')).toHaveTextContent('1');
+  });
+
+  it('makes routes read-only without settings.manage', () => {
+    renderTab({ notificationRoutes: routes, onToggleRoute: vi.fn(), canManage: false });
+    fireEvent.click(screen.getByRole('tab', { name: /What you get/ }));
+    expect(screen.getByRole('checkbox', { name: 'Login Failed via Telegram' })).toBeDisabled();
   });
 
   it('shows delivery history with status pills', () => {

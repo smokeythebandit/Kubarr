@@ -31,6 +31,7 @@ import { getSettings, updateSetting, Setting } from '../api/settings';
 import { Users, Link, UserPlus, Settings, Sliders, Lock, Menu, X, FileText, CheckCircle, XCircle, LayoutDashboard, Shield, Bell, Mail, Send, MessageSquare, Globe, Network, RefreshCw, Bot } from 'lucide-react';
 import { auditApi, AuditLog, AuditStats, AuditLogQuery } from '../api/audit';
 import { notificationsApi, NotificationChannel, NotificationEvent, NotificationLog } from '../api/notifications';
+import { useNotificationRoutes } from '../hooks/useNotificationRoutes';
 import { oauthApi, OAuthProvider } from '../api/oauth';
 import { VpnTab } from '../components/vpn';
 import { AuditTab } from '../components/settings/tabs/AuditTab';
@@ -94,6 +95,7 @@ const SettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(canViewUsers);
   const [savingSettings, setSavingSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { routes: notificationRoutes, load: loadNotificationRoutes, toggle: handleToggleRoute } = useNotificationRoutes(setError);
 
   // Get state from URL params. A section the viewer may not open falls back
   // to the first one they can.
@@ -201,6 +203,7 @@ const SettingsPage: React.FC = () => {
     if (canViewSettings && activeSection === 'notifications') {
       loadNotificationChannels();
       loadNotificationEvents();
+      loadNotificationRoutes();
       if (canViewAudit) loadNotificationLogs();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1008,6 +1011,8 @@ const SettingsPage: React.FC = () => {
                 onToggleChannel={handleToggleChannel}
                 onToggleEvent={handleToggleEvent}
                 onUpdateEventSeverity={handleUpdateEventSeverity}
+                notificationRoutes={notificationRoutes}
+                onToggleRoute={handleToggleRoute}
                 onTestChannel={handleTestChannel}
                 onSaveChannelConfig={handleSaveChannelConfig}
                 getChannelIcon={getChannelIcon}

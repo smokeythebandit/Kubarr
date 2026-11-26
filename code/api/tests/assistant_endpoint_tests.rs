@@ -238,6 +238,27 @@ async fn admin_role_is_seeded_with_assistant_use() {
 }
 
 #[tokio::test]
+async fn budget_warning_event_is_seeded_enabled_and_routed() {
+    let db = create_test_db_with_seed().await;
+    let event = kubarr::models::notification_event::Entity::find()
+        .filter(
+            kubarr::models::notification_event::Column::EventType.eq("assistant_budget_warning"),
+        )
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("event seeded");
+    assert!(event.enabled);
+    assert_eq!(event.severity, "warning");
+    let routed =
+        kubarr::services::notification::routing::routed_channels(&db, "assistant_budget_warning")
+            .await
+            .unwrap();
+    assert_eq!(routed.len(), 1);
+    assert!(routed.contains(&kubarr::services::notification::ChannelType::Telegram));
+}
+
+#[tokio::test]
 async fn the_key_is_write_only() {
     let h = harness("admin").await;
     let key = test_key();

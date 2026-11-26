@@ -2,7 +2,10 @@
 //!
 //! Creates the `assistant_usage` ledger (one row per Messages API call, used
 //! for the monthly budget), seeds the `assistant_budget_warning` notification
-//! event and grants the new `assistant.use` permission to the admin role.
+//! event (enabled, warning, routed to Telegram like other warnings) and
+//! grants the new `assistant.use` permission to the admin role.
+//!
+//! Follows 000038 (notification routes).
 
 use sea_orm_migration::prelude::*;
 
@@ -110,6 +113,21 @@ impl MigrationTrait for Migration {
                         .to_owned(),
                 )
                 .await?;
+            // Routes (000038): the warning default, Telegram.
+            manager
+                .exec_stmt(
+                    Query::insert()
+                        .into_table(Alias::new("notification_routes"))
+                        .columns([
+                            Alias::new("event_type"),
+                            Alias::new("channel_type"),
+                            Alias::new("enabled"),
+                        ])
+                        .values_panic([EVENT_TYPE.into(), "telegram".into(), true.into()])
+                        .on_conflict(OnConflict::new().do_nothing().to_owned())
+                        .to_owned(),
+                )
+                .await?;
         }
 
         // Permission: granted to the admin role (if it exists yet; a fresh
@@ -152,6 +170,14 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .exec_stmt(
+                Query::delete()
+                    .from_table(Alias::new("notification_routes"))
+                    .and_where(Expr::col(Alias::new("event_type")).eq(EVENT_TYPE))
+                    .to_owned(),
+            )
+            .await?;
         manager
             .exec_stmt(
                 Query::delete()

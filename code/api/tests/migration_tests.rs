@@ -47,8 +47,10 @@ async fn cleanup_postgres_tables(db: &DatabaseConnection) {
         "app_storage_configs",
         "user_notifications",
         "notification_logs",
+        "notification_verifications",
         "user_notification_prefs",
         "notification_events",
+        "notification_routes",
         "notification_channels",
         "audit_logs",
         "invites",
@@ -333,6 +335,7 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
         "notification_channels",
         "notification_events",
         "notification_logs",
+        "notification_verifications",
         "oauth_accounts",
         "oauth_providers",
         "role_app_permissions",
@@ -351,6 +354,8 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
         // The pod watch caches status and its own liveness.
         "pod_status_cache",
         "pod_watch_heartbeat",
+        // Per-event external channel routing.
+        "notification_routes",
     ];
 
     for table in expected_tables {
