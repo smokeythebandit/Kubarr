@@ -43,7 +43,7 @@ use super::tools::{
 use crate::models::app_state;
 use crate::services::catalog::lifecycle_for_app_name;
 use crate::services::helm_process;
-use crate::services::update_diagnostics::{scrub_inline, try_secret_values};
+use crate::services::update_diagnostics::{scrub_inline, scrub_with, try_secret_values};
 
 /// At most this many objects per list call (first page only).
 const LIST_LIMIT: u32 = 200;
@@ -558,10 +558,21 @@ pub(super) async fn k8s_describe(ctx: &ToolContext, input: &Value) -> ToolResult
     match kind {
         Kind::Namespace => {
             scope.check(&name)?;
-            get_cluster::<Namespace>(&client, &name, kind).await
+            let mut result = get_cluster::<Namespace>(&client, &name, kind).await?;
+            let secrets = secrets_for(ctx, &Targets::Some(vec![name.clone()])).await?;
+            scrub_value(&mut result, &secrets);
+            Ok(result)
         }
-        Kind::Node => get_cluster::<Node>(&client, &name, kind).await,
-        Kind::PersistentVolume => get_cluster::<PersistentVolume>(&client, &name, kind).await,
+        // Admin-only: scrubbed with every namespace's Secret values.
+        Kind::Node | Kind::PersistentVolume => {
+            let mut result = if kind == Kind::Node {
+                get_cluster::<Node>(&client, &name, kind).await?
+            } else {
+                get_cluster::<PersistentVolume>(&client, &name, kind).await?
+            };
+            scrub_value(&mut result, &secrets_for(ctx, &Targets::All).await?);
+            Ok(result)
+        }
         _ => {
             let ns = namespace.ok_or_else(|| {
                 ToolError::new(format!("`namespace` is required for a {}.", kind.name()))
@@ -663,7 +674,7 @@ pub(super) async fn pod_logs(ctx: &ToolContext, input: &Value) -> ToolResult {
         Ok(Err(kube::Error::Api(status))) if status.code == 400 => {
             return Err(ToolError::new(format!(
                 "Kubernetes could not return these logs: {}",
-                clip(&scrub_inline(&status.message), 300)
+                clip(&scrub_with(&status.message, &secrets), 300)
             )))
         }
         Ok(Err(e)) => return Err(kube_error(Kind::Pod, &format!("{namespace}/{pod}"), e)),

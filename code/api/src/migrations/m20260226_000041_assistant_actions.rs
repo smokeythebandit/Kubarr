@@ -7,9 +7,10 @@
 //!   pending row past `expires_at` reads as expired. `operation_id` links the
 //!   queued Kubarr operation so its outcome can be shown; `reason` is the
 //!   model's one-line why (shown to the owner only, never in audit details).
-//! - Seeds the notification events for requested rollbacks:
-//!   `app_rolled_back` (info, off) and `app_rollback_failed` (warning, on),
-//!   routed like other events of their severity when routing exists.
+//! - Seeds the notification event for a requested rollback that failed,
+//!   `app_rollback_failed` (warning, on), routed to Telegram like other
+//!   warnings when routing exists. A successful rollback is audited only:
+//!   the person asked for it and sees the outcome on the card.
 
 use sea_orm_migration::prelude::*;
 
@@ -17,10 +18,8 @@ use sea_orm_migration::prelude::*;
 pub struct Migration;
 
 /// (event_type, enabled, severity, channels routed on).
-const EVENTS: [(&str, bool, &str, &[&str]); 2] = [
-    ("app_rolled_back", false, "info", &[]),
-    ("app_rollback_failed", true, "warning", &["telegram"]),
-];
+const EVENTS: [(&str, bool, &str, &[&str]); 1] =
+    [("app_rollback_failed", true, "warning", &["telegram"])];
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {

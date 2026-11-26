@@ -48,11 +48,32 @@ export interface NotificationEvent {
   severity: string;
 }
 
+/** External channels an event can be routed to. The bell is not routed. */
+export type RouteChannel = 'telegram' | 'email' | 'messagebird';
+
+export const ROUTE_CHANNELS: RouteChannel[] = ['telegram', 'email', 'messagebird'];
+
+/** Which external channels an event is delivered to. */
+export interface NotificationRoute {
+  event_type: string;
+  channels: Record<RouteChannel, boolean>;
+}
+
 export interface UserNotificationPref {
   channel_type: string;
   enabled: boolean;
   destination: string | null;
   verified: boolean;
+  /** A verification code was sent and can still be confirmed. Older servers omit it. */
+  verification_pending?: boolean;
+}
+
+export interface VerifyStartResponse {
+  /** Masked destination the code was sent to. */
+  destination: string;
+  expires_in_seconds: number;
+  /** Seconds before another code may be requested. */
+  resend_after_seconds: number;
 }
 
 export interface NotificationLog {
@@ -171,6 +192,25 @@ export const notificationsApi = {
   },
 
   // ============================================================================
+  // Admin: Routing (which channels each event goes to)
+  // ============================================================================
+
+  // Get every event's external channel routes (admin)
+  getRoutes: async (): Promise<NotificationRoute[]> => {
+    const response = await apiClient.get('/notifications/routes');
+    return response.data;
+  },
+
+  // Change some of an event's routes; channels left out keep their route (admin)
+  updateRoute: async (
+    eventType: string,
+    channels: Partial<Record<RouteChannel, boolean>>
+  ): Promise<NotificationRoute> => {
+    const response = await apiClient.put(`/notifications/routes/${eventType}`, { channels });
+    return response.data;
+  },
+
+  // ============================================================================
   // User Preferences
   // ============================================================================
 
@@ -186,6 +226,19 @@ export const notificationsApi = {
     data: { enabled?: boolean; destination?: string }
   ): Promise<UserNotificationPref> => {
     const response = await apiClient.put(`/notifications/preferences/${channelType}`, data);
+    return response.data;
+  },
+
+  // Send a 6-digit code to the user's destination for a channel.
+  // Rejects with 429 (Retry-After header) when rate limited.
+  startVerification: async (channelType: string): Promise<VerifyStartResponse> => {
+    const response = await apiClient.post(`/notifications/preferences/${channelType}/verify/start`);
+    return response.data;
+  },
+
+  // Confirm the code; resolves with the now-verified preference, 400 otherwise.
+  confirmVerification: async (channelType: string, code: string): Promise<UserNotificationPref> => {
+    const response = await apiClient.post(`/notifications/preferences/${channelType}/verify/confirm`, { code });
     return response.data;
   },
 

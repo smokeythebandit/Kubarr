@@ -1536,12 +1536,7 @@ impl AppManager {
             match result {
                 Ok(OperationOutput::Done(message)) => {
                     let action = terminal_action(&operation.operation, true);
-                    let won = self
-                        .complete_succeeded(&operation, message.clone(), action.clone())
-                        .await?;
-                    if won && operation.operation == OP_ROLLBACK {
-                        self.notify_update(&operation, &action, &message).await;
-                    }
+                    self.complete_succeeded(&operation, message, action).await?;
                 }
                 Ok(OperationOutput::Update(report)) => {
                     let message = report.message(&operation.app_name);

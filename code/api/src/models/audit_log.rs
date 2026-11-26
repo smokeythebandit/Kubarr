@@ -25,8 +25,11 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-// Audit action types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Audit action types.
+///
+/// Every variant is also a candidate notification event type (see
+/// [`AuditAction::notifiable`]); the derived `EnumIter` keeps that list exhaustive.
+#[derive(Debug, Clone, Serialize, Deserialize, EnumIter)]
 pub enum AuditAction {
     // Authentication
     Login,
@@ -93,8 +96,90 @@ pub enum AuditAction {
     /// The person cancelled a proposed action (not notifiable).
     AssistantActionCancelled,
 
+    // Notification destinations
+    NotificationVerificationSent,
+    NotificationDestinationVerified,
+
     // API access
     ApiAccess,
+}
+
+impl AuditAction {
+    /// Every variant, in declaration order.
+    pub fn all() -> impl Iterator<Item = AuditAction> {
+        <AuditAction as sea_orm::Iterable>::iter()
+    }
+
+    /// Whether this action makes sense as a user-facing notification event.
+    ///
+    /// Excluded (pure noise or circular):
+    /// - `api_access`, `token_refresh`, `app_accessed`: emitted on routine traffic,
+    ///   would flood every channel.
+    /// - `notification_verification_sent`, `notification_destination_verified`: the
+    ///   user is in the middle of configuring that very destination.
+    /// - `assistant_tool_call`: one per tool the assistant runs; audit only.
+    ///
+    /// The match is exhaustive on purpose: a new variant does not compile until it
+    /// is classified here.
+    pub fn is_notifiable(&self) -> bool {
+        match self {
+            AuditAction::ApiAccess
+            | AuditAction::TokenRefresh
+            | AuditAction::AppAccessed
+            | AuditAction::NotificationVerificationSent
+            | AuditAction::NotificationDestinationVerified
+            | AuditAction::AssistantToolCall
+            | AuditAction::AssistantActionProposed
+            | AuditAction::AssistantActionConfirmed
+            | AuditAction::AssistantActionCancelled
+            // The person asked for it and is watching the card.
+            | AuditAction::AppRolledBack => false,
+            AuditAction::Login
+            | AuditAction::LoginFailed
+            | AuditAction::Logout
+            | AuditAction::TwoFactorEnabled
+            | AuditAction::TwoFactorDisabled
+            | AuditAction::TwoFactorVerified
+            | AuditAction::TwoFactorFailed
+            | AuditAction::PasswordChanged
+            | AuditAction::UserCreated
+            | AuditAction::UserUpdated
+            | AuditAction::UserDeleted
+            | AuditAction::UserApproved
+            | AuditAction::UserDeactivated
+            | AuditAction::UserActivated
+            | AuditAction::RoleCreated
+            | AuditAction::RoleUpdated
+            | AuditAction::RoleDeleted
+            | AuditAction::RoleAssigned
+            | AuditAction::RoleUnassigned
+            | AuditAction::AppInstalled
+            | AuditAction::AppUninstalled
+            | AuditAction::AppStarted
+            | AuditAction::AppStopped
+            | AuditAction::AppRestarted
+            | AuditAction::AppConfigured
+            | AuditAction::AppUpdated
+            | AuditAction::AppUpdateFailed
+            | AuditAction::AppUpdateRollbackFailed
+            | AuditAction::AppRollbackFailed
+            | AuditAction::VpnProviderCreated
+            | AuditAction::VpnProviderUpdated
+            | AuditAction::VpnProviderDeleted
+            | AuditAction::VpnAssigned
+            | AuditAction::VpnRemoved
+            | AuditAction::SystemSettingChanged
+            | AuditAction::InviteCreated
+            | AuditAction::InviteUsed
+            | AuditAction::InviteDeleted
+            | AuditAction::AssistantBudgetWarning => true,
+        }
+    }
+
+    /// Every action that can be configured as a notification event.
+    pub fn notifiable() -> impl Iterator<Item = AuditAction> {
+        Self::all().filter(AuditAction::is_notifiable)
+    }
 }
 
 impl std::fmt::Display for AuditAction {
@@ -146,6 +231,12 @@ impl std::fmt::Display for AuditAction {
             AuditAction::AssistantActionProposed => write!(f, "assistant_action_proposed"),
             AuditAction::AssistantActionConfirmed => write!(f, "assistant_action_confirmed"),
             AuditAction::AssistantActionCancelled => write!(f, "assistant_action_cancelled"),
+            AuditAction::NotificationVerificationSent => {
+                write!(f, "notification_verification_sent")
+            }
+            AuditAction::NotificationDestinationVerified => {
+                write!(f, "notification_destination_verified")
+            }
             AuditAction::ApiAccess => write!(f, "api_access"),
         }
     }
@@ -281,6 +372,42 @@ mod tests {
         );
         assert_eq!(AuditAction::InviteDeleted.to_string(), "invite_deleted");
         assert_eq!(AuditAction::ApiAccess.to_string(), "api_access");
+    }
+
+    #[test]
+    fn audit_action_all_is_exhaustive_and_unique() {
+        let names: Vec<String> = AuditAction::all().map(|a| a.to_string()).collect();
+        assert_eq!(names.first().map(String::as_str), Some("login"));
+        assert_eq!(names.last().map(String::as_str), Some("api_access"));
+        let mut deduped = names.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), names.len(), "duplicate Display values");
+    }
+
+    #[test]
+    fn audit_action_notifiable_excludes_noise() {
+        let names: Vec<String> = AuditAction::notifiable().map(|a| a.to_string()).collect();
+        for noise in [
+            "api_access",
+            "token_refresh",
+            "app_accessed",
+            "notification_verification_sent",
+            "notification_destination_verified",
+            "assistant_tool_call",
+            "assistant_action_proposed",
+            "assistant_action_confirmed",
+            "assistant_action_cancelled",
+            "app_rolled_back",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == noise),
+                "{noise} must be excluded"
+            );
+        }
+        assert_eq!(names.len(), AuditAction::all().count() - 10);
+        assert!(names.iter().any(|n| n == "assistant_budget_warning"));
+        assert!(names.iter().any(|n| n == "app_rollback_failed"));
     }
 
     // -------------------------------------------------------------------------
