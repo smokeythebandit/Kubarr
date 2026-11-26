@@ -1,6 +1,7 @@
 import { AlertCircle, AlertTriangle, Check, CheckCheck, Info, X } from 'lucide-react';
 import type { Notification } from '../../api/notifications';
-import { appOf, buildRows, formatCount, formatWhen, toneOf, type Tone } from './notificationModel';
+import { AskAssistantButton } from '../assistant/AssistantPanel';
+import { failedOperationContext, isFailedUpdateEvent, appOf, buildRows, formatCount, formatWhen, toneOf, type Tone } from './notificationModel';
 
 export type BadgeKind = 'neutral' | 'accent' | 'crit' | 'warn';
 
@@ -88,6 +89,15 @@ export function NotificationItem({
             <span data-testid="app-chip" className="font-mono text-[0.72rem] font-semibold rounded-md px-1.5 py-0.5 bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200">
               {app}
             </span>
+            {isFailedUpdateEvent(n.event_type) && (
+              <AskAssistantButton
+                label="Explain this"
+                context={{ kind: 'app', app }}
+                draft="Why did this update fail, and what should I do?"
+                resolveContext={() => failedOperationContext(app, n.created_at)}
+                className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline rounded"
+              />
+            )}
           </div>
         )}
       </div>

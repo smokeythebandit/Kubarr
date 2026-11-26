@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Maximize2, Plus, Sparkles, X } from 'lucide-react';
 import { AssistantChat } from './AssistantChat';
+import type { ChatContext } from '../../api/assistant';
 import { useAssistantAvailability, useAssistantPanel } from './assistantState';
 
 const focusRing = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500';
@@ -33,7 +34,7 @@ export function AssistantButton({ className = '' }: { className?: string }) {
 /** The slide-over chat, rendered once for the whole app. */
 export function AssistantPanel() {
   const { available, paused } = useAssistantAvailability();
-  const { open, setOpen, toggle, conversationId, setConversationId } = useAssistantPanel();
+  const { open, setOpen, toggle, conversationId, setConversationId, seed } = useAssistantPanel();
   const location = useLocation();
   const panelRef = useRef<HTMLDivElement>(null);
   const onAssistantPage = location.pathname === '/assistant';
@@ -54,7 +55,7 @@ export function AssistantPanel() {
 
   useEffect(() => {
     if (open) panelRef.current?.querySelector('textarea')?.focus();
-  }, [open]);
+  }, [open, seed?.key]);
 
   if (!available || !open || onAssistantPage) return null;
 
@@ -100,11 +101,57 @@ export function AssistantPanel() {
         <AssistantChat
           conversationId={conversationId}
           onConversationCreated={setConversationId}
-          context={{ page: location.pathname }}
+          context={{ page: location.pathname, ...seed?.context }}
+          seed={seed ? { key: seed.key, draft: seed.draft } : undefined}
           paused={paused}
           compact
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * A button that opens the panel on a new conversation with a prefilled
+ * question the person edits and sends. Hidden unless the assistant is
+ * offered; never sends anything itself.
+ */
+export function AskAssistantButton({
+  context,
+  draft,
+  label,
+  resolveContext,
+  className = '',
+}: {
+  context: ChatContext;
+  draft: string;
+  label: string;
+  /** Refine the context when clicked (e.g. look up an operation). */
+  resolveContext?: () => Promise<ChatContext>;
+  className?: string;
+}) {
+  const { available } = useAssistantAvailability();
+  const startConversation = useAssistantPanel((s) => s.startConversation);
+  if (!available) return null;
+  const onClick = async () => {
+    let chosen = context;
+    if (resolveContext) {
+      try {
+        chosen = await resolveContext();
+      } catch {
+        chosen = context;
+      }
+    }
+    startConversation(chosen, draft);
+  };
+  return (
+    <button
+      type="button"
+      onClick={() => void onClick()}
+      className={`inline-flex items-center gap-1.5 ${focusRing} ${className}`}
+    >
+      <Sparkles size={14} aria-hidden />
+      {label}
+    </button>
   );
 }

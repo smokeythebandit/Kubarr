@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../api/notifications', () => ({ notificationsApi: mocks }));
-vi.mock('../../contexts/AuthContext', () => ({ useAuth: () => ({ isAuthenticated: true }) }));
+vi.mock('../../contexts/AuthContext', () => ({ useAuth: () => ({ isAuthenticated: true, hasPermission: () => false }) }));
 
 const at = (day: number, hour: number, minute = 0) => new Date(2026, 10, day, hour, minute).toISOString();
 
