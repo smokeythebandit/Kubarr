@@ -89,7 +89,8 @@ test('the notifications page lists the inbox and filters by facet', async ({ pag
   api.get('/api/notifications/inbox/count', { count: 2, critical: 0, attention: 1 });
   api.get('/api/notifications/inbox?limit=50&offset=0', { notifications: [update, notification], total: 2, unread: 2 });
   await page.goto('/settings?section=notifications');
-  await page.getByRole('link', { name: /^Notifications/ }).click();
+  await page.getByRole('button', { name: /^Notifications, \d+ unread/ }).click();
+  await page.getByRole('dialog', { name: 'Notifications' }).getByRole('link', { name: 'Open notifications' }).click();
   await expect(page).toHaveURL(/\/notifications$/);
   await expect(page.getByRole('heading', { name: 'Everything Kubarr told you' })).toBeVisible();
   await expect(page.getByText('Needs you')).toBeVisible();

@@ -22,10 +22,8 @@ import { MonitoringProvider, useMonitoring } from './contexts/MonitoringContext'
 import { PageTransition } from './components/PageTransition'
 import { InstallAppButton } from './components/InstallAppButton'
 import { sessionLogout } from './api/auth'
-import { Grid3X3, HardDrive, FileText, Activity, Settings, User, LogOut, Ship, ChevronDown, Sun, Moon, Monitor, Network, Menu, X, Shield, Bell } from 'lucide-react'
+import { Grid3X3, HardDrive, FileText, Activity, Settings, User, LogOut, Ship, ChevronDown, Sun, Moon, Monitor, Network, Menu, X, Shield } from 'lucide-react'
 import { NotificationBell } from './components/notifications/NotificationBell'
-import { CountBadge } from './components/notifications/NotificationParts'
-import { useNotificationCounts } from './components/notifications/useNotificationCounts'
 
 function ThemeToggle() {
   const { theme, resolvedTheme, setTheme } = useTheme()
@@ -214,14 +212,6 @@ function Navigation() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [mobileSystemOpen, setMobileSystemOpen] = useState(false)
   const { clusterMetrics } = useMonitoring()
-  const notificationCounts = useNotificationCounts()
-  const notificationBadge = notificationCounts.count > 0 && (
-    <CountBadge
-      value={notificationCounts.count}
-      kind={notificationCounts.critical > 0 ? 'crit' : 'accent'}
-      label={`${notificationCounts.count} unread${notificationCounts.critical ? `, ${notificationCounts.critical} critical` : ''}`}
-    />
-  )
 
   const isActive = (path: string) => location.pathname === path
 
@@ -248,7 +238,7 @@ function Navigation() {
   }, [])
 
   // Determine which path is active for the indicator
-  const activePath = ['/', '/apps', '/notifications', '/settings'].find(p => isActive(p))
+  const activePath = ['/', '/apps', '/settings'].find(p => isActive(p))
     || (['/storage', '/logs', '/resources', '/networking', '/security'].includes(location.pathname) ? '__system' : null)
 
   useLayoutEffect(() => {
@@ -264,8 +254,7 @@ function Navigation() {
       left: elRect.left - containerRect.left,
       width: elRect.width,
     })
-    // The notifications badge changes the nav width, so re-measure when it does.
-  }, [activePath, location.pathname, notificationCounts.count])
+  }, [activePath, location.pathname])
 
   const handleLogout = async () => {
     setMobileMenuOpen(false)
@@ -463,21 +452,6 @@ function Navigation() {
                   </div>
               </div>
             )}
-            <Link
-              ref={setNavRef('/notifications')}
-              to="/notifications"
-              aria-label={`Notifications${notificationCounts.count ? `, ${notificationCounts.count} unread` : ''}${notificationCounts.critical ? `, ${notificationCounts.critical} critical` : ''}`}
-              title="Notifications"
-              className={`relative flex items-center gap-2 px-3 2xl:px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
-                isActive('/notifications')
-                  ? 'text-blue-700 dark:text-blue-300'
-                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100/80 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-white'
-              }`}
-            >
-              <Bell size={18} strokeWidth={2} />
-              <span className="hidden xl:inline">Notifications</span>
-              {notificationBadge}
-            </Link>
             {canViewSettings && (
               <Link
                 ref={setNavRef('/settings')}
@@ -636,19 +610,6 @@ function Navigation() {
                 )}
               </div>
             )}
-
-            <Link
-              to="/notifications"
-              className={`flex items-center gap-3 px-4 py-3 rounded-md text-base font-medium transition-colors ${
-                isActive('/notifications')
-                  ? 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-white'
-                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
-              }`}
-            >
-              <Bell size={20} strokeWidth={2} />
-              <span>Notifications</span>
-              {notificationBadge}
-            </Link>
 
             {canViewSettings && (
               <Link
