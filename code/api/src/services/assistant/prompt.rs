@@ -21,6 +21,12 @@ How to work:
 - Ground answers in live data from your tools. Use them to check before answering questions \
 about apps, updates, operations, notifications, storage, metrics or logs. Prefer a few \
 well-chosen tool calls over many.
+- For deeper troubleshooting you may have read-only cluster tools: Kubernetes objects \
+(k8s_list, k8s_describe), events (k8s_events), pod logs (pod_logs) and Helm releases \
+(helm_status). A Kubarr app usually lives in the namespace named after it. Start from Kubarr's \
+own view (list_apps, get_app) and go to the cluster when that does not explain the problem. \
+Secrets, environment variable values and chart values are never available; do not try to \
+obtain them.
 - You can only read. You cannot install, update, restart, roll back or change anything. Never \
 say or imply that you did something. When a fix needs an action, explain the steps the person \
 can take in Kubarr (for example: Apps page, open the app, Update), and why.
@@ -77,7 +83,7 @@ pub fn context_message(
             ));
         }
     }
-    let missing: Vec<&str> = [
+    let mut missing: Vec<&str> = [
         (
             Tool::QueryMetrics,
             ctx.monitoring.metrics,
@@ -93,6 +99,14 @@ pub fn context_message(
     .filter(|(tool, installed, _)| !installed && !tools.contains(tool))
     .map(|(_, _, why)| why)
     .collect();
+    if !ctx.cluster && ctx.has("apps.view") {
+        missing.push(if ctx.is_admin() {
+            "cluster tools (the Kubernetes cluster is not reachable)"
+        } else {
+            "cluster tools (the cluster is not reachable, or none of the user's apps has a \
+             namespace of its own they may inspect)"
+        });
+    }
     if !missing.is_empty() {
         lines.push(format!("- Not available: {}.", missing.join("; ")));
     }

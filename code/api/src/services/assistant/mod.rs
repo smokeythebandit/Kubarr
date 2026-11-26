@@ -8,7 +8,9 @@
 pub mod budget;
 pub mod chat;
 pub mod client;
+pub mod cluster;
 pub mod conversations;
+pub mod k8s_shape;
 pub mod key_store;
 pub mod pricing;
 pub mod prompt;
