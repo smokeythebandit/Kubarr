@@ -357,6 +357,10 @@ trait UpdateProbe: Send + Sync {
     fn history(&self) -> Result<Vec<(u32, String)>>;
     async fn capture(&self, failed: Option<u32>, previous: Option<u32>) -> String;
     fn rollback(&self, revision: u32) -> Result<()>;
+    /// The Helm description of `revision` (e.g. "Rollback to 3"), if known.
+    fn description(&self, _revision: u32) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Mask secrets (namespace Secret values and inline patterns) in text that
     /// leaves the worker.
     async fn scrub(&self, text: &str) -> String;
@@ -416,6 +420,15 @@ impl UpdateProbe for ClusterUpdateProbe<'_, '_> {
 
     fn rollback(&self, revision: u32) -> Result<()> {
         self.deploy.rollback_release(self.app, revision)
+    }
+
+    fn description(&self, revision: u32) -> Result<Option<String>> {
+        Ok(self
+            .deploy
+            .release_history(self.app)?
+            .into_iter()
+            .find(|r| r.revision == revision)
+            .map(|r| r.description))
     }
 }
 
@@ -2391,13 +2404,22 @@ impl AppManager {
     ) -> Result<OperationOutput> {
         check_stop(stop)?;
         let live = ReleaseRevisions::from_history(&probe.history()?).deployed;
-        if live == Some(plan.to_revision) {
+        // A resume after the Helm step: Helm recorded the rollback as a new
+        // revision above the one it was confirmed from.
+        let helm_done = match live {
+            Some(revision) if revision > plan.from_revision => {
+                probe.description(revision)?.as_deref()
+                    == Some(format!("Rollback to {}", plan.to_revision).as_str())
+            }
+            _ => false,
+        };
+        if !helm_done && live == Some(plan.to_revision) {
             return Err(AppError::Conflict(format!(
                 "{app} already runs Helm revision {}; nothing was rolled back",
                 plan.to_revision
             )));
         }
-        if live != Some(plan.from_revision) {
+        if !helm_done && live != Some(plan.from_revision) {
             return Err(AppError::Conflict(format!(
                 "{app}'s release changed since this rollback was confirmed (live revision {}, \
                  expected {}); nothing was rolled back",
@@ -2407,7 +2429,9 @@ impl AppManager {
         }
         let before = probe.restart_snapshot().await?;
         check_stop(stop)?;
-        probe.rollback(plan.to_revision)?;
+        if !helm_done {
+            probe.rollback(plan.to_revision)?;
+        }
         let to = plan
             .to_version
             .as_deref()

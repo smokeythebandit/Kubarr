@@ -1364,6 +1364,9 @@ pub struct HelmRevision {
     pub chart: String,
     #[serde(default)]
     pub app_version: String,
+    /// e.g. "Upgrade complete" or "Rollback to 3".
+    #[serde(default)]
+    pub description: String,
 }
 
 impl HelmRevision {

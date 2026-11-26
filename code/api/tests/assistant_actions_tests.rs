@@ -184,12 +184,14 @@ impl ReleaseHistory for FakeHistory {
                 status: "superseded".into(),
                 chart: format!("{app}-1.0.0"),
                 app_version: "10.8.0".into(),
+                description: String::new(),
             },
             HelmRevision {
                 revision: 2,
                 status: "deployed".into(),
                 chart: format!("{app}-1.1.0"),
                 app_version: "10.9.0".into(),
+                description: String::new(),
             },
         ])
     }
@@ -1372,4 +1374,47 @@ async fn retrying_an_install_of_a_system_app_is_refused() {
         )
         .await;
     assert!(refused.unwrap_err().contains("part of Kubarr"));
+}
+
+#[tokio::test]
+async fn retrying_an_update_with_no_newer_version_goes_to_the_app_page() {
+    let h = harness("http://127.0.0.1:9").await;
+    installed(&h.db, "radarr", "1.0.0", "1.0.0").await;
+    let admin = h.user("admin").await;
+    let now = Utc::now();
+    app_operation::ActiveModel {
+        id: Set("op-radarr-update".into()),
+        app_name: Set("radarr".into()),
+        operation: Set("update".into()),
+        status: Set("failed".into()),
+        stop_requested: Set(false),
+        message: Set(None),
+        error: Set(Some("boom".into())),
+        custom_config: Set(Some("{}".into())),
+        attempts: Set(1),
+        created_by: Set(Some(admin.id)),
+        trigger: Set(Some("manual".into())),
+        diagnostics: Set(None),
+        created_at: Set(now),
+        started_at: Set(None),
+        finished_at: Set(Some(now)),
+        updated_at: Set(now),
+    }
+    .insert(&h.db)
+    .await
+    .unwrap();
+    let refused = h
+        .plan(
+            &admin,
+            ActionKind::RetryOperation,
+            "radarr",
+            ActionParams {
+                operation_id: Some("op-radarr-update".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(refused
+        .unwrap_err()
+        .contains("retry this update from the app page"));
 }

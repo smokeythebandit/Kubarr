@@ -555,7 +555,15 @@ pub async fn plan(
             if operation.operation == OP_UPDATE {
                 // A retried update deploys the version offered now.
                 let current = installed_state(db, actor, app).await?;
-                if let Some((from, to, update)) = offered_update(state, db, &current).await? {
+                let Some((from, to, update)) = offered_update(state, db, &current).await? else {
+                    // Without a newer version the retry could not be pinned
+                    // or checked for a major.
+                    return Err(AppError::Conflict(format!(
+                        "{app} has no newer version to update to; retry this update from the app \
+                         page."
+                    )));
+                };
+                {
                     check_update_kind(update)?;
                     summary.effect = format!(
                         "Updates {app} from {from} to {to} ({} update) again. Kubarr checks that \
@@ -1212,6 +1220,7 @@ mod tests {
             status: status.into(),
             chart: chart.into(),
             app_version: "10.9".into(),
+            description: String::new(),
         }
     }
 

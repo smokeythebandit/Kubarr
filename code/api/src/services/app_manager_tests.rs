@@ -1400,6 +1400,8 @@ struct StubProbe {
     history_fails: bool,
     rollback_fails: bool,
     calls: std::sync::Mutex<Vec<String>>,
+    /// Helm descriptions by revision.
+    descriptions: HashMap<u32, String>,
 }
 
 impl StubProbe {
@@ -1422,6 +1424,7 @@ impl StubProbe {
             history_fails: false,
             rollback_fails: false,
             calls: std::sync::Mutex::new(Vec::new()),
+            descriptions: HashMap::new(),
         }
     }
 
@@ -1498,6 +1501,10 @@ impl UpdateProbe for StubProbe {
         }
         self.rolled_back.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn description(&self, revision: u32) -> Result<Option<String>> {
+        Ok(self.descriptions.get(&revision).cloned())
     }
 }
 
@@ -2490,4 +2497,44 @@ async fn test_confirmed_update_not_deployed_when_chart_moved_since_run() {
     let retried = operation(&manager, &retry.id).await;
     assert_eq!(retried.trigger.as_deref(), Some(TRIGGER_ASSISTANT));
     assert!(retried.custom_config.unwrap().contains("1.31.0"));
+}
+
+#[tokio::test]
+async fn test_rollback_resumed_after_the_helm_step_only_checks_health() {
+    let manager = setup()
+        .await
+        .with_update_health_timeout(TEST_HEALTH_TIMEOUT)
+        .with_update_timing(TEST_POLL, TEST_SETTLE);
+    let queued = manager
+        .enqueue_rollback(APP, &rollback_plan(), 1)
+        .await
+        .unwrap();
+    // Helm already rolled back (revision 3 = "Rollback to 1") before the worker restarted.
+    let mut probe = StubProbe::with_histories(
+        &[true],
+        vec![vec![
+            (1, "superseded".into()),
+            (2, "superseded".into()),
+            (3, "deployed".into()),
+        ]],
+    );
+    probe.descriptions.insert(3, "Rollback to 1".into());
+    run_rollback(&manager, &probe).await;
+    assert_eq!(key_calls(&probe), ["history"]);
+    let op = operation(&manager, &queued.id).await;
+    assert_eq!(op.status, STATUS_SUCCEEDED, "{:?}", op.error);
+
+    // A newer revision that is not that rollback is still refused.
+    let mut other = StubProbe::with_histories(
+        &[true],
+        vec![vec![(2, "superseded".into()), (3, "deployed".into())]],
+    );
+    other.descriptions.insert(3, "Upgrade complete".into());
+    let Err(err) = manager
+        .roll_back(&other, APP, &rollback_plan(), &CancellationToken::new())
+        .await
+    else {
+        unreachable!("an unrelated newer release must be refused");
+    };
+    assert!(err.to_string().contains("release changed"));
 }
