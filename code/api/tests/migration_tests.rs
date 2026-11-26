@@ -943,6 +943,8 @@ async fn quiet_hours_tables_cascade_from_users_impl(db: &DatabaseConnection) {
         "severity",
         "created_at",
         "deliver_after",
+        "claimed_until",
+        "attempts",
     ] {
         assert!(columns.contains(&column.to_string()), "missing {column}");
     }

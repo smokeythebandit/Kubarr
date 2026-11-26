@@ -463,8 +463,16 @@ impl NotificationService {
                             body,
                             severity,
                         };
-                        quiet_hours::hold(db, &held, now, deliver_after).await?;
-                        continue;
+                        // A failed hold sends now rather than lose the message.
+                        match quiet_hours::hold(db, &held, now, deliver_after).await {
+                            Ok(()) => continue,
+                            Err(e) => tracing::warn!(
+                                user_id = uid,
+                                channel = %pref.channel_type,
+                                "Holding a notification for quiet hours failed; sending now: {}",
+                                e
+                            ),
+                        }
                     }
                     let message = NotificationMessage {
                         recipient: destination.clone(),
@@ -488,6 +496,20 @@ impl NotificationService {
         }
 
         Ok(())
+    }
+
+    /// Whether `channel_type` has a provider to send through (configured and
+    /// enabled, or overridden).
+    async fn has_provider(&self, channel_type: &str) -> bool {
+        if self.override_for(channel_type).await.is_some() {
+            return true;
+        }
+        match channel_type {
+            "email" => self.email.read().await.is_some(),
+            "telegram" => self.telegram.read().await.is_some(),
+            "messagebird" => self.messagebird.read().await.is_some(),
+            _ => false,
+        }
     }
 
     /// Send a message to a specific channel
@@ -528,9 +550,9 @@ impl NotificationService {
     }
 
     /// Log a notification delivery attempt
-    async fn log_notification(
+    async fn log_notification<C: sea_orm::ConnectionTrait>(
         &self,
-        db: &DatabaseConnection,
+        db: &C,
         user_id: Option<i64>,
         channel_type: &str,
         event_type: &str,

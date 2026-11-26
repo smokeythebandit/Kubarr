@@ -198,6 +198,7 @@ async fn invalid_quiet_hours_are_rejected() {
         quiet(true, 1380, 1440, "UTC"),
         quiet(true, 1380, 420, "Not/AZone"),
         quiet(true, 1380, 420, ""),
+        quiet(true, 1380, 420, &format!("Europe/{}", "x".repeat(64))),
     ] {
         let (status, text) = send(
             app.clone(),

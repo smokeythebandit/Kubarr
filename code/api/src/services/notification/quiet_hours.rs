@@ -19,12 +19,14 @@ use jiff::tz::{AmbiguousOffset, TimeZone};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, Set,
+    QueryOrder, Set, TransactionTrait,
 };
 
-use super::{NotificationMessage, NotificationService, NotificationSeverity};
+use super::{routing, ChannelType, NotificationMessage, NotificationService, NotificationSeverity};
 use crate::error::{AppError, Result};
-use crate::models::{notification_outbox, user_notification_pref, user_quiet_hours};
+use crate::models::{
+    notification_event, notification_outbox, user_notification_pref, user_quiet_hours,
+};
 use crate::services::scheduler::PeriodicTask;
 
 /// Minutes in a day; valid minute values are `0..MINUTES_PER_DAY`.
@@ -39,6 +41,14 @@ pub const SUMMARY_TITLE: &str = "While you were away";
 pub const SUMMARY_EVENT_TYPE: &str = "quiet_hours_summary";
 /// How long a flush claims rows before another attempt may pick them up.
 const CLAIM_LEASE_MINUTES: i64 = 5;
+/// Longest wait between retries of a failed summary.
+pub const MAX_RETRY_MINUTES: i64 = 60;
+/// Longest accepted time zone name.
+pub const MAX_TIMEZONE_LEN: usize = 64;
+/// Titles named in an SMS summary.
+pub const SMS_SUMMARY_TITLES: usize = 3;
+/// Channel type whose summary is kept SMS-short.
+const SMS_CHANNEL: &str = "messagebird";
 
 /// A validated quiet-hours window.
 #[derive(Debug, Clone)]
@@ -63,6 +73,11 @@ impl QuietWindow {
             return Err(AppError::BadRequest(
                 "Quiet hours must start and end at different times".to_string(),
             ));
+        }
+        if timezone.len() > MAX_TIMEZONE_LEN {
+            return Err(AppError::BadRequest(format!(
+                "Time zone names are at most {MAX_TIMEZONE_LEN} characters"
+            )));
         }
         let (timezone, timezone_name) = parse_timezone(timezone)?;
         Ok(Self {
@@ -126,7 +141,9 @@ fn resolve_local(
     local: jiff::civil::DateTime,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
-    // Gaps are at most a couple of hours; three covers every real zone.
+    // Step a minute at a time for up to three hours past `local`; real DST
+    // gaps are at most two hours, so the first valid minute is found well
+    // within that.
     for step in 0..=180i64 {
         let candidate = local.checked_add(jiff::Span::new().minutes(step)).ok()?;
         let offsets = match tz.to_ambiguous_timestamp(candidate).offset() {
@@ -218,7 +235,7 @@ pub async fn hold<C: ConnectionTrait>(
 
 /// After a user changed their quiet hours, move the delivery time of their
 /// still-held rows to the end of the new window (or now, if they are no
-/// longer in quiet hours).
+/// longer in quiet hours). Rows a flush is sending right now are left alone.
 pub async fn reschedule_held<C: ConnectionTrait>(
     db: &C,
     user_id: i64,
@@ -233,14 +250,37 @@ pub async fn reschedule_held<C: ConnectionTrait>(
         )
         .filter(notification_outbox::Column::UserId.eq(user_id))
         .filter(notification_outbox::Column::DeliverAfter.gt(now))
+        .filter(unclaimed(now))
         .exec(db)
         .await?;
     Ok(())
 }
 
-/// Title and body of the summary for `rows` (newest first).
+/// Rows not claimed by a flush (never claimed, or the lease has passed).
+fn unclaimed(now: DateTime<Utc>) -> sea_orm::Condition {
+    sea_orm::Condition::any()
+        .add(notification_outbox::Column::ClaimedUntil.is_null())
+        .add(notification_outbox::Column::ClaimedUntil.lte(now))
+}
+
+/// `at` as local wall-clock time in `tz`, e.g. `2026-11-25 04:12 CET`.
+fn local_time(at: DateTime<Utc>, tz: &TimeZone) -> String {
+    jiff::Timestamp::from_microsecond(at.timestamp_micros())
+        .map(|ts| {
+            ts.to_zoned(tz.clone())
+                .strftime("%Y-%m-%d %H:%M %Z")
+                .to_string()
+        })
+        .unwrap_or_else(|_| at.format("%Y-%m-%d %H:%M UTC").to_string())
+}
+
+/// Title, severity and body of the summary for `rows` (newest first) sent over
+/// `channel_type`; times are shown in `tz`. SMS gets counts for at most
+/// [`SMS_SUMMARY_TITLES`] titles and nothing else.
 pub fn summary_message(
     rows: &[notification_outbox::Model],
+    channel_type: &str,
+    tz: &TimeZone,
 ) -> (String, NotificationSeverity, String) {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut severity = NotificationSeverity::Info;
@@ -251,22 +291,39 @@ pub fn summary_message(
     let mut counted: Vec<(&str, usize)> = counts.into_iter().collect();
     // Most frequent first; ties alphabetical (BTreeMap order, stable sort).
     counted.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
-    let tally = counted
-        .iter()
-        .map(|(title, n)| format!("{n}× {title}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let tally = |items: &[(&str, usize)]| {
+        items
+            .iter()
+            .map(|(title, n)| format!("{n}× {title}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let held = rows.len();
+
+    if channel_type == SMS_CHANNEL {
+        let shown = counted.len().min(SMS_SUMMARY_TITLES);
+        let mut body = format!(
+            "{held} held during quiet hours: {}",
+            tally(&counted[..shown])
+        );
+        if counted.len() > shown {
+            body.push_str(&format!(" (+{} more)", counted.len() - shown));
+        }
+        body.push('.');
+        return (SUMMARY_TITLE.to_string(), severity, body);
+    }
+
     let mut body = format!(
-        "{held} notification{} held during quiet hours: {tally}.",
-        if held == 1 { " was" } else { "s were" }
+        "{held} notification{} held during quiet hours: {}.",
+        if held == 1 { " was" } else { "s were" },
+        tally(&counted)
     );
     body.push_str("\n\nMost recent:");
     for row in rows.iter().take(SUMMARY_RECENT) {
         body.push_str(&format!(
             "\n- {} ({})",
             row.title,
-            row.created_at.format("%Y-%m-%d %H:%M UTC")
+            local_time(row.created_at, tz)
         ));
     }
     if held > SUMMARY_RECENT {
@@ -288,23 +345,38 @@ fn max_severity(a: NotificationSeverity, b: NotificationSeverity) -> Notificatio
     }
 }
 
+/// Minutes to wait before retry number `attempts` (1, 2, 4 … capped at
+/// [`MAX_RETRY_MINUTES`]).
+pub fn retry_delay_minutes(attempts: i32) -> i64 {
+    let exponent = u32::try_from(attempts.saturating_sub(1).clamp(0, 6)).unwrap_or(6);
+    (1i64 << exponent).min(MAX_RETRY_MINUTES)
+}
+
 /// What one flush did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FlushStats {
     /// Summaries delivered.
     pub sent: usize,
-    /// Summaries that failed to send (rows kept for the next run).
+    /// Summaries that failed to send (rows kept and retried with backoff).
     pub failed: usize,
-    /// Rows dropped: too old, or no destination to deliver to any more.
+    /// Rows dropped: too old, no destination or provider any more, or the
+    /// event was disabled or unrouted while they were held.
     pub dropped: u64,
+}
+
+enum GroupOutcome {
+    Sent,
+    Failed,
+    Skipped,
 }
 
 /// Send one summary per (user, channel) for every held row due at `now`.
 ///
-/// Rows are claimed by pushing `deliver_after` forward with a conditional
-/// update, so a second flusher (a replica that briefly believes it is leader)
-/// skips them. They are deleted after a successful send and made due again
-/// after a failed one.
+/// Rows are claimed with a conditional update of `claimed_until`, so a second
+/// flusher (a replica that briefly believes it is leader) skips them. A
+/// successful send is logged and its rows deleted in one transaction; a failed
+/// one is logged once and retried after a growing delay. One user's error is
+/// logged and does not stop the others.
 pub async fn flush_due(
     service: &NotificationService,
     db: &DatabaseConnection,
@@ -328,6 +400,7 @@ pub async fn flush_due(
 
     let due = notification_outbox::Entity::find()
         .filter(notification_outbox::Column::DeliverAfter.lte(now))
+        .filter(unclaimed(now))
         .order_by_desc(notification_outbox::Column::CreatedAt)
         .order_by_desc(notification_outbox::Column::Id)
         .all(db)
@@ -346,92 +419,205 @@ pub async fn flush_due(
     }
 
     for ((user_id, channel_type), rows) in groups {
-        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
-
-        let pref = user_notification_pref::Entity::find()
-            .filter(user_notification_pref::Column::UserId.eq(user_id))
-            .filter(user_notification_pref::Column::ChannelType.eq(&channel_type))
-            .filter(user_notification_pref::Column::Enabled.eq(true))
-            .filter(user_notification_pref::Column::Verified.eq(true))
-            .one(db)
-            .await?;
-        let Some(destination) = pref.and_then(|p| p.destination) else {
-            let deleted = notification_outbox::Entity::delete_many()
-                .filter(notification_outbox::Column::Id.is_in(ids))
-                .exec(db)
-                .await?;
-            tracing::info!(
+        match flush_group(service, db, now, user_id, &channel_type, rows, &mut stats).await {
+            Ok(GroupOutcome::Sent) => stats.sent += 1,
+            Ok(GroupOutcome::Failed) => stats.failed += 1,
+            Ok(GroupOutcome::Skipped) => {}
+            Err(e) => tracing::warn!(
                 user_id,
                 channel = %channel_type,
-                rows = deleted.rows_affected,
-                "Dropped held notifications: destination no longer enabled and verified"
-            );
-            stats.dropped += deleted.rows_affected;
-            continue;
-        };
-
-        let lease = now + ChronoDuration::minutes(CLAIM_LEASE_MINUTES);
-        let claimed = notification_outbox::Entity::update_many()
-            .col_expr(
-                notification_outbox::Column::DeliverAfter,
-                Expr::value(lease),
-            )
-            .filter(notification_outbox::Column::Id.is_in(ids.clone()))
-            .filter(notification_outbox::Column::DeliverAfter.lte(now))
-            .exec(db)
-            .await?;
-        if claimed.rows_affected != ids.len() as u64 {
-            // Someone else claimed part of the group; whatever we claimed comes
-            // due again after the lease.
-            tracing::warn!(user_id, channel = %channel_type, "Held notifications claimed elsewhere; skipping");
-            continue;
-        }
-
-        let (title, severity, body) = summary_message(&rows);
-        let message = NotificationMessage {
-            recipient: destination.clone(),
-            title,
-            body,
-            severity,
-        };
-        let result = service.send_to_channel(&channel_type, &message).await;
-        if let Err(e) = service
-            .log_notification(
-                db,
-                Some(user_id),
-                &channel_type,
-                SUMMARY_EVENT_TYPE,
-                &destination,
-                &result,
-            )
-            .await
-        {
-            tracing::warn!(user_id, "Failed to log quiet hours summary: {}", e);
-        }
-
-        if result.success {
-            notification_outbox::Entity::delete_many()
-                .filter(notification_outbox::Column::Id.is_in(ids))
-                .exec(db)
-                .await?;
-            tracing::info!(user_id, channel = %channel_type, held = rows.len(), "Sent quiet hours summary");
-            stats.sent += 1;
-        } else {
-            notification_outbox::Entity::update_many()
-                .col_expr(notification_outbox::Column::DeliverAfter, Expr::value(now))
-                .filter(notification_outbox::Column::Id.is_in(ids))
-                .exec(db)
-                .await?;
-            tracing::warn!(
-                user_id,
-                channel = %channel_type,
-                error = result.error.as_deref().unwrap_or("unknown"),
-                "Quiet hours summary failed; will retry"
-            );
-            stats.failed += 1;
+                "Quiet hours flush failed for this user; will retry: {}",
+                e
+            ),
         }
     }
     Ok(stats)
+}
+
+/// Delete `ids`, logging why once; returns how many went.
+async fn drop_rows(
+    db: &DatabaseConnection,
+    ids: Vec<i64>,
+    user_id: i64,
+    channel_type: &str,
+    reason: &str,
+) -> Result<u64> {
+    let deleted = notification_outbox::Entity::delete_many()
+        .filter(notification_outbox::Column::Id.is_in(ids))
+        .exec(db)
+        .await?;
+    tracing::info!(
+        user_id,
+        channel = %channel_type,
+        rows = deleted.rows_affected,
+        "Dropped held notifications: {}",
+        reason
+    );
+    Ok(deleted.rows_affected)
+}
+
+async fn flush_group(
+    service: &NotificationService,
+    db: &DatabaseConnection,
+    now: DateTime<Utc>,
+    user_id: i64,
+    channel_type: &str,
+    rows: Vec<notification_outbox::Model>,
+    stats: &mut FlushStats,
+) -> Result<GroupOutcome> {
+    let ids = |rows: &[notification_outbox::Model]| rows.iter().map(|r| r.id).collect::<Vec<_>>();
+
+    // An admin may have disabled the event or removed the route meanwhile.
+    let mut allowed: BTreeMap<String, bool> = BTreeMap::new();
+    for event_type in rows.iter().map(|r| r.event_type.clone()) {
+        if allowed.contains_key(&event_type) {
+            continue;
+        }
+        let enabled = notification_event::Entity::find()
+            .filter(notification_event::Column::EventType.eq(&event_type))
+            .one(db)
+            .await?
+            .is_some_and(|e| e.enabled);
+        let routed = match ChannelType::parse(channel_type) {
+            Some(channel) if enabled => routing::routed_channels(db, &event_type)
+                .await?
+                .contains(&channel),
+            _ => false,
+        };
+        allowed.insert(event_type, routed);
+    }
+    let (rows, unrouted): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .partition(|r| allowed.get(&r.event_type).copied().unwrap_or(false));
+    if !unrouted.is_empty() {
+        stats.dropped += drop_rows(
+            db,
+            ids(&unrouted),
+            user_id,
+            channel_type,
+            "event disabled or no longer routed to this channel",
+        )
+        .await?;
+    }
+    if rows.is_empty() {
+        return Ok(GroupOutcome::Skipped);
+    }
+
+    let pref = user_notification_pref::Entity::find()
+        .filter(user_notification_pref::Column::UserId.eq(user_id))
+        .filter(user_notification_pref::Column::ChannelType.eq(channel_type))
+        .filter(user_notification_pref::Column::Enabled.eq(true))
+        .filter(user_notification_pref::Column::Verified.eq(true))
+        .one(db)
+        .await?;
+    let Some(destination) = pref.and_then(|p| p.destination) else {
+        stats.dropped += drop_rows(
+            db,
+            ids(&rows),
+            user_id,
+            channel_type,
+            "destination no longer enabled and verified",
+        )
+        .await?;
+        return Ok(GroupOutcome::Skipped);
+    };
+    if !service.has_provider(channel_type).await {
+        stats.dropped += drop_rows(
+            db,
+            ids(&rows),
+            user_id,
+            channel_type,
+            "channel not configured or disabled",
+        )
+        .await?;
+        return Ok(GroupOutcome::Skipped);
+    }
+
+    let row_ids = ids(&rows);
+    let lease = now + ChronoDuration::minutes(CLAIM_LEASE_MINUTES);
+    let claimed = notification_outbox::Entity::update_many()
+        .col_expr(
+            notification_outbox::Column::ClaimedUntil,
+            Expr::value(Some(lease)),
+        )
+        .filter(notification_outbox::Column::Id.is_in(row_ids.clone()))
+        .filter(notification_outbox::Column::DeliverAfter.lte(now))
+        .filter(unclaimed(now))
+        .exec(db)
+        .await?;
+    if claimed.rows_affected != row_ids.len() as u64 {
+        // Someone else claimed part of the group; whatever we claimed comes
+        // back after the lease.
+        tracing::warn!(user_id, channel = %channel_type, "Held notifications claimed elsewhere; skipping");
+        return Ok(GroupOutcome::Skipped);
+    }
+
+    let tz = user_quiet_hours::Entity::find_by_id(user_id)
+        .one(db)
+        .await?
+        .and_then(|q| parse_timezone(&q.timezone).ok())
+        .map(|(tz, _)| tz)
+        .unwrap_or(TimeZone::UTC);
+    let (title, severity, body) = summary_message(&rows, channel_type, &tz);
+    let message = NotificationMessage {
+        recipient: destination.clone(),
+        title,
+        body,
+        severity,
+    };
+    let result = service.send_to_channel(channel_type, &message).await;
+
+    let txn = db.begin().await?;
+    service
+        .log_notification(
+            &txn,
+            Some(user_id),
+            channel_type,
+            SUMMARY_EVENT_TYPE,
+            &destination,
+            &result,
+        )
+        .await?;
+    if result.success {
+        notification_outbox::Entity::delete_many()
+            .filter(notification_outbox::Column::Id.is_in(row_ids))
+            .exec(&txn)
+            .await?;
+        txn.commit().await?;
+        tracing::info!(user_id, channel = %channel_type, held = rows.len(), "Sent quiet hours summary");
+        return Ok(GroupOutcome::Sent);
+    }
+
+    let attempts = rows
+        .iter()
+        .map(|r| r.attempts)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let retry_at = now + ChronoDuration::minutes(retry_delay_minutes(attempts));
+    notification_outbox::Entity::update_many()
+        .col_expr(
+            notification_outbox::Column::DeliverAfter,
+            Expr::value(retry_at),
+        )
+        .col_expr(notification_outbox::Column::Attempts, Expr::value(attempts))
+        .col_expr(
+            notification_outbox::Column::ClaimedUntil,
+            Expr::value(Option::<DateTime<Utc>>::None),
+        )
+        .filter(notification_outbox::Column::Id.is_in(row_ids))
+        .exec(&txn)
+        .await?;
+    txn.commit().await?;
+    tracing::warn!(
+        user_id,
+        channel = %channel_type,
+        attempts,
+        retry_in_minutes = retry_delay_minutes(attempts),
+        error = result.error.as_deref().unwrap_or("unknown"),
+        "Quiet hours summary failed; will retry"
+    );
+    Ok(GroupOutcome::Failed)
 }
 
 /// Leader-only: delivers held notifications every minute.
@@ -623,6 +809,8 @@ mod tests {
             severity: severity.to_string(),
             created_at: Utc::now() - ChronoDuration::minutes(minutes_ago),
             deliver_after: Utc::now(),
+            claimed_until: None,
+            attempts: 0,
         }
     }
 
@@ -633,7 +821,7 @@ mod tests {
             outbox_row(2, "App updated", "info", 2),
             outbox_row(1, "App updated", "info", 3),
         ];
-        let (title, severity, body) = summary_message(&rows);
+        let (title, severity, body) = summary_message(&rows, "telegram", &TimeZone::UTC);
         assert_eq!(title, SUMMARY_TITLE);
         assert_eq!(severity, NotificationSeverity::Warning);
         assert!(body.contains("3 notifications were held"), "{body}");
@@ -649,7 +837,7 @@ mod tests {
         let rows: Vec<_> = (0..13)
             .map(|i| outbox_row(i, &format!("Event {i}"), "info", i))
             .collect();
-        let (_, _, body) = summary_message(&rows);
+        let (_, _, body) = summary_message(&rows, "email", &TimeZone::UTC);
         assert_eq!(body.matches("\n- ").count(), SUMMARY_RECENT);
         assert!(body.contains("…and 3 more"), "{body}");
     }
@@ -904,7 +1092,7 @@ mod tests {
         notification_outbox::ActiveModel {
             user_id: Set(user_id),
             channel_type: Set(channel.to_string()),
-            event_type: Set("app_updated".to_string()),
+            event_type: Set("login".to_string()),
             title: Set(title.to_string()),
             body: Set("body".to_string()),
             severity: Set("info".to_string()),
@@ -1013,7 +1201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_summary_keeps_rows_for_the_next_minute() {
+    async fn failed_summary_keeps_rows_and_retries_a_minute_later() {
         let (db, svc, uid) = setup("info").await;
         let telegram = Recorder::new(ChannelType::Telegram);
         *telegram.fail.lock().expect("lock") = true;
@@ -1036,7 +1224,11 @@ mod tests {
             .await
             .expect("rows");
         assert_eq!(left.len(), 1);
-        assert!(left[0].deliver_after <= now, "due again on the next run");
+        assert_eq!(
+            left[0].deliver_after,
+            now + ChronoDuration::minutes(1),
+            "first retry a minute later"
+        );
 
         *telegram.fail.lock().expect("lock") = false;
         let next = now + ChronoDuration::minutes(1);
@@ -1150,5 +1342,206 @@ mod tests {
             .expect("q")
             .expect("row");
         assert_eq!(row.deliver_after, utc(2026, 6, 2, 8, 0));
+    }
+
+    #[test]
+    fn timezone_names_are_length_limited() {
+        let long = format!("Europe/{}", "x".repeat(MAX_TIMEZONE_LEN));
+        assert!(QuietWindow::new(1380, 420, &long).is_err());
+    }
+
+    #[test]
+    fn retry_delay_doubles_up_to_an_hour() {
+        let delays: Vec<i64> = (1..=9).map(retry_delay_minutes).collect();
+        assert_eq!(delays, vec![1, 2, 4, 8, 16, 32, 60, 60, 60]);
+    }
+
+    #[test]
+    fn summary_times_are_in_the_users_zone() {
+        let mut row = outbox_row(1, "App updated", "info", 0);
+        row.created_at = utc(2026, 11, 25, 3, 12);
+        let tz = TimeZone::get("Europe/Amsterdam").expect("zone");
+        let (_, _, body) = summary_message(&[row], "email", &tz);
+        assert!(body.contains("(2026-11-25 04:12 CET)"), "{body}");
+    }
+
+    #[test]
+    fn sms_summary_has_counts_for_three_titles_only() {
+        let rows: Vec<_> = ["A", "A", "B", "C", "D", "E"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| outbox_row(i as i64, t, "info", i as i64))
+            .collect();
+        let (_, _, body) = summary_message(&rows, "messagebird", &TimeZone::UTC);
+        assert_eq!(
+            body,
+            "6 held during quiet hours: 2× A, 1× B, 1× C (+2 more)."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_hold_sends_instead_of_losing_the_message() {
+        use sea_orm::ConnectionTrait;
+        let (db, svc, uid) = setup("info").await;
+        set_quiet(&db, uid, true, true).await;
+        db.execute_unprepared("DROP TABLE notification_outbox")
+            .await
+            .expect("drop outbox");
+        svc.notify_event(&AuditAction::Login, Some(uid), Some("quiet"), None)
+            .await
+            .expect("notify");
+        let attempts = notification_log::Entity::find()
+            .count(&db)
+            .await
+            .expect("logs");
+        assert_eq!(attempts, 2, "both routed channels were sent instead");
+    }
+
+    #[tokio::test]
+    async fn rows_for_a_channel_without_a_provider_are_dropped_once() {
+        let (db, svc, uid) = setup("info").await;
+        let now = Utc::now();
+        held_row(&db, uid, "telegram", "App updated", now, now).await;
+        let stats = flush_due(&svc, &db, now).await.expect("flush");
+        assert_eq!(
+            stats,
+            FlushStats {
+                sent: 0,
+                failed: 0,
+                dropped: 1
+            }
+        );
+        assert_eq!(
+            notification_outbox::Entity::find()
+                .count(&db)
+                .await
+                .expect("n"),
+            0
+        );
+        assert_eq!(
+            notification_log::Entity::find()
+                .count(&db)
+                .await
+                .expect("n"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_summaries_back_off_with_one_log_row_per_step() {
+        let (db, svc, uid) = setup("info").await;
+        let telegram = Recorder::new(ChannelType::Telegram);
+        *telegram.fail.lock().expect("lock") = true;
+        svc.set_provider_override(Arc::new(telegram.clone())).await;
+        let start = Utc::now();
+        held_row(&db, uid, "telegram", "App updated", start, start).await;
+
+        let mut now = start;
+        for (step, delay) in [1i64, 2, 4, 8].into_iter().enumerate() {
+            let stats = flush_due(&svc, &db, now).await.expect("flush");
+            assert_eq!(stats.failed, 1, "step {step}");
+            let row = notification_outbox::Entity::find()
+                .one(&db)
+                .await
+                .expect("q")
+                .expect("row");
+            assert_eq!(row.attempts, step as i32 + 1);
+            assert_eq!(row.deliver_after, now + ChronoDuration::minutes(delay));
+            assert!(row.claimed_until.is_none());
+            // Runs before the next step send nothing and log nothing.
+            let quiet = flush_due(&svc, &db, now + ChronoDuration::seconds(30))
+                .await
+                .expect("flush");
+            assert_eq!(quiet, FlushStats::default());
+            assert_eq!(
+                notification_log::Entity::find()
+                    .count(&db)
+                    .await
+                    .expect("n"),
+                step as u64 + 1
+            );
+            now = row.deliver_after;
+        }
+
+        *telegram.fail.lock().expect("lock") = false;
+        assert_eq!(flush_due(&svc, &db, now).await.expect("flush").sent, 1);
+        assert_eq!(
+            notification_outbox::Entity::find()
+                .count(&db)
+                .await
+                .expect("n"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_for_a_disabled_or_unrouted_event_are_dropped_at_flush() {
+        let (db, svc, uid) = setup("info").await;
+        let telegram = Recorder::new(ChannelType::Telegram);
+        let email = Recorder::new(ChannelType::Email);
+        svc.set_provider_override(Arc::new(telegram.clone())).await;
+        svc.set_provider_override(Arc::new(email.clone())).await;
+        let now = Utc::now();
+        held_row(&db, uid, "telegram", "App updated", now, now).await;
+        held_row(&db, uid, "email", "App updated", now, now).await;
+
+        // Email route removed: only Telegram goes out.
+        routing::set_routes(&db, "login", &HashMap::from([(ChannelType::Email, false)]))
+            .await
+            .expect("routes");
+        let stats = flush_due(&svc, &db, now).await.expect("flush");
+        assert_eq!(
+            stats,
+            FlushStats {
+                sent: 1,
+                failed: 0,
+                dropped: 1
+            }
+        );
+        assert!(email.sent().is_empty());
+        assert_eq!(telegram.sent().len(), 1);
+
+        // Event disabled: everything held for it is dropped.
+        held_row(&db, uid, "telegram", "App updated", now, now).await;
+        notification_event::Entity::update_many()
+            .col_expr(notification_event::Column::Enabled, Expr::value(false))
+            .exec(&db)
+            .await
+            .expect("disable");
+        let stats = flush_due(&svc, &db, now).await.expect("flush");
+        assert_eq!(
+            stats,
+            FlushStats {
+                sent: 0,
+                failed: 0,
+                dropped: 1
+            }
+        );
+        assert_eq!(telegram.sent().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn settings_changes_leave_claimed_rows_alone() {
+        let (db, _, uid) = setup("info").await;
+        let now = utc(2026, 6, 1, 23, 30);
+        let later = utc(2026, 6, 2, 7, 0);
+        held_row(&db, uid, "telegram", "App updated", now, later).await;
+        let row = notification_outbox::Entity::find()
+            .one(&db)
+            .await
+            .expect("q")
+            .expect("row");
+        let mut active: notification_outbox::ActiveModel = row.into();
+        active.claimed_until = Set(Some(now + ChronoDuration::minutes(5)));
+        active.update(&db).await.expect("claim");
+        reschedule_held(&db, uid, None, now)
+            .await
+            .expect("reschedule");
+        let row = notification_outbox::Entity::find()
+            .one(&db)
+            .await
+            .expect("q")
+            .expect("row");
+        assert_eq!(row.deliver_after, later);
     }
 }

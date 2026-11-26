@@ -17,6 +17,10 @@ pub struct Model {
     pub severity: String,
     pub created_at: DateTimeUtc,
     pub deliver_after: DateTimeUtc,
+    /// Set while a flush is sending the row; claimable again after it passes.
+    pub claimed_until: Option<DateTimeUtc>,
+    /// Failed summary sends so far (drives the retry backoff).
+    pub attempts: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

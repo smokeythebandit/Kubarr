@@ -6,6 +6,9 @@
 //! - `notification_outbox`: external messages held during quiet hours, one
 //!   row per (user, channel, event). The leader flushes rows whose
 //!   `deliver_after` has passed as one summary per (user, channel).
+//!   `claimed_until` marks rows a flush is sending (a lease, separate from
+//!   `deliver_after` so a settings change never moves claimed rows);
+//!   `attempts` counts failed sends for the retry backoff.
 //!
 //! Follows 000041 (assistant actions).
 
@@ -113,6 +116,17 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
+                    .col(
+                        ColumnDef::new(NotificationOutbox::ClaimedUntil)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(NotificationOutbox::Attempts)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_notification_outbox_user")
@@ -130,6 +144,16 @@ impl MigrationTrait for Migration {
                     .name("idx_notification_outbox_deliver_after")
                     .table(NotificationOutbox::Table)
                     .col(NotificationOutbox::DeliverAfter)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_notification_outbox_user")
+                    .table(NotificationOutbox::Table)
+                    .col(NotificationOutbox::UserId)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -194,4 +218,7 @@ enum NotificationOutbox {
     CreatedAt,
     #[iden = "deliver_after"]
     DeliverAfter,
+    #[iden = "claimed_until"]
+    ClaimedUntil,
+    Attempts,
 }
