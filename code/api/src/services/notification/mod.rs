@@ -1,5 +1,6 @@
 mod email;
 mod messagebird;
+pub mod quiet_hours;
 pub mod routing;
 mod telegram;
 pub mod verification;
@@ -439,10 +440,40 @@ impl NotificationService {
                 .filter(user_notification_pref::Column::Verified.eq(true))
                 .all(db)
                 .await?;
+            // Quiet hours hold external messages; the bell was already written.
+            // A failed lookup sends rather than risk losing the message.
+            let now = chrono::Utc::now();
+            let hold_until = match quiet_hours::hold_until(db, uid, severity, now).await {
+                Ok(until) => until,
+                Err(e) => {
+                    tracing::warn!(user_id = uid, "Quiet hours lookup failed: {}", e);
+                    None
+                }
+            };
             for pref in prefs.into_iter().filter(|pref| {
                 ChannelType::parse(&pref.channel_type).is_some_and(|c| routed.contains(&c))
             }) {
                 if let Some(destination) = &pref.destination {
+                    if let Some(deliver_after) = hold_until {
+                        let held = quiet_hours::HeldMessage {
+                            user_id: uid,
+                            channel_type: &pref.channel_type,
+                            event_type,
+                            title,
+                            body,
+                            severity,
+                        };
+                        // A failed hold sends now rather than lose the message.
+                        match quiet_hours::hold(db, &held, now, deliver_after).await {
+                            Ok(()) => continue,
+                            Err(e) => tracing::warn!(
+                                user_id = uid,
+                                channel = %pref.channel_type,
+                                "Holding a notification for quiet hours failed; sending now: {}",
+                                e
+                            ),
+                        }
+                    }
                     let message = NotificationMessage {
                         recipient: destination.clone(),
                         title: title.to_string(),
@@ -465,6 +496,20 @@ impl NotificationService {
         }
 
         Ok(())
+    }
+
+    /// Whether `channel_type` has a provider to send through (configured and
+    /// enabled, or overridden).
+    async fn has_provider(&self, channel_type: &str) -> bool {
+        if self.override_for(channel_type).await.is_some() {
+            return true;
+        }
+        match channel_type {
+            "email" => self.email.read().await.is_some(),
+            "telegram" => self.telegram.read().await.is_some(),
+            "messagebird" => self.messagebird.read().await.is_some(),
+            _ => false,
+        }
     }
 
     /// Send a message to a specific channel
@@ -505,9 +550,9 @@ impl NotificationService {
     }
 
     /// Log a notification delivery attempt
-    async fn log_notification(
+    async fn log_notification<C: sea_orm::ConnectionTrait>(
         &self,
-        db: &DatabaseConnection,
+        db: &C,
         user_id: Option<i64>,
         channel_type: &str,
         event_type: &str,

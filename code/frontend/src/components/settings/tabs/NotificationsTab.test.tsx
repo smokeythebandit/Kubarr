@@ -3,6 +3,21 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import type { NotificationChannel, NotificationLog } from '../../../api/notifications';
 import { NotificationsTab } from './NotificationsTab';
+
+vi.mock('../../../api/notifications', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../api/notifications')>()),
+  notificationsApi: {
+    getQuietHours: vi.fn().mockResolvedValue({
+      enabled: true,
+      from_minute: 23 * 60,
+      to_minute: 7 * 60,
+      timezone: 'Europe/Amsterdam',
+      critical_bypass: true,
+      configured: true,
+    }),
+    updateQuietHours: vi.fn(),
+  },
+}));
 import { channelStatus, unresolvedFailures } from './notificationChannelStatus';
 
 const channel = (channel_type: string, enabled: boolean, config: Record<string, unknown> = {}): NotificationChannel => ({
@@ -117,7 +132,17 @@ describe('NotificationsTab', () => {
     expect(within(history).getByTestId('count-badge')).toHaveTextContent('1');
     expect(within(history).getByTestId('count-badge')).toHaveAttribute('data-kind', 'crit');
     expect(within(within(tabs).getByRole('tab', { name: 'What you get' })).queryByTestId('count-badge')).toBeNull();
-    expect(within(tabs).queryByRole('tab', { name: /Quiet hours/ })).toBeNull();
+    expect(within(within(tabs).getByRole('tab', { name: 'Quiet hours' })).queryByTestId('count-badge')).toBeNull();
+  });
+
+  it('shows the signed-in user\'s quiet hours in their own tab', async () => {
+    renderTab();
+    fireEvent.click(screen.getByRole('tab', { name: 'Quiet hours' }));
+    const panel = screen.getByRole('tabpanel');
+    expect(within(panel).getByRole('heading', { name: 'Quiet hours' })).toBeInTheDocument();
+    expect(await within(panel).findByTestId('quiet-hours-preview')).toHaveTextContent(
+      'Quiet from 23:00 to 07:00 Europe/Amsterdam; held messages arrive as one summary at 07:00',
+    );
   });
 
   it('omits badges when nothing failed and hides history without audit.view', () => {

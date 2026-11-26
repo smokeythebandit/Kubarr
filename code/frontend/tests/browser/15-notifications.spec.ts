@@ -230,3 +230,24 @@ test('routes an event to a set-up channel and keeps the others locked', async ({
   await expect.poll(() => updates).toEqual([{ channels: { email: true } }]);
   await expect(page.getByRole('tab', { name: /^What you get\s*1$/ })).toBeVisible();
 });
+
+test('quiet hours default to the browser time zone and save as one PUT', async ({ page, api }) => {
+  const updates: unknown[] = [];
+  api.on('PUT', '/api/notifications/quiet-hours', request => {
+    const update = request.postDataJSON();
+    updates.push(update);
+    return { json: { ...update, configured: true } };
+  });
+  await page.goto('/settings?section=notifications');
+  await page.getByRole('tab', { name: 'Quiet hours' }).click();
+  const panel = page.getByRole('tabpanel');
+  const zone = await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  await expect(panel.getByRole('combobox', { name: 'Time zone' })).toHaveValue(zone);
+  await expect(panel.getByTestId('quiet-hours-preview')).toHaveText('Quiet hours are off: email, Telegram and SMS go out straight away.');
+  await panel.getByRole('switch', { name: 'Quiet hours' }).click();
+  await panel.getByLabel('to').fill('07:30');
+  await expect(panel.getByTestId('quiet-hours-preview')).toContainText(`Quiet from 23:00 to 07:30 ${zone}; held messages arrive as one summary at 07:30`);
+  await panel.getByRole('button', { name: 'Save quiet hours' }).click();
+  await expect(panel.getByText('Quiet hours saved')).toBeVisible();
+  expect(updates).toEqual([{ enabled: true, from_minute: 1380, to_minute: 450, timezone: zone, critical_bypass: true }]);
+});

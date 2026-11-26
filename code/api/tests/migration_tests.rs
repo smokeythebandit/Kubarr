@@ -44,6 +44,8 @@ async fn create_postgres_db() -> Option<DatabaseConnection> {
 async fn cleanup_postgres_tables(db: &DatabaseConnection) {
     // Drop all tables in reverse dependency order
     let tables = [
+        "notification_outbox",
+        "user_quiet_hours",
         "app_storage_configs",
         "user_notifications",
         "notification_logs",
@@ -357,6 +359,9 @@ async fn all_tables_created_impl(db: &DatabaseConnection) {
         "pod_watch_heartbeat",
         // Per-event external channel routing.
         "notification_routes",
+        // Quiet hours and the messages they hold back.
+        "user_quiet_hours",
+        "notification_outbox",
     ];
 
     for table in expected_tables {
@@ -908,3 +913,44 @@ async fn migration_count_impl(db: &DatabaseConnection) {
 }
 
 test_both_databases!(test_migration_count, migration_count_impl);
+
+async fn quiet_hours_tables_cascade_from_users_impl(db: &DatabaseConnection) {
+    Migrator::up(db, None)
+        .await
+        .expect("Failed to apply migrations");
+
+    for table in ["user_quiet_hours", "notification_outbox"] {
+        let fks = get_foreign_keys(db, table).await;
+        assert!(
+            fks.iter()
+                .any(|(from, target, to)| from == "user_id" && target == "users" && to == "id"),
+            "{table} should have FK to users. FKs: {:?}",
+            fks
+        );
+    }
+    let columns: Vec<String> = get_table_columns(db, "notification_outbox")
+        .await
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    for column in [
+        "id",
+        "user_id",
+        "channel_type",
+        "event_type",
+        "title",
+        "body",
+        "severity",
+        "created_at",
+        "deliver_after",
+        "claimed_until",
+        "attempts",
+    ] {
+        assert!(columns.contains(&column.to_string()), "missing {column}");
+    }
+}
+
+test_both_databases!(
+    test_quiet_hours_tables_cascade_from_users,
+    quiet_hours_tables_cascade_from_users_impl
+);

@@ -130,7 +130,18 @@ async fn run_as_leader(
             }
         }
     });
-    scheduler::start_scheduler(Arc::new(conn.clone()), cancellation.clone());
+    // The worker owns notification delivery: update outcomes and the summary
+    // of messages held for quiet hours.
+    let notifications = NotificationService::new();
+    notifications.set_db(conn.clone()).await;
+    if let Err(e) = notifications.init_providers().await {
+        tracing::warn!("Failed to initialize worker notification providers: {}", e);
+    }
+    scheduler::start_scheduler(
+        Arc::new(conn.clone()),
+        notifications.clone(),
+        cancellation.clone(),
+    );
     let domain_reconciler = Arc::new(DomainReconciler::new(conn.clone(), k8s_client.clone()));
 
     // One watch feeds the pod status cache for every dashboard viewer, so the
@@ -150,11 +161,6 @@ async fn run_as_leader(
     }
 
     // Update outcomes are announced from the worker that runs the operation.
-    let notifications = NotificationService::new();
-    notifications.set_db(conn.clone()).await;
-    if let Err(e) = notifications.init_providers().await {
-        tracing::warn!("Failed to initialize worker notification providers: {}", e);
-    }
     let auto_update_db = conn.clone();
     let auto_update_catalog = catalog.clone();
     let manager = Arc::new(
