@@ -110,8 +110,39 @@ export interface ConversationSummary {
   updated_at: string;
 }
 
+export type ActionStatus = 'pending' | 'expired' | 'running' | 'done' | 'failed' | 'cancelled';
+
+/** What a proposed action will do, computed by Kubarr (never by the model). */
+export interface ActionSummary {
+  title: string;
+  effect: string;
+  from_version?: string;
+  to_version?: string;
+}
+
+/** An action the assistant proposed; it only runs when the person clicks Run. */
+export interface ActionCard {
+  id: string;
+  kind: string;
+  app: string;
+  /** The answer that proposed it. */
+  message_id?: number;
+  summary: ActionSummary;
+  status: ActionStatus;
+  expires_at: string;
+  operation_id?: string;
+  error?: string;
+  created_at?: string;
+}
+
+export interface RunActionResult {
+  status: 'running' | 'done';
+  operation_id?: string;
+}
+
 export interface ConversationDetail extends ConversationSummary {
   messages: ChatMessage[];
+  actions?: ActionCard[];
 }
 
 /** One server-sent event of an answer. */
@@ -119,6 +150,7 @@ export type ChatEvent =
   | { event: 'status'; text: string }
   | { event: 'text_delta'; text: string }
   | { event: 'sources'; items: AssistantSource[] }
+  | { event: 'action_card'; card: ActionCard }
   | { event: 'done'; message_id: number }
   | { event: 'error'; message: string };
 
@@ -143,6 +175,10 @@ function toEvent(name: string, data: string): ChatEvent | null {
       return typeof payload.text === 'string' ? { event: name, text: payload.text } : null;
     case 'sources':
       return Array.isArray(payload.items) ? { event: 'sources', items: payload.items as AssistantSource[] } : null;
+    case 'action_card':
+      return typeof payload.id === 'string' && typeof payload.kind === 'string'
+        ? { event: 'action_card', card: payload as unknown as ActionCard }
+        : null;
     case 'done':
       return typeof payload.message_id === 'number' ? { event: 'done', message_id: payload.message_id } : null;
     case 'error':
@@ -196,6 +232,16 @@ export const assistantChatApi = {
 
   deleteConversation: async (id: string): Promise<void> => {
     await apiClient.delete(`/assistant/conversations/${encodeURIComponent(id)}`);
+  },
+
+  /** Run a proposed action (the only way it is carried out). */
+  runAction: async (id: string): Promise<RunActionResult> => {
+    const response = await apiClient.post<RunActionResult>(`/assistant/actions/${encodeURIComponent(id)}/run`);
+    return response.data;
+  },
+
+  cancelAction: async (id: string): Promise<void> => {
+    await apiClient.post(`/assistant/actions/${encodeURIComponent(id)}/cancel`);
   },
 
   /**

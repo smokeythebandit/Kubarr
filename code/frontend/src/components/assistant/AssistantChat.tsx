@@ -4,11 +4,14 @@ import { Loader2, RotateCcw, Send, Square } from 'lucide-react';
 import {
   assistantChatApi,
   AssistantRequestError,
+  type ActionCard,
   type AssistantSource,
   type ChatContext,
+  type ChatMessage,
   type ChatEvent,
   type ChatMessageStatus,
 } from '../../api/assistant';
+import { ActionCardView } from './ActionCardView';
 import { MarkdownLite } from './MarkdownLite';
 import { ASSISTANT_CONVERSATIONS_KEY, ASSISTANT_STATUS_KEY } from './assistantState';
 
@@ -22,6 +25,19 @@ export interface ShownMessage {
   error?: string;
   /** "Looking at …" while a tool runs. */
   statusLine?: string;
+  /** Actions this answer proposed. */
+  actions?: ActionCard[];
+}
+
+/** Messages with each action card attached to the answer that proposed it. */
+export function withActions(messages: ChatMessage[], actions: ActionCard[] = []): ShownMessage[] {
+  const shown: ShownMessage[] = messages.map((m) => ({ ...m }));
+  const lastAssistant = [...shown].reverse().find((m) => m.role === 'assistant');
+  for (const card of actions) {
+    const owner = shown.find((m) => m.id === card.message_id && m.role === 'assistant') ?? lastAssistant;
+    if (owner) owner.actions = [...(owner.actions ?? []), card];
+  }
+  return shown;
 }
 
 export const BUDGET_PAUSED_TEXT =
@@ -59,7 +75,15 @@ function Sources({ items }: { items: AssistantSource[] }) {
   );
 }
 
-function AssistantBubble({ message, onAskAgain }: { message: ShownMessage; onAskAgain?: () => void }) {
+function AssistantBubble({
+  message,
+  onAskAgain,
+  onActionChange,
+}: {
+  message: ShownMessage;
+  onAskAgain?: () => void;
+  onActionChange: (card: ActionCard) => void;
+}) {
   const streaming = message.status === 'streaming';
   return (
     <div className="max-w-full rounded-2xl rounded-tl-sm bg-white dark:bg-gray-800 px-3.5 py-2.5 text-sm text-gray-800 dark:text-gray-100 ring-1 ring-gray-200 dark:ring-gray-700">
@@ -88,6 +112,9 @@ function AssistantBubble({ message, onAskAgain }: { message: ShownMessage; onAsk
           {message.error ?? 'The assistant could not answer.'}
         </p>
       )}
+      {message.actions?.map((card) => (
+        <ActionCardView key={card.id} card={card} onChange={onActionChange} />
+      ))}
       <Sources items={message.sources} />
     </div>
   );
@@ -119,7 +146,7 @@ export function AssistantChat({ conversationId, onConversationCreated, context, 
     assistantChatApi
       .getConversation(conversationId)
       .then((detail) => {
-        if (!cancelled) setMessages(detail.messages.map((m) => ({ ...m })));
+        if (!cancelled) setMessages(withActions(detail.messages, detail.actions));
       })
       .catch(() => {
         if (!cancelled) setLoadError('Could not load this conversation.');
@@ -162,6 +189,9 @@ export function AssistantChat({ conversationId, onConversationCreated, context, 
             break;
           case 'sources':
             update(answerId, (m) => ({ ...m, sources: event.items }));
+            break;
+          case 'action_card':
+            update(answerId, (m) => ({ ...m, actions: [...(m.actions ?? []), event.card] }));
             break;
           case 'done':
             finished = true;
@@ -215,6 +245,16 @@ export function AssistantChat({ conversationId, onConversationCreated, context, 
     }
   };
 
+  const changeAction = useCallback((card: ActionCard) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.actions?.some((a) => a.id === card.id)
+          ? { ...m, actions: m.actions.map((a) => (a.id === card.id ? card : a)) }
+          : m,
+      ),
+    );
+  }, []);
+
   /** The question before an assistant message, for "ask again". */
   const questionBefore = (index: number): string | undefined => {
     for (let i = index - 1; i >= 0; i--) if (messages[i].role === 'user') return messages[i].text;
@@ -229,7 +269,7 @@ export function AssistantChat({ conversationId, onConversationCreated, context, 
           <div className="mt-6 text-center text-sm text-gray-500 dark:text-gray-400">
             <p className="font-medium text-gray-700 dark:text-gray-200">Ask about your apps and server</p>
             <p className="mt-1">For example: “Why is Jellyfin unhealthy?” or “What changed last night?”</p>
-            <p className="mt-3 text-xs">The assistant can look things up but never changes anything.</p>
+            <p className="mt-3 text-xs">The assistant looks things up. It can suggest an action, but nothing changes until you click Run.</p>
           </div>
         )}
         {messages.map((m, index) =>
@@ -243,6 +283,7 @@ export function AssistantChat({ conversationId, onConversationCreated, context, 
             <div key={m.id} className="flex">
               <AssistantBubble
                 message={m}
+                onActionChange={changeAction}
                 onAskAgain={
                   m.status === 'interrupted' && !streaming && !paused && questionBefore(index)
                     ? () => void ask(questionBefore(index) as string)
