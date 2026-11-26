@@ -369,13 +369,10 @@ pub async fn create_conversation(
     require_use(&auth)?;
     let request = body.map(|Json(b)| b).unwrap_or_default();
     let db = state.get_db().await?;
-    let conversation = conversations::create(
-        &db,
-        auth.user_id(),
-        request.title.as_deref(),
-        &request.context.unwrap_or_default(),
-    )
-    .await?;
+    let context = request.context.unwrap_or_default();
+    context.validate(&db, auth.permissions()).await?;
+    let conversation =
+        conversations::create(&db, auth.user_id(), request.title.as_deref(), &context).await?;
     Ok(Json(conversation.into()))
 }
 
@@ -494,11 +491,13 @@ pub async fn post_message(
         .as_deref()
         .and_then(|json| serde_json::from_str(json).ok())
         .unwrap_or_default();
-    let context = request
-        .context
-        .unwrap_or_default()
-        .sanitized()
-        .or(&stored.sanitized());
+    let stored = stored.sanitized();
+    let mut asked = request.context.unwrap_or_default().without_kind();
+    if stored.kind.is_some() {
+        // A conversation opened for an app or operation keeps that app.
+        asked.app = None;
+    }
+    let context = asked.sanitized().or(&stored);
     let (question_id, answer_id) = conversations::start_turn(&db, &conversation, &question).await?;
     let mut ctx = ToolContext {
         state: state.clone(),

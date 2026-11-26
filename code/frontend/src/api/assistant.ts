@@ -81,6 +81,9 @@ export const assistantApi = {
 export interface ChatContext {
   page?: string;
   app?: string;
+  /** Why the conversation was opened (set when it is created). */
+  kind?: 'app' | 'operation';
+  operation_id?: string;
 }
 
 /** A tool the assistant used for an answer (never its result). */

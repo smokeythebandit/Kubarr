@@ -7,6 +7,7 @@ import { vpnApi, appVpnApi } from '../api/vpn'
 import type { VpnProvider } from '../api/vpn'
 import { VpnProviderForm } from '../components/vpn/VpnProviderForm'
 import { AppIcon, useIconColors } from '../components/AppIcon'
+import { AskAssistantButton } from '../components/assistant/AssistantPanel'
 import { OperationQueue } from '../components/OperationQueue'
 import { GpuSelectionForm } from '../components/GpuInstallDialog'
 import { InstallWizard } from '../components/InstallWizard'
@@ -763,6 +764,14 @@ function AppDetailPanel({
                       {categoryLabel}
                     </span>
                   </div>
+                  {isInstalled && !app.is_system && (
+                    <AskAssistantButton
+                      label="Ask about this app"
+                      context={{ kind: 'app', app: app.name }}
+                      draft={`What's the state of ${app.display_name}? Anything I should look at?`}
+                      className="mt-2 text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline rounded"
+                    />
+                  )}
                 </div>
 
                 {/* Action buttons */}

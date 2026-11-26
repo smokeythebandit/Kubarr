@@ -1212,3 +1212,165 @@ async fn parallel_questions_cannot_exceed_the_rate_limit() {
     }
     assert_eq!(granted, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Entry-point contexts
+// ---------------------------------------------------------------------------
+
+async fn insert_operation(h: &Harness, app: &str) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now();
+    kubarr::models::app_operation::ActiveModel {
+        id: Set(id.clone()),
+        app_name: Set(app.into()),
+        operation: Set("update".into()),
+        status: Set("failed".into()),
+        stop_requested: Set(false),
+        message: Set(None),
+        error: Set(Some("boom".into())),
+        custom_config: Set(None),
+        attempts: Set(1),
+        created_by: Set(None),
+        trigger: Set(Some("auto".into())),
+        diagnostics: Set(None),
+        created_at: Set(now),
+        started_at: Set(None),
+        finished_at: Set(Some(now)),
+        updated_at: Set(now),
+    }
+    .insert(&h.db)
+    .await
+    .unwrap();
+    id
+}
+
+async fn create_with(h: &Harness, user: &User, context: Value) -> StatusCode {
+    h.call(
+        user,
+        "POST",
+        "/api/assistant/conversations",
+        Some(json!({ "context": context })),
+    )
+    .await
+    .0
+}
+
+#[tokio::test]
+async fn conversation_context_is_validated_on_create() {
+    let h = harness("http://127.0.0.1:9").await;
+    grant(&h.db, "viewer", "assistant.use").await;
+    let admin = h.user("admin").await;
+    let viewer = h.user("viewer").await;
+    let jellyfin_op = insert_operation(&h, "jellyfin").await;
+    let sonarr_op = insert_operation(&h, "sonarr").await;
+
+    let app = |name: &str| json!({"kind": "app", "app": name});
+    let op = |name: &str, id: &str| json!({"kind": "operation", "app": name, "operation_id": id});
+
+    assert_eq!(create_with(&h, &admin, app("sonarr")).await, StatusCode::OK);
+    assert_eq!(
+        create_with(&h, &admin, op("sonarr", &sonarr_op)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        create_with(&h, &viewer, app("jellyfin")).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        create_with(&h, &viewer, op("jellyfin", &jellyfin_op)).await,
+        StatusCode::OK
+    );
+
+    // Unknown kind, malformed or missing parts.
+    for bad in [
+        json!({"kind": "everything", "app": "jellyfin"}),
+        json!({"kind": "app"}),
+        json!({"kind": "operation", "app": "jellyfin"}),
+        json!({"kind": "operation", "operation_id": jellyfin_op}),
+        json!({"kind": "app", "app": "Not An App"}),
+        json!({"operation_id": jellyfin_op}),
+    ] {
+        assert_eq!(
+            create_with(&h, &viewer, bad.clone()).await,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+    // An app the user cannot see, one that does not exist.
+    assert_eq!(
+        create_with(&h, &viewer, app("sonarr")).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        create_with(&h, &admin, app("ghost")).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        create_with(&h, &admin, json!({"app": "ghost"})).await,
+        StatusCode::NOT_FOUND
+    );
+    // Another app's operation, an invisible app's operation, a missing one.
+    assert_eq!(
+        create_with(&h, &admin, op("jellyfin", &sonarr_op)).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        create_with(&h, &viewer, op("sonarr", &sonarr_op)).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        create_with(
+            &h,
+            &viewer,
+            op("jellyfin", &uuid::Uuid::new_v4().to_string())
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn operation_context_reaches_the_model_as_ids_and_a_hint() {
+    let (url, seen) = stub_api(Arc::new(|_, _| text_reply("ok"))).await;
+    let h = harness(&url).await;
+    let admin = h.user("admin").await;
+    let op_id = insert_operation(&h, "jellyfin").await;
+    let (status, body) = h
+        .call(
+            &admin,
+            "POST",
+            "/api/assistant/conversations",
+            Some(
+                json!({"context": {"kind": "operation", "app": "jellyfin", "operation_id": op_id}}),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = serde_json::from_str::<Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // A question cannot smuggle in its own kind or operation.
+    let (status, _) = h
+        .call(
+            &admin,
+            "POST",
+            &format!("/api/assistant/conversations/{id}/messages"),
+            Some(json!({"text": "Why did it fail?", "context": {"page": "/apps", "app": "sonarr", "kind": "app", "operation_id": "deadbeef"}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let bodies = seen.bodies();
+    let context = bodies[0]["messages"][1]["content"].as_str().unwrap();
+    assert!(context.contains(&op_id), "{context}");
+    assert!(!context.contains("deadbeef"), "{context}");
+    assert!(
+        !context.contains("sonarr"),
+        "a question cannot change the app: {context}"
+    );
+    assert!(context.contains("get_app") && context.contains("list_operations"));
+    assert!(
+        !context.contains("boom"),
+        "raw data must stay out: {context}"
+    );
+}

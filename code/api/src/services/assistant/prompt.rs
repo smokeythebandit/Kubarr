@@ -70,6 +70,19 @@ pub fn context_message(
     if let Some(app) = &context.app {
         lines.push(format!("- The question is about the app `{app}`."));
     }
+    match (context.kind.as_deref(), &context.app, &context.operation_id) {
+        (Some("operation"), Some(app), Some(id)) => lines.push(format!(
+            "- This conversation was opened from operation `{id}` of `{app}`. It is probably \
+a failed update or rollback. Call get_app for `{app}`, and list_operations with app `{app}` and limit 50 \
+(older operations are listed too; the operation's error and diagnostics are in the result), \
+before answering."
+        )),
+        (Some("app"), Some(app), _) => lines.push(format!(
+            "- This conversation was opened from the page of `{app}`. Call get_app for \
+`{app}` and list_operations with app `{app}` and limit 50 before answering."
+        )),
+        _ => {}
+    }
     if ctx.is_admin() {
         lines.push("- The user is an administrator and can see every app.".to_string());
     } else if ctx.has("app.*") {
