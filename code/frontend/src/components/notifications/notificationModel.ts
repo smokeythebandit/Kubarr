@@ -326,19 +326,23 @@ export function isFailedUpdateEvent(eventType: string | null | undefined): boole
   return !!eventType && FAILED_UPDATE_EVENTS.includes(eventType);
 }
 
+/** How long before a notification its failed operation may have finished. */
+export const OPERATION_WINDOW_MS = 15 * 60 * 1000;
+
 /**
  * The assistant context for a failed-update notification. Notifications
- * carry no operation id, so the app's failed operation closest to (and not
- * after) the notification is looked up; without one the context is the app.
+ * carry no operation id, so the app's failed operation that finished up to
+ * 15 minutes before the notification is looked up (the closest one); without
+ * one the context is the app.
  */
 export async function failedOperationContext(app: string, notifiedAt: string): Promise<ChatContext> {
   const at = new Date(notifiedAt).getTime();
   const operations = await appsApi.getOperations();
   const failed = operations
     .filter((op) => op.app_name === app && op.status === 'failed')
-    .map((op) => ({ op, t: new Date(op.finished_at ?? op.updated_at).getTime() }))
-    .filter(({ t }) => Number.isFinite(t))
-    .sort((a, b) => Math.abs(a.t - at) - Math.abs(b.t - at));
+    .map((op) => ({ op, age: at - new Date(op.finished_at ?? op.updated_at).getTime() }))
+    .filter(({ age }) => Number.isFinite(age) && age >= 0 && age <= OPERATION_WINDOW_MS)
+    .sort((a, b) => a.age - b.age);
   const match = failed[0]?.op;
   return match ? { kind: 'operation', app, operation_id: match.id } : { kind: 'app', app };
 }

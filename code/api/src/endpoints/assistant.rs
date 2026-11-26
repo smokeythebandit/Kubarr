@@ -491,12 +491,13 @@ pub async fn post_message(
         .as_deref()
         .and_then(|json| serde_json::from_str(json).ok())
         .unwrap_or_default();
-    let context = request
-        .context
-        .unwrap_or_default()
-        .without_kind()
-        .sanitized()
-        .or(&stored.sanitized());
+    let stored = stored.sanitized();
+    let mut asked = request.context.unwrap_or_default().without_kind();
+    if stored.kind.is_some() {
+        // A conversation opened for an app or operation keeps that app.
+        asked.app = None;
+    }
+    let context = asked.sanitized().or(&stored);
     let (question_id, answer_id) = conversations::start_turn(&db, &conversation, &question).await?;
     let mut ctx = ToolContext {
         state: state.clone(),

@@ -73,12 +73,13 @@ pub fn context_message(
     match (context.kind.as_deref(), &context.app, &context.operation_id) {
         (Some("operation"), Some(app), Some(id)) => lines.push(format!(
             "- This conversation was opened from operation `{id}` of `{app}`. It is probably \
-a failed update or rollback. Call get_app for `{app}` and list_operations for `{app}` \
-(the operation's error and diagnostics are in the result) before answering."
+a failed update or rollback. Call get_app for `{app}`, and list_operations with app `{app}` and limit 50 \
+(older operations are listed too; the operation's error and diagnostics are in the result), \
+before answering."
         )),
         (Some("app"), Some(app), _) => lines.push(format!(
             "- This conversation was opened from the page of `{app}`. Call get_app for \
-`{app}` and list_operations for `{app}` before answering."
+`{app}` and list_operations with app `{app}` and limit 50 before answering."
         )),
         _ => {}
     }

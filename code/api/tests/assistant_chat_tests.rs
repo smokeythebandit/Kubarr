@@ -1305,6 +1305,10 @@ async fn conversation_context_is_validated_on_create() {
         create_with(&h, &admin, app("ghost")).await,
         StatusCode::NOT_FOUND
     );
+    assert_eq!(
+        create_with(&h, &admin, json!({"app": "ghost"})).await,
+        StatusCode::NOT_FOUND
+    );
     // Another app's operation, an invisible app's operation, a missing one.
     assert_eq!(
         create_with(&h, &admin, op("jellyfin", &sonarr_op)).await,
@@ -1352,7 +1356,7 @@ async fn operation_context_reaches_the_model_as_ids_and_a_hint() {
             &admin,
             "POST",
             &format!("/api/assistant/conversations/{id}/messages"),
-            Some(json!({"text": "Why did it fail?", "context": {"page": "/apps", "kind": "app", "operation_id": "deadbeef"}})),
+            Some(json!({"text": "Why did it fail?", "context": {"page": "/apps", "app": "sonarr", "kind": "app", "operation_id": "deadbeef"}})),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
@@ -1360,6 +1364,10 @@ async fn operation_context_reaches_the_model_as_ids_and_a_hint() {
     let context = bodies[0]["messages"][1]["content"].as_str().unwrap();
     assert!(context.contains(&op_id), "{context}");
     assert!(!context.contains("deadbeef"), "{context}");
+    assert!(
+        !context.contains("sonarr"),
+        "a question cannot change the app: {context}"
+    );
     assert!(context.contains("get_app") && context.contains("list_operations"));
     assert!(
         !context.contains("boom"),

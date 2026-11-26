@@ -120,12 +120,10 @@ impl ChatContext {
                 if self.operation_id.is_some() {
                     return Err(AppError::BadRequest("context: kind is required".into()));
                 }
-                if let Some(app) = &self.app {
-                    if !sees(app) {
-                        return Err(not_found());
-                    }
+                match &self.app {
+                    Some(app) => Self::visible_app(db, &sees, app).await,
+                    None => Ok(()),
                 }
-                Ok(())
             }
             Some(KIND_APP) => {
                 let app = self

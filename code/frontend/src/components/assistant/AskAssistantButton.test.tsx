@@ -141,12 +141,21 @@ describe('failed update notifications', () => {
       op('other', 'sonarr', 'failed', '2026-11-20T00:00:00Z'),
       op('ok', 'jellyfin', 'succeeded', '2026-11-20T00:00:00Z'),
       op('hit', 'jellyfin', 'failed', '2026-11-20T00:00:01Z'),
+      op('after', 'jellyfin', 'failed', '2026-11-20T00:00:05Z'),
     ]);
     expect(await failedOperationContext('jellyfin', '2026-11-20T00:00:02Z')).toEqual({
       kind: 'operation',
       app: 'jellyfin',
       operation_id: 'hit',
     });
+    // Outside the 15 minute window (too old, or after the notification).
+    mocks.getOperations.mockResolvedValue([
+      op('stale', 'jellyfin', 'failed', '2026-11-19T23:44:00Z'),
+      op('later', 'jellyfin', 'failed', '2026-11-20T00:00:05Z'),
+    ]);
+    expect(await failedOperationContext('jellyfin', '2026-11-20T00:00:02Z')).toEqual({ kind: 'app', app: 'jellyfin' });
+    mocks.getOperations.mockResolvedValue([op('edge', 'jellyfin', 'failed', '2026-11-19T23:45:02Z')]);
+    expect((await failedOperationContext('jellyfin', '2026-11-20T00:00:02Z')).operation_id).toBe('edge');
     mocks.getOperations.mockResolvedValue([]);
     expect(await failedOperationContext('jellyfin', '2026-11-20T00:00:02Z')).toEqual({ kind: 'app', app: 'jellyfin' });
   });
