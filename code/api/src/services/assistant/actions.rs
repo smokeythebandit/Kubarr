@@ -34,11 +34,15 @@ use crate::models::audit_log::{AuditAction, ResourceType};
 use crate::models::{app_operation, app_state, assistant_conversation, assistant_message};
 use crate::services::app_install::{self, InstallChoices};
 use crate::services::app_manager::{
-    check_retry_allowed, AppManager, DESIRED_INSTALLED, OP_DELETE, OP_RESTART, OP_ROLLBACK,
-    OP_UPDATE,
+    check_retry_allowed, AppManager, RollbackPlan, DESIRED_INSTALLED, OP_DELETE, OP_INSTALL,
+    OP_RESTART, OP_UPDATE,
 };
+use crate::services::deployment::{DeploymentManager, HelmRevision};
 use crate::services::update_policy::{update_kind, UpdateKind};
 use crate::state::AppState;
+
+/// Shown, never stored: the queued operation failed and was retried.
+pub const STATUS_RETRIED: &str = "retried";
 
 /// A proposed action can be run for this long.
 pub const ACTION_TTL_MINUTES: i64 = 10;
@@ -146,6 +150,12 @@ pub struct ActionParams {
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    /// Set by Kubarr for `rollback_app` (never by the model): the live and
+    /// the restored Helm revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_from_revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_to_revision: Option<u32>,
 }
 
 /// A validated action: what Run will do.
@@ -230,12 +240,45 @@ fn kind_label(kind: UpdateKind) -> &'static str {
     }
 }
 
-/// The version before the latest successful update, from its outcome
-/// message (`Updated <app> <from> → <to>`), if Kubarr recorded one.
-fn version_before_update(app: &str, message: Option<&str>) -> Option<String> {
-    let rest = message?.strip_prefix(&format!("Updated {app} "))?;
-    let (from, _) = rest.split_once(" → ")?;
-    (!from.is_empty() && from.len() <= 64).then(|| from.to_string())
+/// The live revision and the one a rollback restores: the highest deployed
+/// or superseded revision below the live (deployed) one.
+pub fn rollback_target(history: &[HelmRevision]) -> Option<(&HelmRevision, &HelmRevision)> {
+    let live = history
+        .iter()
+        .filter(|r| r.status == "deployed")
+        .max_by_key(|r| r.revision)?;
+    let target = history
+        .iter()
+        .filter(|r| {
+            r.revision < live.revision && matches!(r.status.as_str(), "deployed" | "superseded")
+        })
+        .max_by_key(|r| r.revision)?;
+    Some((live, target))
+}
+
+/// Where a rollback reads the release history (swappable in tests).
+// async_trait adds #[must_use] to methods that already return Result.
+#[allow(clippy::double_must_use)]
+#[async_trait::async_trait]
+pub trait ReleaseHistory: Send + Sync {
+    async fn history(&self, state: &AppState, app: &str) -> Result<Vec<HelmRevision>>;
+}
+
+/// `helm history` in the cluster.
+pub struct HelmReleaseHistory;
+
+#[async_trait::async_trait]
+impl ReleaseHistory for HelmReleaseHistory {
+    async fn history(&self, state: &AppState, app: &str) -> Result<Vec<HelmRevision>> {
+        let k8s = state.k8s_client.read().await;
+        let client = k8s.as_ref().ok_or_else(|| {
+            AppError::ServiceUnavailable(
+                "Kubarr cannot reach the cluster to read the app's release history.".into(),
+            )
+        })?;
+        let catalog = state.catalog.read().await;
+        DeploymentManager::new(client, &catalog).release_history(app)
+    }
 }
 
 /// Validate a proposed (or about to run) action for `actor` against the same
@@ -331,29 +374,57 @@ pub async fn plan(
             let current = installed_state(db, actor, app).await?;
             let last = app_operation::Entity::find()
                 .filter(app_operation::Column::AppName.eq(app))
+                .filter(app_operation::Column::Operation.ne(OP_RESTART))
                 .order_by_desc(app_operation::Column::CreatedAt)
                 .order_by_desc(app_operation::Column::Id)
                 .one(db)
                 .await?;
-            let Some(last) =
-                last.filter(|op| op.operation == OP_UPDATE && op.status == "succeeded")
-            else {
+            if !last.is_some_and(|op| op.operation == OP_UPDATE && op.status == "succeeded") {
                 return Err(AppError::Conflict(format!(
                     "{app}'s last change was not a successful update, so there is nothing to roll \
                      back."
                 )));
+            }
+            let history = state.assistant.releases.history(state, app).await?;
+            let Some((live, target)) = rollback_target(&history) else {
+                return Err(AppError::Conflict(format!(
+                    "{app} has no earlier Helm release to roll back to."
+                )));
             };
-            let to = version_before_update(app, last.message.as_deref());
-            let from = current.installed_chart_version.clone();
+            let from = live
+                .chart_version()
+                .or_else(|| current.installed_chart_version.clone());
+            let to = target.chart_version();
+            let app_version = if target.app_version.is_empty() {
+                String::new()
+            } else {
+                format!(", app version {}", target.app_version)
+            };
+            let skip = from
+                .as_deref()
+                .map(|v| {
+                    format!(" Auto-update will skip {v} for {app} until a newer version appears.")
+                })
+                .unwrap_or_default();
             Ok(plan(
-                ActionParams::default(),
+                ActionParams {
+                    rollback_from_revision: Some(live.revision),
+                    rollback_to_revision: Some(target.revision),
+                    ..Default::default()
+                },
                 ActionSummary {
                     title: format!("Roll back {app}"),
                     effect: format!(
-                        "Rolls {app} back to the release it ran before its last update{}. Data \
-                         is kept, but a one-way data migration the newer version ran is not \
-                         undone. Kubarr checks that it is healthy afterwards.",
-                        to.as_deref().map(|v| format!(" ({v})")).unwrap_or_default()
+                        "Rolls {app} back to Helm revision {} ({}{app_version}), the release it \
+                         ran before revision {}. Data is kept, but a one-way data migration the \
+                         newer version ran is not undone. Kubarr checks that it is healthy \
+                         afterwards.{skip}",
+                        target.revision,
+                        to.as_deref()
+                            .map_or("chart version unknown".to_string(), |v| format!(
+                                "chart {v}"
+                            )),
+                        live.revision,
                     ),
                     from_version: from,
                     to_version: to,
@@ -461,6 +532,11 @@ pub async fn plan(
                 ));
             }
             check_retry_allowed(&state.catalog, &operation, &actor.permissions).await?;
+            if operation.operation == OP_INSTALL {
+                // Same rule as install_app: Kubarr's own and hidden apps are
+                // not installed from the catalog.
+                app_install::installable_chart_version(&state.catalog, app).await?;
+            }
             if operation.status != "failed" {
                 return Err(AppError::Conflict(format!(
                     "Only failed operations can be retried; this one is {}.",
@@ -511,13 +587,16 @@ pub struct ActionCard {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<i64>,
     pub summary: ActionSummary,
-    /// `pending`, `expired`, `running`, `done`, `failed` or `cancelled`.
+    /// `pending`, `expired`, `running`, `done`, `failed`, `retried` or `cancelled`.
     pub status: String,
     pub expires_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Why the assistant proposed it (shown to the owner).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -536,23 +615,46 @@ impl ActionCard {
             to_version: None,
         });
         let mut error = model.error.clone();
-        let status = match model.status.as_str() {
-            STATUS_PENDING if model.expires_at <= now => STATUS_EXPIRED.to_string(),
-            STATUS_RUNNING => match operation.map(|op| op.status.as_str()) {
-                Some("succeeded") => STATUS_DONE.to_string(),
-                Some("failed") => {
-                    error = operation
-                        .and_then(|op| op.error.clone().or_else(|| op.message.clone()))
-                        .map(|e| super::tools::clip(&e, 300));
+        let status = match (model.status.as_str(), model.operation_id.as_ref()) {
+            (STATUS_PENDING, _) if model.expires_at <= now => STATUS_EXPIRED.to_string(),
+            (STATUS_RUNNING, Some(_)) => match operation {
+                None => {
+                    error = Some("The operation record is no longer available.".into());
                     STATUS_FAILED.to_string()
                 }
-                Some("cancelled") => {
-                    error = Some("The operation was cancelled.".into());
-                    STATUS_FAILED.to_string()
-                }
-                _ => STATUS_RUNNING.to_string(),
+                Some(op) => match op.status.as_str() {
+                    "succeeded" => STATUS_DONE.to_string(),
+                    "failed" => {
+                        error = op
+                            .error
+                            .clone()
+                            .or_else(|| op.message.clone())
+                            .map(|e| super::tools::clip(&e, 300));
+                        STATUS_FAILED.to_string()
+                    }
+                    "cancelled" => {
+                        error = Some("The operation was cancelled.".into());
+                        STATUS_FAILED.to_string()
+                    }
+                    "retried" => {
+                        error = Some(
+                            "It failed and was retried; see the operation list for the retry."
+                                .into(),
+                        );
+                        STATUS_RETRIED.to_string()
+                    }
+                    // queued, running, paused (and anything newer) are in progress.
+                    _ => STATUS_RUNNING.to_string(),
+                },
             },
-            other => other.to_string(),
+            // Claimed but never recorded an outcome: the replica went away.
+            (STATUS_RUNNING, None)
+                if now - model.updated_at > Duration::minutes(ACTION_TTL_MINUTES) =>
+            {
+                error = Some("Kubarr couldn't start it. Ask the assistant again.".into());
+                STATUS_FAILED.to_string()
+            }
+            (other, _) => other.to_string(),
         };
         ActionCard {
             id: model.id,
@@ -564,6 +666,7 @@ impl ActionCard {
             expires_at: model.expires_at,
             operation_id: model.operation_id,
             error,
+            reason: model.reason,
             created_at: model.created_at,
         }
     }
@@ -713,6 +816,14 @@ pub async fn propose(
         target: Set(planned.app.clone()),
         params_json: Set(serde_json::to_string(&planned.params).unwrap_or_else(|_| "{}".into())),
         summary: Set(serde_json::to_string(&planned.summary).unwrap_or_else(|_| "{}".into())),
+        reason: Set(proposal
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(|r| {
+                super::tools::clip(&crate::services::update_diagnostics::scrub_inline(r), 300)
+            })),
         status: Set(STATUS_PENDING.to_string()),
         operation_id: Set(None),
         error: Set(None),
@@ -795,13 +906,30 @@ async fn execute(
                 .await?
         }
         ActionKind::UpdateApp => {
+            let target = plan
+                .params
+                .version
+                .as_deref()
+                .ok_or_else(|| AppError::Conflict("The update target is unknown.".into()))?;
             manager
-                .enqueue_gpu_operation(app, OP_UPDATE, HashMap::new(), None, Some(actor.user_id))
+                .enqueue_confirmed_update(app, target, actor.user_id)
                 .await?
         }
         ActionKind::RollbackApp => {
+            let (Some(from_revision), Some(to_revision)) = (
+                plan.params.rollback_from_revision,
+                plan.params.rollback_to_revision,
+            ) else {
+                return Err(AppError::Conflict("The rollback target is unknown.".into()));
+            };
+            let rollback = RollbackPlan {
+                from_revision,
+                to_revision,
+                from_version: plan.summary.from_version.clone(),
+                to_version: plan.summary.to_version.clone(),
+            };
             manager
-                .enqueue_operation(app, OP_ROLLBACK, HashMap::new(), Some(actor.user_id))
+                .enqueue_rollback(app, &rollback, actor.user_id)
                 .await?
         }
         ActionKind::InstallApp => {
@@ -827,7 +955,10 @@ async fn execute(
         }
         ActionKind::RetryOperation => {
             let id = plan.params.operation_id.as_deref().unwrap_or_default();
-            manager.retry_operation(id, actor.user_id).await?
+            // An update retry is pinned to the version on the card.
+            manager
+                .retry_operation_as(id, actor.user_id, plan.summary.to_version.as_deref())
+                .await?
         }
     };
     state.endpoint_cache.invalidate(app).await;
@@ -1075,17 +1206,33 @@ mod tests {
         assert!(check_update_kind(UpdateKind::Unknown).is_err());
     }
 
+    fn revision(revision: u32, status: &str, chart: &str) -> HelmRevision {
+        HelmRevision {
+            revision,
+            status: status.into(),
+            chart: chart.into(),
+            app_version: "10.9".into(),
+        }
+    }
+
     #[test]
-    fn version_before_update_reads_the_outcome_message() {
+    fn rollback_target_is_the_release_before_the_live_one() {
+        let history = vec![
+            revision(1, "superseded", "jellyfin-1.0.0"),
+            revision(2, "failed", "jellyfin-1.1.0"),
+            revision(3, "superseded", "jellyfin-1.0.5"),
+            revision(4, "deployed", "jellyfin-1.1.0"),
+        ];
+        let (live, target) = rollback_target(&history).unwrap();
+        assert_eq!((live.revision, target.revision), (4, 3));
+        assert_eq!(target.chart_version().as_deref(), Some("1.0.5"));
         assert_eq!(
-            version_before_update("jellyfin", Some("Updated jellyfin 1.2.3 → 1.3.0")),
-            Some("1.2.3".into())
+            revision(1, "deployed", "kube-prometheus-stack-1.2.3-rc1")
+                .chart_version()
+                .as_deref(),
+            Some("1.2.3-rc1")
         );
-        assert_eq!(
-            version_before_update("jellyfin", Some("Restarted jellyfin")),
-            None
-        );
-        assert_eq!(version_before_update("jellyfin", None), None);
+        assert!(rollback_target(&history[3..]).is_none());
     }
 
     fn model(status: &str, expires_in: i64) -> assistant_pending_action::Model {
@@ -1099,6 +1246,7 @@ mod tests {
             target: "jellyfin".into(),
             params_json: "{}".into(),
             summary: r#"{"title":"Restart jellyfin","effect":"x"}"#.into(),
+            reason: Some("stuck".into()),
             status: status.into(),
             operation_id: Some("op".into()),
             error: None,
@@ -1161,6 +1309,35 @@ mod tests {
                 .summary
                 .title,
             "Restart jellyfin"
+        );
+        let retried = ActionCard::from_model(model("running", 60), Some(&op("retried")), now);
+        assert_eq!(retried.status, "retried");
+        assert!(retried.error.unwrap().contains("retried"));
+        let cancelled = ActionCard::from_model(model("running", 60), Some(&op("cancelled")), now);
+        assert_eq!(cancelled.status, "failed");
+        let paused = ActionCard::from_model(model("running", 60), Some(&op("paused")), now);
+        assert_eq!(paused.status, "running");
+        // The operation row is gone.
+        assert_eq!(
+            ActionCard::from_model(model("running", 60), None, now).status,
+            "failed"
+        );
+        // Claimed but never recorded an operation: running for a while, then failed.
+        let mut stuck = model("running", 60);
+        stuck.operation_id = None;
+        assert_eq!(
+            ActionCard::from_model(stuck.clone(), None, now).status,
+            "running"
+        );
+        stuck.updated_at = now - Duration::minutes(11);
+        let stuck = ActionCard::from_model(stuck, None, now);
+        assert_eq!(stuck.status, "failed");
+        assert!(stuck.error.unwrap().contains("couldn't start"));
+        assert_eq!(
+            ActionCard::from_model(model("pending", 60), None, now)
+                .reason
+                .as_deref(),
+            Some("stuck")
         );
     }
 }

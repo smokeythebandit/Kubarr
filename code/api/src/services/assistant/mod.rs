@@ -35,6 +35,8 @@ pub use settings::{AssistantSettings, Effort};
 pub struct AssistantDeps {
     pub key_store: Arc<dyn KeyStore>,
     pub client: MessagesClient,
+    /// Helm release history for rollbacks.
+    pub releases: Arc<dyn actions::ReleaseHistory>,
 }
 
 impl AssistantDeps {
@@ -43,6 +45,7 @@ impl AssistantDeps {
         Self {
             key_store: Arc::new(SecretKeyStore::from_env(k8s)),
             client: MessagesClient::anthropic(),
+            releases: Arc::new(actions::HelmReleaseHistory),
         }
     }
 }

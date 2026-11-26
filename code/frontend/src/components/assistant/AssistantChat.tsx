@@ -7,11 +7,11 @@ import {
   type ActionCard,
   type AssistantSource,
   type ChatContext,
-  type ChatMessage,
   type ChatEvent,
   type ChatMessageStatus,
 } from '../../api/assistant';
 import { ActionCardView } from './ActionCardView';
+import { withActions } from './actionCards';
 import { MarkdownLite } from './MarkdownLite';
 import { ASSISTANT_CONVERSATIONS_KEY, ASSISTANT_STATUS_KEY } from './assistantState';
 
@@ -29,19 +29,12 @@ export interface ShownMessage {
   actions?: ActionCard[];
 }
 
-/** Messages with each action card attached to the answer that proposed it. */
-export function withActions(messages: ChatMessage[], actions: ActionCard[] = []): ShownMessage[] {
-  const shown: ShownMessage[] = messages.map((m) => ({ ...m }));
-  const lastAssistant = [...shown].reverse().find((m) => m.role === 'assistant');
-  for (const card of actions) {
-    const owner = shown.find((m) => m.id === card.message_id && m.role === 'assistant') ?? lastAssistant;
-    if (owner) owner.actions = [...(owner.actions ?? []), card];
-  }
-  return shown;
-}
 
 export const BUDGET_PAUSED_TEXT =
   "The assistant's monthly budget is used up. It resumes next month, or when an administrator raises the budget.";
+
+/** How often cards with a queued operation are refreshed. */
+export const ACTION_POLL_MS = 5000;
 
 const focusRing = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500';
 
@@ -79,10 +72,12 @@ function AssistantBubble({
   message,
   onAskAgain,
   onActionChange,
+  onRefresh,
 }: {
   message: ShownMessage;
   onAskAgain?: () => void;
   onActionChange: (card: ActionCard) => void;
+  onRefresh: () => void;
 }) {
   const streaming = message.status === 'streaming';
   return (
@@ -113,7 +108,7 @@ function AssistantBubble({
         </p>
       )}
       {message.actions?.map((card) => (
-        <ActionCardView key={card.id} card={card} onChange={onActionChange} />
+        <ActionCardView key={card.id} card={card} onChange={onActionChange} onRefresh={onRefresh} />
       ))}
       <Sources items={message.sources} />
     </div>
@@ -245,6 +240,24 @@ export function AssistantChat({ conversationId, onConversationCreated, context, 
     }
   };
 
+  /** Reload the stored conversation (cards, outcomes and Run notes). */
+  const refresh = useCallback(() => {
+    if (!conversationId || streaming) return;
+    assistantChatApi
+      .getConversation(conversationId)
+      .then((detail) => setMessages(withActions(detail.messages, detail.actions)))
+      .catch(() => {
+        // keep what is shown; the next poll or reload tries again
+      });
+  }, [conversationId, streaming]);
+
+  const anyRunning = messages.some((m) => m.actions?.some((a) => a.status === 'running'));
+  useEffect(() => {
+    if (!anyRunning || streaming || !conversationId) return;
+    const timer = setInterval(refresh, ACTION_POLL_MS);
+    return () => clearInterval(timer);
+  }, [anyRunning, streaming, conversationId, refresh]);
+
   const changeAction = useCallback((card: ActionCard) => {
     setMessages((prev) =>
       prev.map((m) =>
@@ -253,7 +266,9 @@ export function AssistantChat({ conversationId, onConversationCreated, context, 
           : m,
       ),
     );
-  }, []);
+    // Pick up the server's note about the click.
+    if (card.status !== 'pending') refresh();
+  }, [refresh]);
 
   /** The question before an assistant message, for "ask again". */
   const questionBefore = (index: number): string | undefined => {
@@ -284,6 +299,7 @@ export function AssistantChat({ conversationId, onConversationCreated, context, 
               <AssistantBubble
                 message={m}
                 onActionChange={changeAction}
+                onRefresh={refresh}
                 onAskAgain={
                   m.status === 'interrupted' && !streaming && !paused && questionBefore(index)
                     ? () => void ask(questionBefore(index) as string)

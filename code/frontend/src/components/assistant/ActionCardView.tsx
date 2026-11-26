@@ -2,26 +2,32 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { CheckCircle2, Clock, Loader2, Play, XCircle, Zap } from 'lucide-react';
 import { assistantChatApi, type ActionCard } from '../../api/assistant';
+import { formatRemaining } from './actionCards';
 
 const focusRing = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500';
 
-/** "4:59" until the action expires. */
-export function formatRemaining(ms: number): string {
-  const total = Math.max(0, Math.ceil(ms / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-}
+
+type HttpError = { response?: { status?: number; data?: { detail?: unknown } } };
 
 function errorText(e: unknown, fallback: string): string {
-  const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  const detail = (e as HttpError)?.response?.data?.detail;
   return typeof detail === 'string' ? detail : fallback;
 }
+
+/** The server answered that the action is used up (refused, gone, already run or expired). */
+function isFinal(e: unknown): boolean {
+  const status = (e as HttpError)?.response?.status;
+  return status === 403 || status === 404 || status === 409 || status === 410;
+}
+
+export const UNCONFIRMED_TEXT = "Couldn't confirm whether it ran. Refreshing…";
 
 interface Props {
   card: ActionCard;
   /** The card changed (after Run or Cancel); the parent stores the new state. */
   onChange: (card: ActionCard) => void;
+  /** Reload the conversation (when the outcome of a click is unknown). */
+  onRefresh?: () => void;
   /** For tests: the current time. */
   now?: () => number;
 }
@@ -30,7 +36,7 @@ interface Props {
  * A proposed action: exactly what will happen, Run / Cancel while it is
  * pending (with the time left), then the outcome.
  */
-export function ActionCardView({ card, onChange, now = Date.now }: Props) {
+export function ActionCardView({ card, onChange, onRefresh, now = Date.now }: Props) {
   const [busy, setBusy] = useState<'run' | 'cancel' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [clock, setClock] = useState(now);
@@ -53,10 +59,14 @@ export function ActionCardView({ card, onChange, now = Date.now }: Props) {
       const result = await assistantChatApi.runAction(card.id);
       onChange({ ...card, status: result.status, operation_id: result.operation_id });
     } catch (e) {
-      const message = errorText(e, 'The action could not be run.');
-      setError(message);
-      // Refused at run time: the action is used up (failed, expired or already run).
-      onChange({ ...card, status: 'failed', error: message });
+      if (isFinal(e)) {
+        // Refused at run time: the action is used up (failed, expired or already run).
+        onChange({ ...card, status: 'failed', error: errorText(e, 'The action could not be run.') });
+      } else {
+        // Network or server error: it may or may not have run. Ask the server.
+        setError(UNCONFIRMED_TEXT);
+        onRefresh?.();
+      }
     } finally {
       setBusy(null);
     }
@@ -70,7 +80,12 @@ export function ActionCardView({ card, onChange, now = Date.now }: Props) {
       await assistantChatApi.cancelAction(card.id);
       onChange({ ...card, status: 'cancelled' });
     } catch (e) {
-      setError(errorText(e, 'The action could not be cancelled.'));
+      if (isFinal(e)) {
+        setError(errorText(e, 'The action could not be cancelled.'));
+      } else {
+        setError(UNCONFIRMED_TEXT);
+      }
+      onRefresh?.();
     } finally {
       setBusy(null);
     }
@@ -108,6 +123,7 @@ export function ActionCardView({ card, onChange, now = Date.now }: Props) {
               </div>
             )}
           </dl>
+          {card.reason && <p className="mt-1 text-xs italic text-gray-500 dark:text-gray-400">Why: {card.reason}</p>}
         </div>
       </div>
 
@@ -171,6 +187,14 @@ export function ActionCardView({ card, onChange, now = Date.now }: Props) {
               <XCircle size={14} className="text-red-600" aria-hidden />
               <span className="text-red-700 dark:text-red-400">Did not complete{card.error ? `: ${card.error}` : '.'}</span>
             </>
+          )}
+          {status === 'retried' && (
+            <span className="text-amber-700 dark:text-amber-400">
+              It failed and was retried.{' '}
+              <Link to="/apps?tab=operations" className="font-medium underline">
+                See the operation
+              </Link>
+            </span>
           )}
           {status === 'cancelled' && <span className="text-gray-500 dark:text-gray-400">Cancelled.</span>}
           {status === 'expired' && (

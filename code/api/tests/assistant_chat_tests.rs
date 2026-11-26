@@ -197,6 +197,7 @@ async fn harness(base_url: &str) -> Harness {
             uuid::Uuid::new_v4().simple()
         ))),
         client: MessagesClient::new(base_url),
+        releases: Arc::new(kubarr::services::assistant::actions::HelmReleaseHistory),
     };
     for app in ["jellyfin", "sonarr"] {
         app_state::ActiveModel {

@@ -5,12 +5,22 @@
 //!   user of the conversation. `status` moves `pending` → `running` (a Run
 //!   click claimed it) → `done`/`failed`, or `pending` → `cancelled`; a
 //!   pending row past `expires_at` reads as expired. `operation_id` links the
-//!   queued Kubarr operation so its outcome can be shown.
+//!   queued Kubarr operation so its outcome can be shown; `reason` is the
+//!   model's one-line why (shown to the owner only, never in audit details).
+//! - Seeds the notification events for requested rollbacks:
+//!   `app_rolled_back` (info, off) and `app_rollback_failed` (warning, on),
+//!   routed like other events of their severity when routing exists.
 
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
+
+/// (event_type, enabled, severity, channels routed on).
+const EVENTS: [(&str, bool, &str, &[&str]); 2] = [
+    ("app_rolled_back", false, "info", &[]),
+    ("app_rollback_failed", true, "warning", &["telegram"]),
+];
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
@@ -33,6 +43,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Actions::Target).string().not_null())
                     .col(ColumnDef::new(Actions::ParamsJson).text().not_null())
                     .col(ColumnDef::new(Actions::Summary).text().not_null())
+                    .col(ColumnDef::new(Actions::Reason).text().null())
                     .col(ColumnDef::new(Actions::Status).string().not_null())
                     .col(ColumnDef::new(Actions::OperationId).string().null())
                     .col(ColumnDef::new(Actions::Error).text().null())
@@ -78,10 +89,82 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .to_owned(),
             )
-            .await
+            .await?;
+
+        let routes = manager.has_table("notification_routes").await?;
+        for (event_type, enabled, severity, channels) in EVENTS {
+            // Idempotent: keep an existing row (and any owner-chosen setting).
+            let lookup = Query::select()
+                .column(Alias::new("id"))
+                .from(Alias::new("notification_events"))
+                .and_where(Expr::col(Alias::new("event_type")).eq(event_type))
+                .to_owned();
+            if manager.get_connection().query_one(&lookup).await?.is_some() {
+                continue;
+            }
+            manager
+                .exec_stmt(
+                    Query::insert()
+                        .into_table(Alias::new("notification_events"))
+                        .columns([
+                            Alias::new("event_type"),
+                            Alias::new("enabled"),
+                            Alias::new("severity"),
+                        ])
+                        .values_panic([event_type.into(), enabled.into(), severity.into()])
+                        .to_owned(),
+                )
+                .await?;
+            if !routes {
+                continue;
+            }
+            for channel in channels {
+                manager
+                    .exec_stmt(
+                        Query::insert()
+                            .into_table(Alias::new("notification_routes"))
+                            .columns([
+                                Alias::new("event_type"),
+                                Alias::new("channel_type"),
+                                Alias::new("enabled"),
+                            ])
+                            .values_panic([event_type.into(), (*channel).into(), true.into()])
+                            .on_conflict(
+                                OnConflict::columns([
+                                    Alias::new("event_type"),
+                                    Alias::new("channel_type"),
+                                ])
+                                .do_nothing()
+                                .to_owned(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let names = EVENTS.map(|(name, _, _, _)| name);
+        if manager.has_table("notification_routes").await? {
+            manager
+                .exec_stmt(
+                    Query::delete()
+                        .from_table(Alias::new("notification_routes"))
+                        .and_where(Expr::col(Alias::new("event_type")).is_in(names))
+                        .to_owned(),
+                )
+                .await?;
+        }
+        manager
+            .exec_stmt(
+                Query::delete()
+                    .from_table(Alias::new("notification_events"))
+                    .and_where(Expr::col(Alias::new("event_type")).is_in(names))
+                    .to_owned(),
+            )
+            .await?;
         manager
             .drop_table(Table::drop().table(Actions::Table).if_exists().to_owned())
             .await
@@ -117,6 +200,7 @@ enum Actions {
     #[iden = "params_json"]
     ParamsJson,
     Summary,
+    Reason,
     Status,
     #[iden = "operation_id"]
     OperationId,

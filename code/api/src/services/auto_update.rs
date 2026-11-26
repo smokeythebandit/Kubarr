@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::Result;
 use crate::models::{app_operation, app_state};
 use crate::services::app_manager::{
-    AppManager, AUTO_TARGET_KEY, OBS_INSTALLED, OP_UPDATE, STATUS_FAILED, STATUS_PAUSED,
-    STATUS_QUEUED, STATUS_RETRIED, STATUS_RUNNING, STATUS_SUCCEEDED,
+    AppManager, RollbackPlan, AUTO_TARGET_KEY, OBS_INSTALLED, OP_ROLLBACK, OP_UPDATE,
+    STATUS_FAILED, STATUS_PAUSED, STATUS_QUEUED, STATUS_RETRIED, STATUS_RUNNING, STATUS_SUCCEEDED,
 };
 use crate::services::auto_update_settings;
 use crate::services::catalog::AppCatalog;
@@ -88,7 +88,9 @@ pub async fn candidates<C: ConnectionTrait>(db: &C, catalog: &AppCatalog) -> Res
 /// diagnostics for exactly those). Failures without diagnostics (before Helm,
 /// a dropped stale target, an interrupted worker) are ignored entirely: they
 /// neither set nor lift the skip. A success or a different available version
-/// clears it; a failed manual retry that reached Helm keeps it.
+/// clears it; a failed manual retry that reached Helm keeps it. A successful
+/// rollback the person asked for counts like a failure of the version it
+/// rolled back from, so the loop does not re-apply that version.
 async fn failed_on_version<C: ConnectionTrait>(
     db: &C,
     app_name: &str,
@@ -96,12 +98,21 @@ async fn failed_on_version<C: ConnectionTrait>(
 ) -> Result<bool> {
     let latest = app_operation::Entity::find()
         .filter(app_operation::Column::AppName.eq(app_name))
-        .filter(app_operation::Column::Operation.eq(OP_UPDATE))
         .filter(
             Condition::any()
-                .add(app_operation::Column::Status.eq(STATUS_SUCCEEDED))
                 .add(
                     Condition::all()
+                        .add(app_operation::Column::Operation.eq(OP_ROLLBACK))
+                        .add(app_operation::Column::Status.eq(STATUS_SUCCEEDED)),
+                )
+                .add(
+                    Condition::all()
+                        .add(app_operation::Column::Operation.eq(OP_UPDATE))
+                        .add(app_operation::Column::Status.eq(STATUS_SUCCEEDED)),
+                )
+                .add(
+                    Condition::all()
+                        .add(app_operation::Column::Operation.eq(OP_UPDATE))
                         // A retried operation is a failure the owner retried.
                         .add(app_operation::Column::Status.is_in([STATUS_FAILED, STATUS_RETRIED]))
                         .add(app_operation::Column::Diagnostics.is_not_null()),
@@ -111,6 +122,12 @@ async fn failed_on_version<C: ConnectionTrait>(
         .one(db)
         .await?;
     Ok(latest.is_some_and(|op| {
+        if op.operation == OP_ROLLBACK {
+            return RollbackPlan::from_config(op.custom_config.as_deref())
+                .and_then(|plan| plan.from_version)
+                .as_deref()
+                == Some(version);
+        }
         let target = op
             .custom_config
             .as_deref()
@@ -487,6 +504,38 @@ mod tests {
         assert!(f.candidates().await.is_empty());
         assert_eq!(f.tick(in_window()).await, TickResult::Nothing);
         // A new available version clears the skip.
+        f.patch_state("alpha", |s| {
+            s.available_chart_version = Set(Some("1.0.2+1".into()))
+        })
+        .await;
+        assert_eq!(f.candidates().await, vec!["alpha".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_rolled_back_version_is_skipped_until_a_newer_one() {
+        let f = fixture().await;
+        // Updated 1.0.0 -> 1.0.1, then the person rolled back to 1.0.0.
+        f.state("alpha", "1.0.0+1", "1.0.1+1").await;
+        let update = f
+            .manager
+            .enqueue_auto_update("alpha", "1.0.1+1")
+            .await
+            .unwrap();
+        f.set_status(&update.id, STATUS_SUCCEEDED).await;
+        let plan = RollbackPlan {
+            from_revision: 2,
+            to_revision: 1,
+            from_version: Some("1.0.1+1".into()),
+            to_version: Some("1.0.0+1".into()),
+        };
+        let rollback = f.manager.enqueue_rollback("alpha", &plan, 1).await.unwrap();
+        // While the rollback is queued the app is busy.
+        assert!(f.candidates().await.is_empty());
+        f.set_status(&rollback.id, STATUS_SUCCEEDED).await;
+        f.settle("alpha").await;
+        assert!(f.candidates().await.is_empty());
+        assert_eq!(f.tick(in_window()).await, TickResult::Nothing);
+        // A newer version lifts the skip.
         f.patch_state("alpha", |s| {
             s.available_chart_version = Set(Some("1.0.2+1".into()))
         })

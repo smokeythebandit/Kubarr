@@ -680,6 +680,8 @@ fn format_event_title(action: &AuditAction) -> String {
         AuditAction::AppUpdated => "App Updated".to_string(),
         AuditAction::AppUpdateFailed => "App Update Failed".to_string(),
         AuditAction::AppUpdateRollbackFailed => "App Update Rollback Failed".to_string(),
+        AuditAction::AppRolledBack => "App Rolled Back".to_string(),
+        AuditAction::AppRollbackFailed => "App Rollback Failed".to_string(),
         // VPN management
         AuditAction::VpnProviderCreated => "VPN Provider Created".to_string(),
         AuditAction::VpnProviderUpdated => "VPN Provider Updated".to_string(),
@@ -879,6 +881,20 @@ fn format_event_body(
                 "App update failed and the rollback also failed".to_string()
             } else {
                 format!("App update failed and the rollback also failed: {}", detail)
+            }
+        }
+        AuditAction::AppRolledBack => {
+            if detail.is_empty() {
+                "App rolled back".to_string()
+            } else {
+                format!("App rolled back: {}", detail)
+            }
+        }
+        AuditAction::AppRollbackFailed => {
+            if detail.is_empty() {
+                "App rollback failed".to_string()
+            } else {
+                format!("App rollback failed: {}", detail)
             }
         }
         // VPN management: details may contain provider credentials, so never include them.

@@ -65,6 +65,10 @@ pub enum AuditAction {
     AppUpdated,
     AppUpdateFailed,
     AppUpdateRollbackFailed,
+    /// A requested rollback finished and the app is healthy.
+    AppRolledBack,
+    /// A requested rollback failed or left the app unhealthy.
+    AppRollbackFailed,
 
     // VPN management
     VpnProviderCreated,
@@ -126,6 +130,8 @@ impl std::fmt::Display for AuditAction {
             AuditAction::AppUpdated => write!(f, "app_updated"),
             AuditAction::AppUpdateFailed => write!(f, "app_update_failed"),
             AuditAction::AppUpdateRollbackFailed => write!(f, "app_update_rollback_failed"),
+            AuditAction::AppRolledBack => write!(f, "app_rolled_back"),
+            AuditAction::AppRollbackFailed => write!(f, "app_rollback_failed"),
             AuditAction::VpnProviderCreated => write!(f, "vpn_provider_created"),
             AuditAction::VpnProviderUpdated => write!(f, "vpn_provider_updated"),
             AuditAction::VpnProviderDeleted => write!(f, "vpn_provider_deleted"),

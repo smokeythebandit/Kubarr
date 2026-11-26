@@ -35,6 +35,8 @@ pub struct Model {
     pub params_json: String,
     /// The card summary computed by Kubarr, as JSON.
     pub summary: String,
+    /// The model's one-line reason (owner-only; never in audit details).
+    pub reason: Option<String>,
     pub status: String,
     pub operation_id: Option<String>,
     pub error: Option<String>,

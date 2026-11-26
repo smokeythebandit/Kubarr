@@ -31,9 +31,12 @@ use kubarr::models::{
     app_operation, app_state, assistant_message, assistant_pending_action, audit_log, role,
     role_app_permission, role_permission,
 };
-use kubarr::services::assistant::actions::{self, ActionKind, ActionParams, Actor, MAJOR_REFUSAL};
+use kubarr::services::assistant::actions::{
+    self, ActionKind, ActionParams, Actor, ReleaseHistory, MAJOR_REFUSAL,
+};
 use kubarr::services::assistant::{AssistantDeps, MemoryKeyStore, MessagesClient};
 use kubarr::services::catalog::{AppCatalog, AppConfig, ResourceRequirements};
+use kubarr::services::deployment::HelmRevision;
 use kubarr::state::AppState;
 
 static JWT_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
@@ -165,6 +168,33 @@ struct Harness {
     db: DatabaseConnection,
 }
 
+/// Helm history served to rollbacks: jellyfin went 1.0.0 (rev 1) -> 1.1.0 (rev 2).
+struct FakeHistory;
+
+#[async_trait::async_trait]
+impl ReleaseHistory for FakeHistory {
+    async fn history(
+        &self,
+        _state: &AppState,
+        app: &str,
+    ) -> kubarr::error::Result<Vec<HelmRevision>> {
+        Ok(vec![
+            HelmRevision {
+                revision: 1,
+                status: "superseded".into(),
+                chart: format!("{app}-1.0.0"),
+                app_version: "10.8.0".into(),
+            },
+            HelmRevision {
+                revision: 2,
+                status: "deployed".into(),
+                chart: format!("{app}-1.1.0"),
+                app_version: "10.9.0".into(),
+            },
+        ])
+    }
+}
+
 struct User {
     id: i64,
     name: String,
@@ -251,6 +281,7 @@ async fn harness(base_url: &str) -> Harness {
             uuid::Uuid::new_v4().simple()
         ))),
         client: MessagesClient::new(base_url),
+        releases: Arc::new(FakeHistory),
     };
     *state.catalog.write().await = AppCatalog::with_apps(HashMap::from([
         ("jellyfin".to_string(), app_config("jellyfin", false)),
@@ -1064,8 +1095,14 @@ async fn validation_matches_the_app_endpoints() {
         .plan(&admin, ActionKind::RollbackApp, "jellyfin", none())
         .await
         .unwrap();
-    assert_eq!(planned.summary.from_version.as_deref(), Some("1.0.0"));
-    assert_eq!(planned.summary.to_version.as_deref(), Some("0.9.0"));
+    assert_eq!(planned.summary.from_version.as_deref(), Some("1.1.0"));
+    assert_eq!(planned.summary.to_version.as_deref(), Some("1.0.0"));
+    assert!(planned.summary.effect.contains("app version 10.8.0"));
+    assert!(planned
+        .summary
+        .effect
+        .contains("Auto-update will skip 1.1.0"));
+    assert_eq!(planned.params.rollback_to_revision, Some(1));
 
     // Retry: failed operations only, never a removal, same permission as
     // the retry endpoint.
@@ -1243,4 +1280,96 @@ async fn install_uses_catalog_defaults_through_the_wizard_path() {
         refused.unwrap_err().contains("already installed"),
         "install twice"
     );
+}
+
+#[tokio::test]
+async fn confirmed_updates_and_rollbacks_are_pinned_for_the_worker() {
+    let h = harness("http://127.0.0.1:9").await;
+    let admin = h.user("admin").await;
+    let conversation = h.conversation(&admin).await;
+
+    let id = h
+        .propose(&admin, &conversation, "update_app", "jellyfin", json!({}))
+        .await;
+    let (status, body) = h.run(&admin, &id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let update =
+        app_operation::Entity::find_by_id(body["operation_id"].as_str().unwrap().to_string())
+            .one(&h.db)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(update.trigger.as_deref(), Some("assistant"));
+    let mut done: app_operation::ActiveModel = update.into();
+    done.status = Set("succeeded".into());
+    done.update(&h.db).await.unwrap();
+
+    let id = h
+        .propose(&admin, &conversation, "rollback_app", "jellyfin", json!({}))
+        .await;
+    let card = h.detail(&admin, &conversation).await["actions"][1].clone();
+    assert_eq!(card["summary"]["from_version"], "1.1.0");
+    assert_eq!(card["summary"]["to_version"], "1.0.0");
+    assert_eq!(card["reason"], "test");
+    let (status, body) = h.run(&admin, &id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rollback =
+        app_operation::Entity::find_by_id(body["operation_id"].as_str().unwrap().to_string())
+            .one(&h.db)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(rollback.operation, "rollback");
+    assert_eq!(rollback.trigger.as_deref(), Some("assistant"));
+    let plan =
+        kubarr::services::RollbackPlan::from_config(rollback.custom_config.as_deref()).unwrap();
+    assert_eq!((plan.from_revision, plan.to_revision), (2, 1));
+    assert_eq!(plan.from_version.as_deref(), Some("1.1.0"));
+
+    // A retried operation shows as retried on the card.
+    let mut failed: app_operation::ActiveModel = rollback.into();
+    failed.status = Set("retried".into());
+    failed.update(&h.db).await.unwrap();
+    let card = h.detail(&admin, &conversation).await["actions"][1].clone();
+    assert_eq!(card["status"], "retried");
+}
+
+#[tokio::test]
+async fn retrying_an_install_of_a_system_app_is_refused() {
+    let h = harness("http://127.0.0.1:9").await;
+    let admin = h.user("admin").await;
+    let now = Utc::now();
+    app_operation::ActiveModel {
+        id: Set("op-sys-install".into()),
+        app_name: Set("kubarr-dashboard".into()),
+        operation: Set("install".into()),
+        status: Set("failed".into()),
+        stop_requested: Set(false),
+        message: Set(None),
+        error: Set(Some("boom".into())),
+        custom_config: Set(Some("{}".into())),
+        attempts: Set(1),
+        created_by: Set(Some(admin.id)),
+        trigger: Set(Some("manual".into())),
+        diagnostics: Set(None),
+        created_at: Set(now),
+        started_at: Set(None),
+        finished_at: Set(Some(now)),
+        updated_at: Set(now),
+    }
+    .insert(&h.db)
+    .await
+    .unwrap();
+    let refused = h
+        .plan(
+            &admin,
+            ActionKind::RetryOperation,
+            "kubarr-dashboard",
+            ActionParams {
+                operation_id: Some("op-sys-install".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(refused.unwrap_err().contains("part of Kubarr"));
 }

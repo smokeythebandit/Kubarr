@@ -110,7 +110,7 @@ export interface ConversationSummary {
   updated_at: string;
 }
 
-export type ActionStatus = 'pending' | 'expired' | 'running' | 'done' | 'failed' | 'cancelled';
+export type ActionStatus = 'pending' | 'expired' | 'running' | 'done' | 'failed' | 'retried' | 'cancelled';
 
 /** What a proposed action will do, computed by Kubarr (never by the model). */
 export interface ActionSummary {
@@ -132,6 +132,8 @@ export interface ActionCard {
   expires_at: string;
   operation_id?: string;
   error?: string;
+  /** Why the assistant proposed it. */
+  reason?: string;
   created_at?: string;
 }
 

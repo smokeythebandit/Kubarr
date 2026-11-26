@@ -2314,3 +2314,180 @@ async fn test_interrupted_update_notifies_critical_and_does_not_count() {
     );
     assert!(sent[0].message.contains("app=operation-test-app"));
 }
+
+fn rollback_plan() -> RollbackPlan {
+    RollbackPlan {
+        from_revision: 2,
+        to_revision: 1,
+        from_version: Some("1.1.0".into()),
+        to_version: Some("1.0.0".into()),
+    }
+}
+
+async fn run_rollback(manager: &AppManager, probe: &StubProbe) {
+    let plan = rollback_plan();
+    manager
+        .process_next_operation_with_stop(
+            |_op, stop| async move { manager.roll_back(probe, APP, &plan, &stop).await },
+            RUNNING_HEARTBEAT_INTERVAL,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_rollback_restores_the_confirmed_revision_and_audits() {
+    let manager = setup()
+        .await
+        .with_update_health_timeout(TEST_HEALTH_TIMEOUT)
+        .with_update_timing(TEST_POLL, TEST_SETTLE);
+    let queued = manager
+        .enqueue_rollback(APP, &rollback_plan(), 1)
+        .await
+        .unwrap();
+    assert_eq!(queued.operation, OP_ROLLBACK);
+    let probe = StubProbe::with_histories(
+        &[true],
+        vec![vec![(1, "superseded".into()), (2, "deployed".into())]],
+    );
+    run_rollback(&manager, &probe).await;
+    assert_eq!(key_calls(&probe), ["history", "rollback 1"]);
+    let op = operation(&manager, &queued.id).await;
+    assert_eq!(op.status, STATUS_SUCCEEDED, "{:?}", op.error);
+    assert!(op.message.unwrap().contains("revision 1 (1.0.0)"));
+    assert!(audits(&manager)
+        .await
+        .iter()
+        .any(|a| a.action == "app_rolled_back"));
+}
+
+#[tokio::test]
+async fn test_rollback_retry_after_the_helm_rollback_does_nothing() {
+    let manager = setup()
+        .await
+        .with_update_health_timeout(TEST_HEALTH_TIMEOUT)
+        .with_update_timing(TEST_POLL, TEST_SETTLE);
+    let queued = manager
+        .enqueue_rollback(APP, &rollback_plan(), 1)
+        .await
+        .unwrap();
+    // Helm rolls back (revision 3 = copy of 1) but the app stays unhealthy.
+    let probe = StubProbe::with_histories(
+        &[false],
+        vec![vec![(1, "superseded".into()), (2, "deployed".into())]],
+    );
+    run_rollback(&manager, &probe).await;
+    let failed = operation(&manager, &queued.id).await;
+    assert_eq!(failed.status, STATUS_FAILED);
+    assert!(audits(&manager)
+        .await
+        .iter()
+        .any(|a| a.action == "app_rollback_failed"));
+
+    // Retry: the live revision is no longer the one the rollback was confirmed from.
+    let retry = manager.retry_operation(&queued.id, 1).await.unwrap();
+    let after = StubProbe::with_histories(
+        &[true],
+        vec![vec![
+            (1, "superseded".into()),
+            (2, "superseded".into()),
+            (3, "deployed".into()),
+        ]],
+    );
+    run_rollback(&manager, &after).await;
+    assert_eq!(key_calls(&after), ["history"]);
+    let op = operation(&manager, &retry.id).await;
+    assert_eq!(op.status, STATUS_FAILED);
+    assert!(op.error.unwrap().contains("nothing was rolled back"));
+
+    // Already on the target revision: refused too.
+    let probe = StubProbe::with_histories(&[true], vec![vec![(1, "deployed".into())]]);
+    let Err(err) = manager
+        .roll_back(&probe, APP, &rollback_plan(), &CancellationToken::new())
+        .await
+    else {
+        unreachable!("a rollback to the live revision must be refused");
+    };
+    assert!(err.to_string().contains("already runs Helm revision 1"));
+    assert!(!key_calls(&probe).iter().any(|c| c.starts_with("rollback")));
+}
+
+#[tokio::test]
+async fn test_a_rollback_without_a_confirmed_plan_is_refused() {
+    let manager = setup().await;
+    assert!(manager
+        .enqueue_operation(
+            APP,
+            OP_ROLLBACK,
+            HashMap::from([(ROLLBACK_PLAN_KEY.to_string(), "{}".to_string())]),
+            None
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn test_confirmed_update_not_deployed_when_chart_moved_since_run() {
+    let manager = setup().await;
+    manager
+        .enqueue_operation(APP, OP_INSTALL, HashMap::new(), None)
+        .await
+        .unwrap();
+    app_operation::Entity::delete_many()
+        .exec(&manager.db)
+        .await
+        .unwrap();
+    let mut row: app_state::ActiveModel = state(&manager).await.into();
+    row.installed_chart_version = Set(Some("1.30.0".into()));
+    row.update(&manager.db).await.unwrap();
+    let queued = manager
+        .enqueue_confirmed_update(APP, "1.30.1", 1)
+        .await
+        .unwrap();
+    let op = operation(&manager, &queued.id).await;
+    assert_eq!(op.trigger.as_deref(), Some(TRIGGER_ASSISTANT));
+    // A chart sync moved the chart to 1.31.0 between Run and execution.
+    let deployed = AtomicUsize::new(0);
+    let calls = &deployed;
+    let manager_ref = &manager;
+    manager
+        .process_next_operation_with_stop(
+            |op, _stop| async move {
+                manager_ref
+                    .guard_confirmed_target(&op, Some("1.30.1"), Some("1.31.0"))
+                    .await?;
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(OperationOutput::Done("deployed".into()))
+            },
+            RUNNING_HEARTBEAT_INTERVAL,
+        )
+        .await
+        .unwrap();
+    assert_eq!(deployed.load(Ordering::SeqCst), 0);
+    let failed = operation(&manager, &queued.id).await;
+    assert_eq!(failed.status, STATUS_FAILED);
+    let error = failed.error.clone().unwrap();
+    assert!(error.contains(CONFIRMED_TARGET_CHANGED), "{error}");
+    assert!(error.contains("1.31.0"), "{error}");
+    let mut row: app_state::ActiveModel = state(&manager).await.into();
+    row.installed_chart_version = Set(Some("1.30.0".into()));
+    row.update(&manager.db).await.unwrap();
+    // Unchanged chart passes; a major target is refused.
+    manager
+        .guard_confirmed_target(&failed, Some("1.30.1"), Some("1.30.1"))
+        .await
+        .unwrap();
+    let major = manager
+        .guard_confirmed_target(&failed, Some("2.0.0"), Some("2.0.0"))
+        .await
+        .unwrap_err();
+    assert!(major.to_string().contains("major"));
+    // A retry confirmed in the assistant is pinned and re-checked too.
+    let retry = manager
+        .retry_operation_as(&queued.id, 1, Some("1.31.0"))
+        .await
+        .unwrap();
+    let retried = operation(&manager, &retry.id).await;
+    assert_eq!(retried.trigger.as_deref(), Some(TRIGGER_ASSISTANT));
+    assert!(retried.custom_config.unwrap().contains("1.31.0"));
+}
