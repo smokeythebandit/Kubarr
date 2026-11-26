@@ -299,6 +299,17 @@ pub async fn scrub_for_namespace(k8s: &K8sClient, ns: &str, text: &str) -> Strin
     scrub(text, &secrets)
 }
 
+/// The namespace's Secret values for [`scrub_with`] (empty when they cannot
+/// be listed), so many texts can be scrubbed with one Secret list.
+pub(crate) async fn secret_values_for_namespace(k8s: &K8sClient, ns: &str) -> Vec<String> {
+    namespace_secret_values(k8s, ns).await.unwrap_or_default()
+}
+
+/// Scrub with known secret values plus the inline patterns.
+pub(crate) fn scrub_with(text: &str, secrets: &[String]) -> String {
+    scrub(text, secrets)
+}
+
 /// Inline-pattern scrub only, for callers without cluster access.
 pub(crate) fn scrub_inline(text: &str) -> String {
     scrub(text, &[])

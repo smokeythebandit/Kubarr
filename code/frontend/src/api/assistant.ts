@@ -72,3 +72,169 @@ export const assistantApi = {
     return response.data;
   },
 };
+
+// ---------------------------------------------------------------------------
+// Chat
+// ---------------------------------------------------------------------------
+
+/** What a conversation or question is about. */
+export interface ChatContext {
+  page?: string;
+  app?: string;
+}
+
+/** A tool the assistant used for an answer (never its result). */
+export interface AssistantSource {
+  tool: string;
+  target?: string;
+  label: string;
+}
+
+export type ChatMessageStatus = 'complete' | 'streaming' | 'interrupted' | 'error';
+
+export interface ChatMessage {
+  id: number;
+  role: 'user' | 'assistant';
+  text: string;
+  sources: AssistantSource[];
+  status: ChatMessageStatus;
+  error?: string;
+  created_at: string;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  context: ChatContext;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationDetail extends ConversationSummary {
+  messages: ChatMessage[];
+}
+
+/** One server-sent event of an answer. */
+export type ChatEvent =
+  | { event: 'status'; text: string }
+  | { event: 'text_delta'; text: string }
+  | { event: 'sources'; items: AssistantSource[] }
+  | { event: 'done'; message_id: number }
+  | { event: 'error'; message: string };
+
+/** The question was refused before streaming (budget, rate limit, setup). */
+export class AssistantRequestError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = 'AssistantRequestError';
+  }
+}
+
+function toEvent(name: string, data: string): ChatEvent | null {
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(data) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  switch (name) {
+    case 'status':
+    case 'text_delta':
+      return typeof payload.text === 'string' ? { event: name, text: payload.text } : null;
+    case 'sources':
+      return Array.isArray(payload.items) ? { event: 'sources', items: payload.items as AssistantSource[] } : null;
+    case 'done':
+      return typeof payload.message_id === 'number' ? { event: 'done', message_id: payload.message_id } : null;
+    case 'error':
+      return typeof payload.message === 'string' ? { event: 'error', message: payload.message } : null;
+    default:
+      return null;
+  }
+}
+
+/** Incremental SSE parser: push decoded text, get complete events. */
+export class SseReader {
+  private buffer = '';
+
+  push(text: string): ChatEvent[] {
+    this.buffer += text.replace(/\r\n/g, '\n');
+    const events: ChatEvent[] = [];
+    let end: number;
+    while ((end = this.buffer.indexOf('\n\n')) !== -1) {
+      const block = this.buffer.slice(0, end);
+      this.buffer = this.buffer.slice(end + 2);
+      let name = 'message';
+      const data: string[] = [];
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) name = line.slice(6).trim();
+        else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+      }
+      const event = toEvent(name, data.join('\n'));
+      if (event) events.push(event);
+    }
+    return events;
+  }
+}
+
+const apiBase = (): string => import.meta.env.VITE_API_URL || '/api';
+
+export const assistantChatApi = {
+  listConversations: async (): Promise<ConversationSummary[]> => {
+    const response = await apiClient.get<ConversationSummary[]>('/assistant/conversations');
+    return response.data;
+  },
+
+  createConversation: async (context?: ChatContext): Promise<ConversationSummary> => {
+    const response = await apiClient.post<ConversationSummary>('/assistant/conversations', { context });
+    return response.data;
+  },
+
+  getConversation: async (id: string): Promise<ConversationDetail> => {
+    const response = await apiClient.get<ConversationDetail>(`/assistant/conversations/${encodeURIComponent(id)}`);
+    return response.data;
+  },
+
+  deleteConversation: async (id: string): Promise<void> => {
+    await apiClient.delete(`/assistant/conversations/${encodeURIComponent(id)}`);
+  },
+
+  /**
+   * Ask a question and call `onEvent` for each event as the answer streams.
+   * Resolves when the stream ends (normally or because it broke); rejects
+   * with {@link AssistantRequestError} when the question was refused.
+   */
+  ask: async (
+    conversationId: string,
+    text: string,
+    context: ChatContext | undefined,
+    onEvent: (event: ChatEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const response = await fetch(`${apiBase()}/assistant/conversations/${encodeURIComponent(conversationId)}/messages`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify({ text, context }),
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      let detail = 'The assistant could not answer right now.';
+      try {
+        const body = (await response.json()) as { detail?: unknown };
+        if (typeof body.detail === 'string') detail = body.detail;
+      } catch {
+        // keep the generic sentence
+      }
+      throw new AssistantRequestError(response.status, detail);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const sse = new SseReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const event of sse.push(decoder.decode(value, { stream: true }))) onEvent(event);
+    }
+    for (const event of sse.push(decoder.decode())) onEvent(event);
+  },
+};

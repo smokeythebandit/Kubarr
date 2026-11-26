@@ -83,6 +83,8 @@ pub enum AuditAction {
     InviteDeleted,
     /// The assistant's spend this month passed 80 % of its budget.
     AssistantBudgetWarning,
+    /// The assistant ran a read tool for a user (not notifiable).
+    AssistantToolCall,
 
     // Notification destinations
     NotificationVerificationSent,
@@ -105,6 +107,7 @@ impl AuditAction {
     ///   would flood every channel.
     /// - `notification_verification_sent`, `notification_destination_verified`: the
     ///   user is in the middle of configuring that very destination.
+    /// - `assistant_tool_call`: one per tool the assistant runs; audit only.
     ///
     /// The match is exhaustive on purpose: a new variant does not compile until it
     /// is classified here.
@@ -114,7 +117,8 @@ impl AuditAction {
             | AuditAction::TokenRefresh
             | AuditAction::AppAccessed
             | AuditAction::NotificationVerificationSent
-            | AuditAction::NotificationDestinationVerified => false,
+            | AuditAction::NotificationDestinationVerified
+            | AuditAction::AssistantToolCall => false,
             AuditAction::Login
             | AuditAction::LoginFailed
             | AuditAction::Logout
@@ -205,6 +209,7 @@ impl std::fmt::Display for AuditAction {
             AuditAction::InviteUsed => write!(f, "invite_used"),
             AuditAction::InviteDeleted => write!(f, "invite_deleted"),
             AuditAction::AssistantBudgetWarning => write!(f, "assistant_budget_warning"),
+            AuditAction::AssistantToolCall => write!(f, "assistant_tool_call"),
             AuditAction::NotificationVerificationSent => {
                 write!(f, "notification_verification_sent")
             }
@@ -328,6 +333,10 @@ mod tests {
             AuditAction::AssistantBudgetWarning.to_string(),
             "assistant_budget_warning"
         );
+        assert_eq!(
+            AuditAction::AssistantToolCall.to_string(),
+            "assistant_tool_call"
+        );
         assert_eq!(AuditAction::InviteDeleted.to_string(), "invite_deleted");
         assert_eq!(AuditAction::ApiAccess.to_string(), "api_access");
     }
@@ -352,13 +361,15 @@ mod tests {
             "app_accessed",
             "notification_verification_sent",
             "notification_destination_verified",
+            "assistant_tool_call",
         ] {
             assert!(
                 !names.iter().any(|n| n == noise),
                 "{noise} must be excluded"
             );
         }
-        assert_eq!(names.len(), AuditAction::all().count() - 5);
+        assert_eq!(names.len(), AuditAction::all().count() - 6);
+        assert!(names.iter().any(|n| n == "assistant_budget_warning"));
     }
 
     // -------------------------------------------------------------------------

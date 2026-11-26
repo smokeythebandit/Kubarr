@@ -445,7 +445,12 @@ async fn get_storage_stats(
     _auth: Authorized<StorageView>,
 ) -> Result<Json<StorageStats>> {
     let db = state.get_db().await?;
-    let storage_path = get_storage_path(&db).await?;
+    Ok(Json(storage_stats(&db).await?))
+}
+
+/// Disk usage of the shared media storage.
+pub(crate) async fn storage_stats(db: &DbConn) -> Result<StorageStats> {
+    let storage_path = get_storage_path(db).await?;
 
     if !storage_path.exists() {
         return Err(AppError::NotFound("Storage path not found".to_string()));
@@ -500,7 +505,7 @@ async fn get_storage_stats(
         }
     };
 
-    Ok(Json(stats))
+    Ok(stats)
 }
 
 /// Build a full recursive usage tree for the shared storage mount.
