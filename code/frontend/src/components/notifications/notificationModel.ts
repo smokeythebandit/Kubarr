@@ -1,4 +1,6 @@
 import type { Notification } from '../../api/notifications';
+import { appsApi } from '../../api/apps';
+import type { ChatContext } from '../../api/assistant';
 
 // Pure helpers behind the bell popover, the notifications page and the
 // settings tab. Everything here works on the fields the API returns today:
@@ -315,4 +317,28 @@ export function formatWhen(createdAt: string, now: Date): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} h ago`;
   return t.toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+const FAILED_UPDATE_EVENTS = ['app_update_failed', 'app_update_rollback_failed', 'app_rollback_failed'];
+
+/** Failed update or rollback events the assistant can explain. */
+export function isFailedUpdateEvent(eventType: string | null | undefined): boolean {
+  return !!eventType && FAILED_UPDATE_EVENTS.includes(eventType);
+}
+
+/**
+ * The assistant context for a failed-update notification. Notifications
+ * carry no operation id, so the app's failed operation closest to (and not
+ * after) the notification is looked up; without one the context is the app.
+ */
+export async function failedOperationContext(app: string, notifiedAt: string): Promise<ChatContext> {
+  const at = new Date(notifiedAt).getTime();
+  const operations = await appsApi.getOperations();
+  const failed = operations
+    .filter((op) => op.app_name === app && op.status === 'failed')
+    .map((op) => ({ op, t: new Date(op.finished_at ?? op.updated_at).getTime() }))
+    .filter(({ t }) => Number.isFinite(t))
+    .sort((a, b) => Math.abs(a.t - at) - Math.abs(b.t - at));
+  const match = failed[0]?.op;
+  return match ? { kind: 'operation', app, operation_id: match.id } : { kind: 'app', app };
 }

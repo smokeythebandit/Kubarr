@@ -369,13 +369,10 @@ pub async fn create_conversation(
     require_use(&auth)?;
     let request = body.map(|Json(b)| b).unwrap_or_default();
     let db = state.get_db().await?;
-    let conversation = conversations::create(
-        &db,
-        auth.user_id(),
-        request.title.as_deref(),
-        &request.context.unwrap_or_default(),
-    )
-    .await?;
+    let context = request.context.unwrap_or_default();
+    context.validate(&db, auth.permissions()).await?;
+    let conversation =
+        conversations::create(&db, auth.user_id(), request.title.as_deref(), &context).await?;
     Ok(Json(conversation.into()))
 }
 
@@ -497,6 +494,7 @@ pub async fn post_message(
     let context = request
         .context
         .unwrap_or_default()
+        .without_kind()
         .sanitized()
         .or(&stored.sanitized());
     let (question_id, answer_id) = conversations::start_turn(&db, &conversation, &question).await?;

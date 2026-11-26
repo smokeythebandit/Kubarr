@@ -47,6 +47,8 @@ interface Props {
   onConversationCreated: (id: string) => void;
   context?: ChatContext;
   paused?: boolean;
+  /** A question to prefill (unsent) each time `key` changes. */
+  seed?: { key: number; draft: string };
   /** Narrow layout for the slide-over panel. */
   compact?: boolean;
 }
@@ -115,7 +117,7 @@ function AssistantBubble({
   );
 }
 
-export function AssistantChat({ conversationId, onConversationCreated, context, paused = false, compact = false }: Props) {
+export function AssistantChat({ conversationId, onConversationCreated, context, paused = false, seed, compact = false }: Props) {
   const queryClient = useQueryClient();
   const [messages, setMessages] = useState<ShownMessage[]>([]);
   const [draft, setDraft] = useState('');
@@ -150,6 +152,11 @@ export function AssistantChat({ conversationId, onConversationCreated, context, 
       cancelled = true;
     };
   }, [conversationId]);
+
+  useEffect(() => {
+    if (seed) setDraft(seed.draft);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed?.key]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
