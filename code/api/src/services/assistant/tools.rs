@@ -12,6 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde_json::{json, Map, Value};
 
+use super::actions::{self, ActionCard, ActionKind, Proposal};
 use super::cluster::{self, is_k8s_name, open_to_non_admin};
 use super::k8s_shape::{Kind, SECRET_REFUSAL};
 use crate::models::audit_log::{AuditAction, ResourceType};
@@ -48,11 +49,13 @@ pub enum Tool {
     K8sEvents,
     PodLogs,
     HelmStatus,
+    /// Proposes an action for the person to Run or Cancel; never acts.
+    ProposeAction,
 }
 
 impl Tool {
     /// In the order offered to the model (kept fixed for prompt caching).
-    pub const ALL: [Tool; 14] = [
+    pub const ALL: [Tool; 15] = [
         Tool::ListApps,
         Tool::GetApp,
         Tool::ListOperations,
@@ -67,6 +70,7 @@ impl Tool {
         Tool::K8sEvents,
         Tool::PodLogs,
         Tool::HelmStatus,
+        Tool::ProposeAction,
     ];
 
     pub fn name(self) -> &'static str {
@@ -85,6 +89,7 @@ impl Tool {
             Tool::K8sEvents => "k8s_events",
             Tool::PodLogs => "pod_logs",
             Tool::HelmStatus => "helm_status",
+            Tool::ProposeAction => "propose_action",
         }
     }
 
@@ -104,7 +109,9 @@ impl Tool {
             | Tool::K8sDescribe
             | Tool::K8sEvents
             | Tool::HelmStatus => Some("apps.view"),
-            Tool::ListNotifications => None,
+            // Offered when the user may start at least one kind of action;
+            // each kind checks its own permission.
+            Tool::ListNotifications | Tool::ProposeAction => None,
             Tool::GetStorage => Some("storage.view"),
             Tool::GetUpdateSettings => Some("settings.view"),
             Tool::QueryMetrics => Some("monitoring.view"),
@@ -174,6 +181,17 @@ impl Tool {
             Tool::HelmStatus => {
                 "Status of a Helm release: chart, chart version, app version, revision, status, \
                  when it was deployed and its recent revisions. Never values or manifests."
+            }
+            Tool::ProposeAction => {
+                "Propose an action for the user to confirm. This does NOT perform the action: \
+                 Kubarr checks it against the user's permissions, then shows the user a card \
+                 with Run and Cancel buttons; only their click runs it, within 10 minutes. Kinds: \
+                 restart_app; update_app (params.version optional, must be the available \
+                 update; major updates are refused and go through the app page); rollback_app \
+                 (back to the release before the last successful update); install_app (catalog \
+                 defaults only; params.version optional); set_app_auto_update (params.enabled \
+                 required); retry_operation (params.operation_id of a failed operation of that \
+                 app). Returns the card summary or why the action was refused."
             }
         }
     }
@@ -258,6 +276,27 @@ impl Tool {
                 }),
                 vec!["release"],
             ),
+            Tool::ProposeAction => {
+                let kinds: Vec<&str> = ActionKind::ALL.iter().map(|k| k.name()).collect();
+                (
+                    json!({
+                        "kind": {"type": "string", "enum": kinds},
+                        "app": app,
+                        "params": {
+                            "type": "object",
+                            "properties": {
+                                "version": {"type": "string", "description": "Target chart version (update_app, install_app)"},
+                                "enabled": {"type": "boolean", "description": "Automatic updates on or off (set_app_auto_update)"},
+                                "operation_id": {"type": "string", "description": "The failed operation to retry (retry_operation)"}
+                            },
+                            "required": [],
+                            "additionalProperties": false
+                        },
+                        "reason": {"type": "string", "description": "One sentence on why, for the audit log"}
+                    }),
+                    vec!["kind", "app", "reason"],
+                )
+            }
         };
         json!({
             "type": "object",
@@ -316,6 +355,8 @@ pub struct ToolContext {
     pub monitoring: Monitoring,
     /// The cluster tools are offered (see [`super::cluster::available`]).
     pub cluster: bool,
+    /// The answer being written (proposed actions attach to it).
+    pub message_id: Option<i64>,
 }
 
 impl ToolContext {
@@ -364,6 +405,7 @@ impl ToolContext {
             | Tool::K8sEvents
             | Tool::PodLogs
             | Tool::HelmStatus => self.cluster,
+            Tool::ProposeAction => self.has("apps.install") || self.has("apps.restart"),
             _ => true,
         };
         installed && tool.permission().is_none_or(|p| self.has(p))
@@ -385,6 +427,8 @@ pub struct ToolOutcome {
     pub content: String,
     pub is_error: bool,
     pub source: Source,
+    /// The card a successful `propose_action` created.
+    pub card: Option<ActionCard>,
 }
 
 impl ToolOutcome {
@@ -459,6 +503,10 @@ pub fn status_line(name: &str, input: Option<&Value>) -> String {
         (Some(Tool::K8sEvents), None) => "recent cluster events".to_string(),
         (Some(Tool::PodLogs), Some(pod)) => format!("logs of pod {pod}"),
         (Some(Tool::HelmStatus), Some(release)) => format!("Helm release {release}"),
+        (Some(Tool::ProposeAction), Some(app)) => {
+            return format!("Preparing an action for {app}…");
+        }
+        (Some(Tool::ProposeAction), None) => return "Preparing an action…".to_string(),
         (Some(Tool::K8sDescribe | Tool::PodLogs | Tool::HelmStatus), None) => {
             "the cluster".to_string()
         }
@@ -503,6 +551,8 @@ fn source_for(name: &str, input: Option<&Value>) -> Source {
         (Some(Tool::K8sEvents), None) => "Cluster events".to_string(),
         (Some(Tool::PodLogs), Some(pod)) => format!("Logs of pod {pod}"),
         (Some(Tool::HelmStatus), Some(release)) => format!("Helm release {release}"),
+        (Some(Tool::ProposeAction), Some(app)) => format!("Proposed action for {app}"),
+        (Some(Tool::ProposeAction), None) => "Proposed action".to_string(),
         _ => name.to_string(),
     };
     Source {
@@ -524,18 +574,31 @@ pub(super) fn is_app_name(value: &str) -> bool {
 /// properties, every required one present, and each of the right type (and
 /// in its enum).
 pub fn validate(tool: Tool, input: &Value) -> Result<(), String> {
-    let schema = tool.input_schema();
+    validate_object(&tool.input_schema(), input, "")
+}
+
+fn validate_object(schema: &Value, input: &Value, prefix: &str) -> Result<(), String> {
     let Some(object) = input.as_object() else {
-        return Err("input must be an object".into());
+        return Err(if prefix.is_empty() {
+            "input must be an object".into()
+        } else {
+            format!("parameter `{prefix}` must be an object")
+        });
     };
     let properties = schema["properties"]
         .as_object()
         .cloned()
         .unwrap_or_default();
     for (key, value) in object {
-        let Some(property) = properties.get(key) else {
+        let key = &format!("{prefix}{key}");
+        let name = key.rsplit('.').next().unwrap_or(key);
+        let Some(property) = properties.get(name) else {
             return Err(format!("unknown parameter `{key}`"));
         };
+        if property["type"] == "object" {
+            validate_object(property, value, &format!("{key}."))?;
+            continue;
+        }
         let ok = match property["type"].as_str() {
             Some("string") => value.is_string(),
             Some("integer") => value.is_i64() || value.is_u64(),
@@ -556,7 +619,7 @@ pub fn validate(tool: Tool, input: &Value) -> Result<(), String> {
     for required in schema["required"].as_array().into_iter().flatten() {
         if let Some(key) = required.as_str() {
             if !object.contains_key(key) {
-                return Err(format!("missing parameter `{key}`"));
+                return Err(format!("missing parameter `{prefix}{key}`"));
             }
         }
     }
@@ -640,6 +703,9 @@ pub async fn execute(ctx: &ToolContext, name: &str, input: Option<&Value>) -> To
         }
         (Some(tool), Some(input)) => match validate(tool, input) {
             Err(e) => Err(ToolError::new(format!("Invalid input: {e}."))),
+            Ok(()) if tool == Tool::ProposeAction => {
+                return propose_action(ctx, name, input, source).await;
+            }
             Ok(()) => run(ctx, tool, input).await,
         },
     };
@@ -652,6 +718,44 @@ pub async fn execute(ctx: &ToolContext, name: &str, input: Option<&Value>) -> To
         content,
         is_error,
         source,
+        card: None,
+    }
+}
+
+/// Store a proposal and hand back its card. The result tells the model that
+/// nothing has happened yet.
+async fn propose_action(
+    ctx: &ToolContext,
+    name: &str,
+    input: &Value,
+    source: Source,
+) -> ToolOutcome {
+    let outcome = match serde_json::from_value::<Proposal>(input.clone()) {
+        Err(_) => Err("Invalid input.".to_string()),
+        Ok(proposal) => actions::propose(ctx, &proposal).await,
+    };
+    audit(ctx, name, source.target.as_deref(), outcome.is_ok()).await;
+    match outcome {
+        Ok(card) => ToolOutcome {
+            content: json!({
+                "proposed": true,
+                "action_id": card.id,
+                "summary": card.summary,
+                "expires_at": card.expires_at,
+                "note": "Nothing has happened yet. The user now sees a card with Run and Cancel \
+                         buttons; the action only runs if they click Run. Do not say it was done.",
+            })
+            .to_string(),
+            is_error: false,
+            source,
+            card: Some(card),
+        },
+        Err(reason) => ToolOutcome {
+            content: format!("Refused: {reason} Nothing was proposed."),
+            is_error: true,
+            source,
+            card: None,
+        },
     }
 }
 
@@ -699,6 +803,8 @@ async fn run(ctx: &ToolContext, tool: Tool, input: &Value) -> ToolResult {
         Tool::K8sEvents => cluster::k8s_events(ctx, input).await,
         Tool::PodLogs => cluster::pod_logs(ctx, input).await,
         Tool::HelmStatus => cluster::helm_status(ctx, input).await,
+        // Handled by `propose_action` before dispatch.
+        Tool::ProposeAction => Err(ToolError::new("Unknown tool.")),
     }
 }
 

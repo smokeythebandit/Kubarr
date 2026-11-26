@@ -82,6 +82,12 @@ pub enum AuditAction {
     AssistantBudgetWarning,
     /// The assistant ran a read tool for a user (not notifiable).
     AssistantToolCall,
+    /// The assistant proposed an action (not notifiable).
+    AssistantActionProposed,
+    /// The person clicked Run on a proposed action (not notifiable).
+    AssistantActionConfirmed,
+    /// The person cancelled a proposed action (not notifiable).
+    AssistantActionCancelled,
 
     // API access
     ApiAccess,
@@ -131,6 +137,9 @@ impl std::fmt::Display for AuditAction {
             AuditAction::InviteDeleted => write!(f, "invite_deleted"),
             AuditAction::AssistantBudgetWarning => write!(f, "assistant_budget_warning"),
             AuditAction::AssistantToolCall => write!(f, "assistant_tool_call"),
+            AuditAction::AssistantActionProposed => write!(f, "assistant_action_proposed"),
+            AuditAction::AssistantActionConfirmed => write!(f, "assistant_action_confirmed"),
+            AuditAction::AssistantActionCancelled => write!(f, "assistant_action_cancelled"),
             AuditAction::ApiAccess => write!(f, "api_access"),
         }
     }
@@ -251,6 +260,18 @@ mod tests {
         assert_eq!(
             AuditAction::AssistantToolCall.to_string(),
             "assistant_tool_call"
+        );
+        assert_eq!(
+            AuditAction::AssistantActionProposed.to_string(),
+            "assistant_action_proposed"
+        );
+        assert_eq!(
+            AuditAction::AssistantActionConfirmed.to_string(),
+            "assistant_action_confirmed"
+        );
+        assert_eq!(
+            AuditAction::AssistantActionCancelled.to_string(),
+            "assistant_action_cancelled"
         );
         assert_eq!(AuditAction::InviteDeleted.to_string(), "invite_deleted");
         assert_eq!(AuditAction::ApiAccess.to_string(), "api_access");

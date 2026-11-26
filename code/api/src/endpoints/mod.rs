@@ -172,6 +172,8 @@ use crate::state::AppState;
         assistant::get_conversation,
         assistant::delete_conversation,
         assistant::post_message,
+        assistant::run_action,
+        assistant::cancel_action,
         // Domains
         domains::list_domains,
         domains::get_domain,

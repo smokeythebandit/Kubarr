@@ -5,6 +5,7 @@
 //! builds on these; the auto-update AI recovery shares the same key and
 //! budget.
 
+pub mod actions;
 pub mod budget;
 pub mod chat;
 pub mod client;

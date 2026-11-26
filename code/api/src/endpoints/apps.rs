@@ -14,17 +14,15 @@ use crate::middleware::permissions::{
     AppsDelete, AppsInstall, AppsRestart, AppsView, Authenticated, Authorized,
 };
 use crate::models::audit_log::AuditAction;
-use crate::services::app_storage;
 use crate::services::gpu::{self, GpuNode, GpuSelection};
 use crate::services::install_options::{self, InstallStorage};
 use crate::services::vpn::AssignVpnRequest;
+use crate::services::{app_install, app_storage};
 use crate::services::{
-    AppConfig, AppManager, AppOperationResponse, AppStateResponse, DeploymentManager, OP_DELETE,
-    OP_INSTALL, OP_RESTART, OP_UPDATE,
+    check_retry_allowed, operation_control_permission, AppConfig, AppManager, AppOperationResponse,
+    AppStateResponse, DeploymentManager, OP_DELETE, OP_INSTALL, OP_RESTART, OP_UPDATE,
 };
 use crate::state::AppState;
-use sea_orm::TransactionTrait;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 /// Create apps routes
 pub fn apps_routes(state: AppState) -> Router {
@@ -310,90 +308,23 @@ async fn install_app(
         ));
     }
     let operation = if has_choices {
-        let options = {
-            let catalog = state.catalog.read().await;
-            install_options::load(&catalog, &request.app_name)?
-        };
-        if request.chart_version.as_deref() != Some(options.chart_version.as_str()) {
-            return Err(AppError::Conflict(
-                "Chart changed; reload install options and review again".into(),
-            ));
-        }
-        let requested_storage = request.storage.unwrap_or_default();
-        install_options::validate(&options, &requested_storage)?;
-        if request.gpu.is_some() && !options.gpu_supported {
-            return Err(AppError::BadRequest(
-                "GPU is unsupported for this chart".into(),
-            ));
-        }
-        if request.vpn.as_ref().is_some_and(|v| v.is_some()) && !options.vpn_supported {
-            return Err(AppError::BadRequest(
-                "VPN is unsupported for this chart".into(),
-            ));
-        }
         let permissions =
             crate::endpoints::extractors::get_user_permissions(&db, auth.user_id()).await;
-        let can_manage_vpn = permissions.iter().any(|p| p == "vpn.manage");
-        if request.vpn.as_ref().is_some_and(|v| v.is_some()) && !can_manage_vpn {
-            return Err(AppError::Forbidden(
-                "vpn.manage required for install-time VPN".into(),
-            ));
-        }
-        let tx = db.begin().await?;
-        let active = crate::models::app_operation::Entity::find()
-            .filter(crate::models::app_operation::Column::AppName.eq(&request.app_name))
-            .filter(
-                crate::models::app_operation::Column::Status.is_in(["queued", "running", "paused"]),
-            )
-            .one(&tx)
-            .await?;
-        if active.is_some() {
-            return Err(AppError::Conflict(
-                "An app operation is already in progress".into(),
-            ));
-        }
-        let saved = app_storage::get(&tx, &request.app_name).await?;
-        let storage = app_storage::materialize(
-            &options,
-            &requested_storage,
-            saved.as_ref().map(|s| &s.storage),
-        )?;
-        let fresh_private_config = saved
-            .as_ref()
-            .is_some_and(|s| s.fresh_private_config && s.storage.config == storage.config);
-        let existing = crate::models::app_vpn_config::Entity::find_by_id(&request.app_name)
-            .one(&tx)
-            .await?;
-        if existing.is_some() && !options.vpn_supported && !matches!(request.vpn, Some(None)) {
-            return Err(AppError::BadRequest("This chart cannot install with its existing VPN assignment; remove it explicitly with vpn.manage".into()));
-        }
-        if matches!(request.vpn, Some(None)) && existing.is_some() && !can_manage_vpn {
-            return Err(AppError::Forbidden(
-                "vpn.manage required to remove an existing VPN assignment".into(),
-            ));
-        }
-        if let Some(vpn) = request.vpn {
-            if let Some(vpn) = vpn {
-                crate::services::vpn::assign_vpn_to_app(&tx, &request.app_name, vpn).await?;
-            } else {
-                crate::services::vpn::remove_vpn_from_app(&tx, &request.app_name).await?;
-            }
-        }
-        let result = manager
-            .enqueue_install_in_transaction(
-                &tx,
-                &request.app_name,
-                &options.chart_version,
-                storage.clone(),
-                fresh_private_config,
-                request.gpu,
-                auth.user_id(),
-            )
-            .await?;
-        // Queue, VPN assignment and durable desired storage are all-or-nothing.
-        app_storage::save(&tx, &request.app_name, &options.chart_version, &storage).await?;
-        tx.commit().await?;
-        result
+        app_install::install_with_choices(
+            &db,
+            &state.catalog,
+            &manager,
+            &request.app_name,
+            app_install::InstallChoices {
+                chart_version: request.chart_version,
+                storage: request.storage,
+                vpn: request.vpn,
+                gpu: request.gpu,
+            },
+            auth.user_id(),
+            &permissions,
+        )
+        .await?
     } else {
         manager
             .enqueue_gpu_operation(
@@ -591,23 +522,16 @@ async fn control(
     let db = state.get_db().await?;
     let manager = AppManager::new(db.clone(), state.k8s_client.clone(), state.catalog.clone());
     let operation = manager.get_operation(&id).await?;
-    let needed = operation_control_permission(&operation.operation)?;
     let permissions = crate::endpoints::extractors::get_user_permissions(&db, auth.user_id()).await;
-    if !permissions.iter().any(|p| p == needed) {
-        return Err(AppError::Forbidden(format!(
-            "Permission denied: {needed} required"
-        )));
-    }
-    if operation.operation == OP_DELETE
-        && state
-            .catalog
-            .read()
-            .await
-            .get_app(&operation.app_name)
-            .is_some_and(|app| app.is_system)
-        && action == "retry"
-    {
-        return Err(AppError::Forbidden("Cannot delete system app".into()));
+    if action == "retry" {
+        check_retry_allowed(&state.catalog, &operation, &permissions).await?;
+    } else {
+        let needed = operation_control_permission(&operation.operation)?;
+        if !permissions.iter().any(|p| p == needed) {
+            return Err(AppError::Forbidden(format!(
+                "Permission denied: {needed} required"
+            )));
+        }
     }
     let updated = if action == "retry" {
         manager.retry_operation(&id, auth.user_id()).await?
@@ -618,15 +542,6 @@ async fn control(
     };
     state.endpoint_cache.invalidate(&updated.app_name).await;
     Ok(Json(updated))
-}
-
-fn operation_control_permission(operation: &str) -> Result<&'static str> {
-    Ok(match operation {
-        OP_DELETE => "apps.delete",
-        OP_RESTART => "apps.restart",
-        OP_INSTALL | OP_UPDATE => "apps.install",
-        _ => return Err(AppError::BadRequest("Unsupported operation type".into())),
-    })
 }
 
 #[utoipa::path(post, path = "/api/apps/operations/{operation_id}/pause", tag = "Apps", params(("operation_id" = String, Path)), responses((status = 200, body = AppOperationResponse), (status = 409)))]
@@ -1009,6 +924,7 @@ mod tests {
             (OP_UPDATE, "apps.install"),
             (OP_DELETE, "apps.delete"),
             (OP_RESTART, "apps.restart"),
+            (crate::services::OP_ROLLBACK, "apps.install"),
         ] {
             assert_eq!(operation_control_permission(operation).unwrap(), permission);
         }

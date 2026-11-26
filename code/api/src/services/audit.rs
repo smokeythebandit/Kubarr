@@ -213,9 +213,9 @@ fn allowed_label(key: &str, value: &str) -> bool {
         ),
         "method" => matches!(value, "totp" | "recovery_code" | "password"),
         "changed" => matches!(value, "apps" | "permissions"),
-        "operation_id" | "conversation_id" => uuid::Uuid::parse_str(value).is_ok(),
-        // Assistant tool names: a fixed vocabulary of identifiers.
-        "tool" => {
+        "operation_id" | "conversation_id" | "action_id" => uuid::Uuid::parse_str(value).is_ok(),
+        // Assistant tool names and action kinds: fixed vocabularies of identifiers.
+        "tool" | "kind" => {
             !value.is_empty()
                 && value.len() <= 32
                 && value.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
@@ -236,6 +236,8 @@ fn allowed_detail_key(key: &str) -> bool {
             | "changed"
             | "operation_id"
             | "conversation_id"
+            | "action_id"
+            | "kind"
             | "tool"
             | "target"
             | "days"

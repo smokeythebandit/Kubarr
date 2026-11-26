@@ -37,6 +37,8 @@ pub const OP_INSTALL: &str = "install";
 pub const OP_UPDATE: &str = "update";
 pub const OP_DELETE: &str = "delete";
 pub const OP_RESTART: &str = "restart";
+/// Roll an app back to the Helm release before its current one.
+pub const OP_ROLLBACK: &str = "rollback";
 const QUEUED_INSTALL_KEY: &str = "__kubarr_install_choices";
 const QUEUED_STORAGE_KEY: &str = "__kubarr_storage_snapshot";
 /// Chart version an update operation was queued for (recorded on every update,
@@ -490,15 +492,9 @@ impl AppManager {
                     app_name
                 )));
             }
+            drop(catalog);
             if operation == OP_UPDATE && !custom_config.contains_key(AUTO_TARGET_KEY) {
-                let version = match catalog.chart_version(app_name) {
-                    Some(version) => Some(version),
-                    None => app_state::Entity::find_by_id(app_name.to_string())
-                        .one(&self.db)
-                        .await?
-                        .and_then(|row| row.available_chart_version),
-                };
-                if let Some(version) = version {
+                if let Some(version) = self.update_target(app_name).await? {
                     custom_config.insert(AUTO_TARGET_KEY.into(), version);
                 }
             }
@@ -539,6 +535,19 @@ impl AppManager {
         log_queued(&transaction, &inserted).await?;
         transaction.commit().await?;
         Ok(inserted.into())
+    }
+
+    /// The chart version a manual update of `app_name` deploys: the chart on
+    /// disk, or else the last known available version.
+    pub async fn update_target(&self, app_name: &str) -> Result<Option<String>> {
+        let on_disk = self.catalog.read().await.chart_version(app_name);
+        Ok(match on_disk {
+            Some(version) => Some(version),
+            None => app_state::Entity::find_by_id(app_name.to_string())
+                .one(&self.db)
+                .await?
+                .and_then(|row| row.available_chart_version),
+        })
     }
 
     pub async fn enqueue_gpu_operation(
@@ -1710,6 +1719,11 @@ impl AppManager {
                 self.restart_app(client, &operation.app_name).await?;
                 Ok(format!("Restarted {}", operation.app_name).into())
             }
+            OP_ROLLBACK => {
+                let manager = DeploymentManager::new(client, &catalog);
+                self.execute_rollback(operation, client, &manager, stop)
+                    .await
+            }
             _ => Err(AppError::BadRequest(format!(
                 "Unsupported operation '{}'",
                 operation.operation
@@ -2197,6 +2211,39 @@ impl AppManager {
         let summary: Vec<&str> = lines.iter().map(|line| first_line(line)).collect();
         let scrubbed = probe.scrub(&summary.join("\n")).await;
         compose_diagnostics(&scrubbed, captured)
+    }
+
+    /// Roll back to the Helm release before the current one, then hold the
+    /// app to the same health check as an update (healthy through the settle
+    /// period, no restart loop). Never touches PVCs or shared data.
+    async fn execute_rollback(
+        &self,
+        operation: &app_operation::Model,
+        client: &K8sClient,
+        deploy: &DeploymentManager<'_>,
+        stop: &CancellationToken,
+    ) -> Result<OperationOutput> {
+        check_stop(stop)?;
+        let app = operation.app_name.as_str();
+        let target = deploy.previous_deployed_revision(app)?.ok_or_else(|| {
+            AppError::Conflict(format!("{app} has no earlier Helm release to roll back to"))
+        })?;
+        let probe = ClusterUpdateProbe::new(client, deploy, app);
+        let before = probe.restart_snapshot().await?;
+        check_stop(stop)?;
+        probe.rollback(target)?;
+        match self
+            .verify_update(&probe, &before, self.health_timeout().await)
+            .await
+        {
+            HealthVerdict::Healthy => {
+                Ok(format!("Rolled back {app} to Helm revision {target}").into())
+            }
+            HealthVerdict::Unhealthy(reason) => Err(AppError::Internal(format!(
+                "Rolled back {app} to Helm revision {target}, but it is not healthy: {}",
+                probe.scrub(&reason).await
+            ))),
+        }
     }
 
     async fn restart_app(&self, client: &K8sClient, app_name: &str) -> Result<()> {
@@ -2969,9 +3016,46 @@ async fn log_control<C: ConnectionTrait>(
     Ok(())
 }
 
+/// The permission needed to control (pause, resume, cancel, retry) an
+/// operation of this type: the permission of the original action.
+pub fn operation_control_permission(operation: &str) -> Result<&'static str> {
+    Ok(match operation {
+        OP_DELETE => "apps.delete",
+        OP_RESTART => "apps.restart",
+        OP_INSTALL | OP_UPDATE | OP_ROLLBACK => "apps.install",
+        _ => return Err(AppError::BadRequest("Unsupported operation type".into())),
+    })
+}
+
+/// Whether a user with `permissions` may retry `operation`: the permission of
+/// the original action, and never a delete of a system app. Shared by the
+/// retry endpoint and the assistant.
+pub async fn check_retry_allowed(
+    catalog: &SharedCatalog,
+    operation: &AppOperationResponse,
+    permissions: &[String],
+) -> Result<()> {
+    let needed = operation_control_permission(&operation.operation)?;
+    if !permissions.iter().any(|p| p == needed) {
+        return Err(AppError::Forbidden(format!(
+            "Permission denied: {needed} required"
+        )));
+    }
+    if operation.operation == OP_DELETE
+        && catalog
+            .read()
+            .await
+            .get_app(&operation.app_name)
+            .is_some_and(|app| app.is_system)
+    {
+        return Err(AppError::Forbidden("Cannot delete system app".into()));
+    }
+    Ok(())
+}
+
 fn validate_operation(operation: &str) -> Result<()> {
     match operation {
-        OP_INSTALL | OP_UPDATE | OP_DELETE | OP_RESTART => Ok(()),
+        OP_INSTALL | OP_UPDATE | OP_DELETE | OP_RESTART | OP_ROLLBACK => Ok(()),
         _ => Err(AppError::BadRequest(format!(
             "Unsupported operation '{}'",
             operation
