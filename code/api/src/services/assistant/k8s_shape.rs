@@ -29,9 +29,12 @@ use crate::services::update_diagnostics::{scrub_inline, scrub_with};
 
 pub const REDACTED: &str = "[redacted]";
 /// Why Secrets are refused (the model sees this verbatim).
-pub const SECRET_REFUSAL: &str = "Secrets are never available to the assistant, not even their \
-     names. Look at the workload that uses the Secret instead (k8s_describe shows which Secrets \
-     a pod references by name, never their contents).";
+pub const SECRET_REFUSAL: &str = "Secret objects are never available to the assistant: they \
+     are not listed or described, and their contents are never shown. Pod and workload \
+     descriptions (k8s_describe) do show which Secrets they reference, by name only.";
+pub const OMITTED: &str = "[omitted]";
+/// A ConfigMap list line names at most this many keys.
+const MAX_LINE_KEYS: usize = 20;
 const LAST_APPLIED: &str = "kubectl.kubernetes.io/last-applied-configuration";
 /// Free-text fields (condition and event messages, annotation values).
 const MAX_TEXT_CHARS: usize = 500;
@@ -148,12 +151,14 @@ pub fn secretish_key(key: &str) -> bool {
     [
         "token",
         "secret",
-        "password",
-        "passwd",
+        "pass",
         "key",
         "credential",
         "auth",
         "cert",
+        "dsn",
+        "private",
+        "connection",
     ]
     .iter()
     .any(|word| lower.contains(word))
@@ -226,7 +231,14 @@ fn compact(value: Value) -> Value {
     }
 }
 
-/// Labels or annotations with secret-ish keys redacted, the last-applied
+/// A value that looks like an embedded JSON/YAML document.
+fn blob(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    trimmed.starts_with('{') || trimmed.starts_with('[') || value.contains('\n')
+}
+
+/// Labels or annotations with secret-ish keys redacted, JSON/YAML blobs
+/// omitted, the last-applied
 /// configuration dropped and long values clipped.
 pub fn shape_string_map(map: Option<&BTreeMap<String, String>>) -> Value {
     let Some(map) = map else {
@@ -238,6 +250,8 @@ pub fn shape_string_map(map: Option<&BTreeMap<String, String>>) -> Value {
         .map(|(k, v)| {
             let value = if secretish_key(k) {
                 REDACTED.to_string()
+            } else if blob(v) {
+                OMITTED.to_string()
             } else {
                 clip(&scrub_inline(v), 300)
             };
@@ -1254,11 +1268,20 @@ impl Shape for ConfigMap {
         &self.metadata
     }
     fn line(&self, _now: i64) -> String {
-        format!(
+        let keys = config_map_keys(self);
+        let mut line = format!(
             "{} keys: {}",
             name_of(&self.metadata),
-            config_map_keys(self).join(", ")
-        )
+            keys.iter()
+                .take(MAX_LINE_KEYS)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if keys.len() > MAX_LINE_KEYS {
+            line.push_str(&format!(" …and {} more", keys.len() - MAX_LINE_KEYS));
+        }
+        line
     }
     fn describe(&self) -> Value {
         compact(json!({
@@ -1385,6 +1408,18 @@ pub fn httproute_describe(meta: &ObjectMeta, data: &Value) -> Value {
         "rules": rules,
         "status": status,
     }))
+}
+
+/// Scrub every string in a shaped result with the namespace's known Secret
+/// values (plus the inline patterns), e.g. termination messages that hold a
+/// log tail (`FallbackToLogsOnError`), event and condition messages.
+pub fn scrub_value(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::String(s) => *s = scrub_with(s, secrets),
+        Value::Array(items) => items.iter_mut().for_each(|v| scrub_value(v, secrets)),
+        Value::Object(map) => map.values_mut().for_each(|v| scrub_value(v, secrets)),
+        _ => {}
+    }
 }
 
 /// Pod logs for the model: every line scrubbed (known Secret values, inline
@@ -1761,6 +1796,81 @@ mod tests {
             line,
             "2023-11-14T22:13:20Z Warning BackOff Pod/app-0: restarting; token=[redacted] (x3)"
         );
+    }
+
+    #[test]
+    fn known_secret_values_are_scrubbed_from_shaped_output() {
+        let mut pod = leaky_pod();
+        let db = "Zq8-database-pass-77";
+        if let Some(status) = pod.status.as_mut() {
+            if let Some(cs) = status.container_statuses.as_mut() {
+                cs[0].last_state = Some(ContainerState {
+                    terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                        exit_code: 1,
+                        reason: Some("Error".into()),
+                        message: Some(format!("fatal: cannot connect with {db}")),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+            }
+        }
+        let mut out = pod.describe();
+        assert!(out.to_string().contains(db));
+        scrub_value(&mut out, &[db.to_string()]);
+        let text = out.to_string();
+        assert!(!text.contains(db), "{text}");
+        assert!(
+            text.contains("fatal: cannot connect with [redacted]"),
+            "{text}"
+        );
+
+        let mut lines = json!({"events": [format!("Warning Failed Pod/x: {db}")]});
+        scrub_value(&mut lines, &[db.to_string()]);
+        assert!(!lines.to_string().contains(db));
+    }
+
+    #[test]
+    fn annotation_blobs_are_omitted_and_config_map_lines_capped() {
+        let map = BTreeMap::from([
+            ("example.com/config".to_string(), r#"{"a": 1}"#.to_string()),
+            ("example.com/list".to_string(), "[1, 2]".to_string()),
+            ("example.com/yaml".to_string(), "a: 1\nb: 2".to_string()),
+            ("example.com/db-dsn".to_string(), "x".to_string()),
+            ("example.com/connection-string".to_string(), "x".to_string()),
+            ("example.com/private".to_string(), "x".to_string()),
+            ("example.com/plain".to_string(), "fine".to_string()),
+        ]);
+        let out = shape_string_map(Some(&map)).to_string();
+        assert!(out.contains(r#""example.com/config":"[omitted]""#), "{out}");
+        assert!(out.contains(r#""example.com/list":"[omitted]""#), "{out}");
+        assert!(out.contains(r#""example.com/yaml":"[omitted]""#), "{out}");
+        assert!(
+            out.contains(r#""example.com/db-dsn":"[redacted]""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#""example.com/connection-string":"[redacted]""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#""example.com/private":"[redacted]""#),
+            "{out}"
+        );
+        assert!(out.contains(r#""example.com/plain":"fine""#), "{out}");
+
+        let cm = ConfigMap {
+            metadata: leaky_meta(),
+            data: Some(
+                (0..25)
+                    .map(|i| (format!("k{i:02}"), String::new()))
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        let line = cm.line(0);
+        assert!(line.contains("k19") && !line.contains("k20"), "{line}");
+        assert!(line.ends_with("…and 5 more"), "{line}");
     }
 
     #[test]

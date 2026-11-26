@@ -34,7 +34,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::k8s_shape::{
-    event_line, event_seconds, httproute_describe, httproute_line, shape_logs, Kind, Shape,
+    event_line, event_seconds, httproute_describe, httproute_line, scrub_value, shape_logs, Kind,
+    Shape,
 };
 use super::tools::{
     clip, is_app_name, scoped_namespace, system_namespace, ToolContext, ToolError, ToolResult,
@@ -42,7 +43,7 @@ use super::tools::{
 use crate::models::app_state;
 use crate::services::catalog::lifecycle_for_app_name;
 use crate::services::helm_process;
-use crate::services::update_diagnostics::{scrub_inline, secret_values_for_namespace};
+use crate::services::update_diagnostics::{scrub_inline, try_secret_values};
 
 /// At most this many objects per list call (first page only).
 const LIST_LIMIT: u32 = 200;
@@ -53,18 +54,36 @@ const MAX_SINCE_MINUTES: u64 = 24 * 60;
 /// Raw pod logs fetched at most (before scrubbing and the 18 KB budget).
 const LOG_FETCH_BYTES: i64 = 512 * 1024;
 const HELM_TIMEOUT: Duration = Duration::from_secs(30);
+/// Every Kubernetes API call is cut off after this long.
+const KUBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 const UNREACHABLE: &str = "The Kubernetes cluster could not be read right now.";
+const KUBE_SLOW: &str = "The Kubernetes API did not answer in time.";
+const UNSCRUBBABLE: &str = "This is not shown because Kubarr could not read the namespace's \
+     Secrets to redact their values from it.";
 const NAMESPACE_HIDDEN: &str = "is not visible to this user (system and shared namespaces are \
      only available to administrators)";
 
-/// A Kubernetes object name or namespace (DNS subdomain).
+/// A DNS-1123 label: 1-63 of `[a-z0-9-]`, starting and ending alphanumeric.
+/// Namespaces, Helm releases and container names.
+pub fn is_k8s_label(value: &str) -> bool {
+    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let bytes = value.as_bytes();
+    match (bytes.first(), bytes.last()) {
+        (Some(&first), Some(&last)) => {
+            bytes.len() <= 63
+                && alnum(first)
+                && alnum(last)
+                && bytes.iter().all(|&b| alnum(b) || b == b'-')
+        }
+        _ => false,
+    }
+}
+
+/// A DNS-1123 subdomain (object names): at most 253 characters, dot-separated
+/// labels, so no leading `-`/`.`, no `..` and nothing but `[a-z0-9-.]`.
 pub fn is_k8s_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 253
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+    value.len() <= 253 && value.split('.').all(is_k8s_label)
 }
 
 /// Whether a non-admin may read `namespace`: owned by exactly one app, that
@@ -114,7 +133,7 @@ pub enum Scope {
 impl Scope {
     pub(super) fn check(&self, namespace: &str) -> Result<(), ToolError> {
         match self {
-            Scope::All if is_k8s_name(namespace) => Ok(()),
+            Scope::All if is_k8s_label(namespace) => Ok(()),
             Scope::Only(set) if set.contains(namespace) => Ok(()),
             _ => Err(ToolError::new(format!(
                 "The namespace \"{}\" {NAMESPACE_HIDDEN}.",
@@ -185,16 +204,70 @@ fn kube_error(kind: Kind, what: &str, e: kube::Error) -> ToolError {
     }
 }
 
+/// Await a Kubernetes call with [`KUBE_TIMEOUT`].
+async fn call<T>(
+    kind: Kind,
+    what: &str,
+    fut: impl std::future::Future<Output = Result<T, kube::Error>>,
+) -> Result<T, ToolError> {
+    match tokio::time::timeout(KUBE_TIMEOUT, fut).await {
+        Ok(result) => result.map_err(|e| kube_error(kind, what, e)),
+        Err(_) => Err(ToolError::new(KUBE_SLOW)),
+    }
+}
+
+/// Known Secret values of the namespaces a result covers, for scrubbing.
+/// Fails (so the result is withheld) when they cannot be read.
+async fn secrets_for(ctx: &ToolContext, targets: &Targets) -> Result<Vec<String>, ToolError> {
+    let guard = ctx.state.k8s_client.read().await;
+    let k8s = guard.as_ref().ok_or_else(|| ToolError::new(UNREACHABLE))?;
+    let read = async {
+        match targets {
+            Targets::All => try_secret_values(k8s, None).await,
+            Targets::Some(namespaces) => {
+                let mut all = Vec::new();
+                for ns in namespaces {
+                    all.extend(try_secret_values(k8s, Some(ns)).await?);
+                }
+                Some(all)
+            }
+        }
+    };
+    match tokio::time::timeout(KUBE_TIMEOUT, read).await {
+        Ok(Some(values)) => Ok(values),
+        _ => Err(ToolError::new(UNSCRUBBABLE)),
+    }
+}
+
 fn kind_of(input: &Value) -> Result<Kind, ToolError> {
     Kind::parse(input["kind"].as_str().unwrap_or_default()).map_err(ToolError::new)
 }
 
+/// Namespaces, releases and containers are DNS labels; object names are
+/// DNS subdomains.
+fn label_key(key: &str) -> bool {
+    matches!(key, "namespace" | "release" | "container")
+}
+
 fn name_input(input: &Value, key: &str) -> Result<Option<String>, ToolError> {
+    let valid = |v: &str| {
+        if label_key(key) {
+            is_k8s_label(v)
+        } else {
+            is_k8s_name(v)
+        }
+    };
     match input[key].as_str() {
         None => Ok(None),
-        Some(value) if is_k8s_name(value) => Ok(Some(value.to_string())),
+        Some(value) if valid(value) => Ok(Some(value.to_string())),
         Some(_) => Err(ToolError::new(format!(
-            "`{key}` must be a Kubernetes name (lowercase letters, digits, '-' and '.')."
+            "`{key}` must be a valid Kubernetes name (lowercase letters, digits and '-'{}, \
+             starting and ending with a letter or digit).",
+            if label_key(key) {
+                ""
+            } else {
+                ", '.' between parts"
+            }
         ))),
     }
 }
@@ -253,20 +326,19 @@ where
     let mut more = false;
     let namespaces = match targets {
         Targets::All => {
-            let list = Api::<K>::all(client.clone())
-                .list(&params)
-                .await
-                .map_err(|e| kube_error(kind, "", e))?;
+            let list = call(kind, "", Api::<K>::all(client.clone()).list(&params)).await?;
             more = list.metadata.continue_.is_some_and(|c| !c.is_empty());
             return Ok((list.items, more));
         }
         Targets::Some(namespaces) => namespaces,
     };
     for ns in namespaces {
-        let list = Api::<K>::namespaced(client.clone(), ns)
-            .list(&params)
-            .await
-            .map_err(|e| kube_error(kind, "", e))?;
+        let list = call(
+            kind,
+            "",
+            Api::<K>::namespaced(client.clone(), ns).list(&params),
+        )
+        .await?;
         more |= list.metadata.continue_.is_some_and(|c| !c.is_empty());
         items.extend(list.items);
         if items.len() >= LIST_LIMIT as usize {
@@ -282,10 +354,12 @@ async fn fetch_cluster<K>(client: &Client, kind: Kind) -> Result<(Vec<K>, bool),
 where
     K: Resource<Scope = ClusterResourceScope, DynamicType = ()> + Clone + DeserializeOwned + Debug,
 {
-    let list = Api::<K>::all(client.clone())
-        .list(&ListParams::default().limit(LIST_LIMIT))
-        .await
-        .map_err(|e| kube_error(kind, "", e))?;
+    let list = call(
+        kind,
+        "",
+        Api::<K>::all(client.clone()).list(&ListParams::default().limit(LIST_LIMIT)),
+    )
+    .await?;
     let more = list.metadata.continue_.is_some_and(|c| !c.is_empty());
     Ok((list.items, more))
 }
@@ -343,10 +417,7 @@ async fn list_httproutes(
     let mut lines = Vec::new();
     let mut more = false;
     for api in apis {
-        let list = api
-            .list(&params)
-            .await
-            .map_err(|e| kube_error(Kind::HttpRoute, "", e))?;
+        let list = call(Kind::HttpRoute, "", api.list(&params)).await?;
         more |= list.metadata.continue_.is_some_and(|c| !c.is_empty());
         for route in &list.items {
             let line = httproute_line(&route.metadata, &route.data);
@@ -370,6 +441,7 @@ pub(super) async fn k8s_list(ctx: &ToolContext, input: &Value) -> ToolResult {
     }
     let client = client(ctx).await?;
     let now = Utc::now().timestamp();
+    let mut scrub_targets = None;
     let (mut lines, more) = match kind {
         Kind::Namespace => match &scope {
             Scope::All => {
@@ -380,9 +452,9 @@ pub(super) async fn k8s_list(ctx: &ToolContext, input: &Value) -> ToolResult {
                 let api = Api::<Namespace>::all(client.clone());
                 let mut lines = Vec::new();
                 for ns in set {
-                    match api.get(ns).await {
+                    match call(kind, ns, api.get(ns)).await {
                         Ok(object) => lines.push(object.line(now)),
-                        Err(e) => {
+                        Err(ToolError(e)) => {
                             tracing::debug!(error = %e, "Assistant namespace read failed");
                         }
                     }
@@ -400,7 +472,7 @@ pub(super) async fn k8s_list(ctx: &ToolContext, input: &Value) -> ToolResult {
         }
         _ => {
             let targets = Targets::resolve(&scope, namespace.as_deref())?;
-            match kind {
+            let found = match kind {
                 Kind::Pod => list_lines::<Pod>(&client, &targets, kind, now).await?,
                 Kind::Deployment => list_lines::<Deployment>(&client, &targets, kind, now).await?,
                 Kind::StatefulSet => {
@@ -422,7 +494,9 @@ pub(super) async fn k8s_list(ctx: &ToolContext, input: &Value) -> ToolResult {
                     (lines_of(&items, targets.several(), now), more)
                 }
                 Kind::Namespace | Kind::Node | Kind::PersistentVolume => (Vec::new(), false),
-            }
+            };
+            scrub_targets = Some(targets);
+            found
         }
     };
     lines.truncate(LIST_LIMIT as usize);
@@ -437,6 +511,9 @@ pub(super) async fn k8s_list(ctx: &ToolContext, input: &Value) -> ToolResult {
     if more {
         result["note"] = json!("More objects exist than are shown; narrow by namespace.");
     }
+    if let Some(targets) = scrub_targets {
+        scrub_value(&mut result, &secrets_for(ctx, &targets).await?);
+    }
     Ok(result)
 }
 
@@ -448,10 +525,12 @@ where
         + DeserializeOwned
         + Debug,
 {
-    let object = Api::<K>::namespaced(client.clone(), ns)
-        .get(name)
-        .await
-        .map_err(|e| kube_error(kind, &format!("{ns}/{name}"), e))?;
+    let object = call(
+        kind,
+        &format!("{ns}/{name}"),
+        Api::<K>::namespaced(client.clone(), ns).get(name),
+    )
+    .await?;
     Ok(object.describe())
 }
 
@@ -463,10 +542,7 @@ where
         + DeserializeOwned
         + Debug,
 {
-    let object = Api::<K>::all(client.clone())
-        .get(name)
-        .await
-        .map_err(|e| kube_error(kind, name, e))?;
+    let object = call(kind, name, Api::<K>::all(client.clone()).get(name)).await?;
     Ok(object.describe())
 }
 
@@ -492,7 +568,7 @@ pub(super) async fn k8s_describe(ctx: &ToolContext, input: &Value) -> ToolResult
             })?;
             scope.check(&ns)?;
             let (ns, name) = (ns.as_str(), name.as_str());
-            match kind {
+            let mut result = match kind {
                 Kind::Pod => get_namespaced::<Pod>(&client, ns, name, kind).await,
                 Kind::Deployment => get_namespaced::<Deployment>(&client, ns, name, kind).await,
                 Kind::StatefulSet => get_namespaced::<StatefulSet>(&client, ns, name, kind).await,
@@ -506,20 +582,18 @@ pub(super) async fn k8s_describe(ctx: &ToolContext, input: &Value) -> ToolResult
                 Kind::Event => get_namespaced::<Event>(&client, ns, name, kind).await,
                 Kind::ConfigMap => get_namespaced::<ConfigMap>(&client, ns, name, kind).await,
                 Kind::HttpRoute => {
-                    let route = Api::<DynamicObject>::namespaced_with(
-                        client.clone(),
-                        ns,
-                        &httproute_resource(),
-                    )
-                    .get(name)
-                    .await
-                    .map_err(|e| kube_error(kind, &format!("{ns}/{name}"), e))?;
+                    let resource = httproute_resource();
+                    let api = Api::<DynamicObject>::namespaced_with(client.clone(), ns, &resource);
+                    let route = call(kind, &format!("{ns}/{name}"), api.get(name)).await?;
                     Ok(httproute_describe(&route.metadata, &route.data))
                 }
                 Kind::Namespace | Kind::Node | Kind::PersistentVolume => {
                     Err(ToolError::new("Unsupported kind."))
                 }
-            }
+            }?;
+            let secrets = secrets_for(ctx, &Targets::Some(vec![ns.to_string()])).await?;
+            scrub_value(&mut result, &secrets);
+            Ok(result)
         }
     }
 }
@@ -558,6 +632,7 @@ pub(super) async fn k8s_events(ctx: &ToolContext, input: &Value) -> ToolResult {
             "{total} events matched; the newest {MAX_EVENTS} are shown."
         ));
     }
+    scrub_value(&mut result, &secrets_for(ctx, &targets).await?);
     Ok(result)
 }
 
@@ -579,19 +654,19 @@ pub(super) async fn pod_logs(ctx: &ToolContext, input: &Value) -> ToolResult {
         limit_bytes: Some(LOG_FETCH_BYTES),
         ..Default::default()
     };
-    let raw = Api::<Pod>::namespaced(client, &namespace)
-        .logs(&pod, &params)
-        .await
-        .map_err(|e| match &e {
-            kube::Error::Api(status) if status.code == 400 => ToolError::new(format!(
+    // Refuse up front when the Secrets to scrub with cannot be read.
+    let secrets = secrets_for(ctx, &Targets::Some(vec![namespace.clone()])).await?;
+    let api = Api::<Pod>::namespaced(client, &namespace);
+    let raw = match tokio::time::timeout(KUBE_TIMEOUT, api.logs(&pod, &params)).await {
+        Err(_) => return Err(ToolError::new(KUBE_SLOW)),
+        Ok(Ok(raw)) => raw,
+        Ok(Err(kube::Error::Api(status))) if status.code == 400 => {
+            return Err(ToolError::new(format!(
                 "Kubernetes could not return these logs: {}",
                 clip(&scrub_inline(&status.message), 300)
-            )),
-            _ => kube_error(Kind::Pod, &format!("{namespace}/{pod}"), e),
-        })?;
-    let secrets = match ctx.state.k8s_client.read().await.as_ref() {
-        Some(k8s) => secret_values_for_namespace(k8s, &namespace).await,
-        None => Vec::new(),
+            )))
+        }
+        Ok(Err(e)) => return Err(kube_error(Kind::Pod, &format!("{namespace}/{pod}"), e)),
     };
     let (log, lines) = shape_logs(&raw, &secrets);
     Ok(json!({
@@ -665,6 +740,17 @@ pub fn release_history_json(bytes: &[u8], max: usize) -> Vec<Value> {
         .collect()
 }
 
+/// `helm <command…> -n <ns> -o json -- <release>`: the release goes after
+/// `--` so it can never be read as a flag (names are validated as well).
+pub fn helm_args(command: &[&str], release: &str, namespace: &str) -> Vec<String> {
+    command
+        .iter()
+        .copied()
+        .chain(["-n", namespace, "-o", "json", "--", release])
+        .map(str::to_string)
+        .collect()
+}
+
 async fn helm(args: Vec<String>) -> Result<helm_process::HelmOutput, ToolError> {
     tokio::task::spawn_blocking(move || {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -706,20 +792,12 @@ pub(super) async fn helm_status(ctx: &ToolContext, input: &Value) -> ToolResult 
         }
         (None, true) => namespace.unwrap_or_else(|| release.clone()),
     };
-    let base = |command: &[&str]| -> Vec<String> {
-        command
-            .iter()
-            .map(|s| s.to_string())
-            .chain([
-                release.clone(),
-                "-n".into(),
-                release_namespace.clone(),
-                "-o".into(),
-                "json".into(),
-            ])
-            .collect()
-    };
-    let metadata = helm(base(&["get", "metadata"])).await?;
+    let metadata = helm(helm_args(
+        &["get", "metadata"],
+        &release,
+        &release_namespace,
+    ))
+    .await?;
     if !metadata.status.success() {
         let stderr = String::from_utf8_lossy(&metadata.stderr).to_ascii_lowercase();
         if stderr.contains("not found") {
@@ -734,9 +812,12 @@ pub(super) async fn helm_status(ctx: &ToolContext, input: &Value) -> ToolResult 
     }
     let mut result = release_metadata_json(&metadata.stdout)
         .ok_or_else(|| ToolError::new("Helm returned metadata Kubarr could not read."))?;
-    let mut history_args = base(&["history"]);
-    history_args.extend(["--max".to_string(), "5".to_string()]);
-    let history = helm(history_args).await?;
+    let history = helm(helm_args(
+        &["history", "--max", "5"],
+        &release,
+        &release_namespace,
+    ))
+    .await?;
     if history.status.success() {
         result["recent_revisions"] = json!(release_history_json(&history.stdout, 5));
     }
@@ -796,9 +877,50 @@ mod tests {
     #[test]
     fn k8s_names_are_validated() {
         assert!(is_k8s_name("jellyfin-7d9f.abc"));
-        for bad in ["", "Jellyfin", "a/b", "a b", "x\"", &"a".repeat(254)] {
+        assert!(is_k8s_label("jellyfin-0"));
+        let long_label = "a".repeat(64);
+        let long_name = "a.".repeat(127);
+        for bad in [
+            "",
+            "Jellyfin",
+            "a/b",
+            "a b",
+            "x\"",
+            "--kube-context",
+            "-x",
+            "..",
+            ".",
+            "a..b",
+            ".a",
+            "a.",
+            "a-",
+            &long_name,
+        ] {
             assert!(!is_k8s_name(bad), "{bad}");
+            assert!(!is_k8s_label(bad), "{bad}");
         }
+        assert!(!is_k8s_label(&long_label));
+        assert!(!is_k8s_label("a.b"), "labels have no dots");
+        // Validation happens at the tool input.
+        for bad in ["--kube-context", "..", "-x"] {
+            for key in ["namespace", "release", "name", "pod", "container"] {
+                assert!(
+                    name_input(&json!({ key: bad }), key).is_err(),
+                    "{key}={bad}"
+                );
+            }
+        }
+        assert!(name_input(&json!({"namespace": "a.b"}), "namespace").is_err());
+        assert!(name_input(&json!({"name": "a.b"}), "name").is_ok());
+    }
+
+    #[test]
+    fn helm_release_goes_after_double_dash() {
+        let args = helm_args(&["get", "metadata"], "jellyfin", "jellyfin");
+        assert_eq!(
+            args,
+            ["get", "metadata", "-n", "jellyfin", "-o", "json", "--", "jellyfin"]
+        );
     }
 
     #[test]

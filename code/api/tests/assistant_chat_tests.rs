@@ -664,7 +664,13 @@ async fn tools_are_scoped_to_the_users_apps_and_own_notifications() {
     assert!(!offered.contains(&"query_metrics".to_string()));
     assert!(!offered.contains(&"query_logs".to_string()));
     // No reachable cluster in tests: the cluster tools are left out.
-    for tool in ["k8s_list", "k8s_describe", "k8s_events", "pod_logs", "helm_status"] {
+    for tool in [
+        "k8s_list",
+        "k8s_describe",
+        "k8s_events",
+        "pod_logs",
+        "helm_status",
+    ] {
         assert!(!offered.contains(&tool.to_string()), "{tool}");
     }
     assert!(bodies[0]["messages"][1]["content"]

@@ -317,7 +317,20 @@ pub(crate) fn scrub_inline(text: &str) -> String {
 
 /// Decoded Secret values (>= 6 chars) in the namespace. `None` when listing fails.
 async fn namespace_secret_values(k8s: &K8sClient, ns: &str) -> Option<Vec<String>> {
-    let api: Api<Secret> = Api::namespaced(k8s.client().clone(), ns);
+    secret_values_in(Api::namespaced(k8s.client().clone(), ns)).await
+}
+
+/// The namespace's Secret values, or every namespace's with `None`, for
+/// [`scrub_with`]. `None` when they cannot be listed, so callers can refuse
+/// to show text they cannot scrub.
+pub(crate) async fn try_secret_values(k8s: &K8sClient, ns: Option<&str>) -> Option<Vec<String>> {
+    match ns {
+        Some(ns) => namespace_secret_values(k8s, ns).await,
+        None => secret_values_in(Api::all(k8s.client().clone())).await,
+    }
+}
+
+async fn secret_values_in(api: Api<Secret>) -> Option<Vec<String>> {
     let list = api.list(&ListParams::default()).await.ok()?;
     let mut values = Vec::new();
     for secret in list.items {
