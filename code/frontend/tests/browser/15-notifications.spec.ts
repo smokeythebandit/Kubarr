@@ -1,5 +1,5 @@
 import { test, expect, timestamp, admin } from './fixtures';
-import type { Notification, NotificationChannel, NotificationEvent } from '../../src/api/notifications';
+import type { Notification, NotificationChannel, NotificationEvent, NotificationRoute } from '../../src/api/notifications';
 
 const notification: Notification = {
   id: 71, title: 'Fixture login', message: 'Signed in from the browser fixture',
@@ -12,6 +12,7 @@ test.beforeEach(async ({ api }) => {
   } satisfies NotificationChannel)));
   api.get('/api/notifications/events', [{ event_type: 'user_login', severity: 'info', enabled: true }]);
   api.get('/api/notifications/logs?limit=50', { logs: [], total: 0 });
+  api.get('/api/notifications/routes', [{ event_type: 'user_login', channels: { telegram: false, email: false, messagebird: false } }]);
   api.get('/api/notifications/inbox?limit=30&offset=0', { notifications: [], total: 0, unread: 0 });
 });
 
@@ -200,3 +201,31 @@ for (const success of [true, false]) {
     expect(api.calls.filter(call => call === 'POST /api/notifications/channels/email/test')).toHaveLength(1);
   });
 }
+
+test('routes an event to a set-up channel and keeps the others locked', async ({ page, api }) => {
+  let route: NotificationRoute = { event_type: 'user_login', channels: { telegram: false, email: false, messagebird: false } };
+  const updates: unknown[] = [];
+  api.on('GET', '/api/notifications/channels', () => ({
+    json: ['email', 'telegram', 'messagebird'].map(channel_type => ({
+      channel_type, enabled: channel_type === 'email', config: channel_type === 'email' ? { smtp_host: 'smtp.example.com' } : {},
+      created_at: timestamp, updated_at: timestamp,
+    } satisfies NotificationChannel)),
+  }));
+  api.on('GET', '/api/notifications/routes', () => ({ json: [route] }));
+  api.on('PUT', '/api/notifications/routes/user_login', request => {
+    const update = request.postDataJSON();
+    updates.push(update);
+    route = { ...route, channels: { ...route.channels, ...update.channels } };
+    return { json: route };
+  });
+  await page.goto('/settings?section=notifications');
+  await page.getByRole('tab', { name: 'What you get' }).click();
+  await expect(page.getByRole('checkbox', { name: 'User Login in the bell' })).toBeDisabled();
+  await expect(page.getByRole('checkbox', { name: 'User Login via Telegram' })).toBeDisabled();
+  await expect(page.getByRole('checkbox', { name: 'User Login via Telegram' })).toHaveAttribute('title', 'Set up this channel first');
+  const email = page.getByRole('checkbox', { name: 'User Login via Email' });
+  await email.click();
+  await expect(email).toBeChecked();
+  await expect.poll(() => updates).toEqual([{ channels: { email: true } }]);
+  await expect(page.getByRole('tab', { name: /^What you get\s*1$/ })).toBeVisible();
+});

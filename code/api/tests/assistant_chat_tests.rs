@@ -911,8 +911,14 @@ async fn a_broken_stream_saves_the_partial_answer_as_interrupted() {
 #[tokio::test]
 async fn retention_deletes_old_conversations_only() {
     let db = create_test_db_with_seed().await;
-    let user =
-        create_test_user_with_role(&db, "keeper", "keeper@example.com", "pw-123456", "admin").await;
+    let user = create_test_user_with_role(
+        &db,
+        "keeper",
+        "keeper@example.com",
+        &uuid::Uuid::new_v4().to_string(),
+        "admin",
+    )
+    .await;
     let old = conversations::create(&db, user.id, Some("old"), &Default::default())
         .await
         .unwrap();
@@ -1175,8 +1181,14 @@ async fn admins_can_read_logs_of_system_namespaces() {
 #[tokio::test]
 async fn parallel_questions_cannot_exceed_the_rate_limit() {
     let db = create_test_db_with_seed().await;
-    let user =
-        create_test_user_with_role(&db, "racer", "racer@example.com", "pw-123456", "admin").await;
+    let user = create_test_user_with_role(
+        &db,
+        "racer",
+        "racer@example.com",
+        &uuid::Uuid::new_v4().to_string(),
+        "admin",
+    )
+    .await;
     for _ in 0..conversations::RATE_LIMIT - 1 {
         assistant_request::ActiveModel {
             user_id: Set(user.id),

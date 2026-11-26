@@ -123,7 +123,7 @@ test.describe('real settings and VPN (configuration only)', () => {
     const original = baseline.find(event => event.event_type === 'user_login') ?? baseline[0];
     expect(original).toBeTruthy();
     await page.goto('/settings?section=notifications');
-    await page.getByRole('tab', { name: 'What you get', exact: true }).click();
+    await page.getByRole('tab', { name: /^What you get/ }).click();
     const label = original.event_type.split('_').map(word => word[0].toUpperCase() + word.slice(1)).join(' ');
     const toggle = page.getByRole('switch', { name: `${label} notifications`, exact: true });
     const severity = page.getByRole('combobox', { name: `${label} severity`, exact: true });
@@ -142,7 +142,7 @@ test.describe('real settings and VPN (configuration only)', () => {
       return events.find(event => event.event_type === original.event_type);
     }).toMatchObject({ enabled: !original.enabled, severity: changedSeverity });
     await page.reload();
-    await page.getByRole('tab', { name: 'What you get', exact: true }).click();
+    await page.getByRole('tab', { name: /^What you get/ }).click();
     await expect(toggle).toHaveAttribute('aria-checked', String(!original.enabled));
     await expect(severity).toHaveValue(changedSeverity);
 

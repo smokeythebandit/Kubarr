@@ -293,11 +293,26 @@ pub async fn take_rate_slot(db: &DatabaseConnection, user_id: i64) -> Result<()>
         .count(&txn)
         .await?;
     if recent >= RATE_LIMIT {
+        // A slot frees up when the oldest question in the window ages out.
+        let window_start = now - Duration::minutes(RATE_WINDOW_MINUTES);
+        let oldest = assistant_request::Entity::find()
+            .filter(assistant_request::Column::UserId.eq(user_id))
+            .filter(assistant_request::Column::CreatedAt.gte(window_start))
+            .order_by_asc(assistant_request::Column::CreatedAt)
+            .one(&txn)
+            .await?;
         txn.rollback().await?;
-        return Err(AppError::TooManyRequests(format!(
-            "You can ask the assistant at most {RATE_LIMIT} questions every \
-             {RATE_WINDOW_MINUTES} minutes. Try again in a few minutes."
-        )));
+        let retry_after_secs = oldest
+            .map(|row| (row.created_at - window_start).num_seconds())
+            .unwrap_or(60)
+            .max(1) as u64;
+        return Err(AppError::TooManyRequests {
+            message: format!(
+                "You can ask the assistant at most {RATE_LIMIT} questions every \
+                 {RATE_WINDOW_MINUTES} minutes. Try again in a few minutes."
+            ),
+            retry_after_secs,
+        });
     }
     assistant_request::ActiveModel {
         user_id: Set(user_id),

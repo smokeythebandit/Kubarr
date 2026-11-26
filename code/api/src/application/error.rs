@@ -32,8 +32,12 @@ pub enum AppError {
     #[error("Bad gateway: {0}")]
     BadGateway(String),
 
-    #[error("Too many requests: {0}")]
-    TooManyRequests(String),
+    /// 429 with a `Retry-After` header of `retry_after_secs`.
+    #[error("Too many requests: {message}")]
+    TooManyRequests {
+        message: String,
+        retry_after_secs: u64,
+    },
 
     #[error("Database error: {0}")]
     Database(#[from] sea_orm::DbErr),
@@ -82,7 +86,23 @@ impl IntoResponse for AppError {
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             AppError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
-            AppError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg.clone()),
+            AppError::TooManyRequests {
+                message,
+                retry_after_secs,
+            } => {
+                let mut response = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ErrorResponse {
+                        detail: message.clone(),
+                    }),
+                )
+                    .into_response();
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from((*retry_after_secs).max(1)),
+                );
+                return response;
+            }
             AppError::Database(e) => {
                 tracing::error!("Database error: {}", e);
                 (
