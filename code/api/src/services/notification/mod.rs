@@ -766,6 +766,7 @@ fn format_event_title(action: &AuditAction) -> String {
         AuditAction::InviteCreated => "Invite Link Created".to_string(),
         AuditAction::InviteUsed => "Invite Link Used".to_string(),
         AuditAction::InviteDeleted => "Invite Link Deleted".to_string(),
+        AuditAction::AssistantBudgetWarning => "Assistant Budget Almost Used".to_string(),
         // Notification destinations
         AuditAction::NotificationVerificationSent => "Verification Code Sent".to_string(),
         AuditAction::NotificationDestinationVerified => {
@@ -989,6 +990,13 @@ fn format_event_body(
                 format!("Invite link deleted by {}", user)
             } else {
                 format!("Invite link deleted by {}: {}", user, detail)
+            }
+        }
+        AuditAction::AssistantBudgetWarning => {
+            if detail.is_empty() {
+                "The AI assistant has used 80 % of its monthly budget".to_string()
+            } else {
+                format!("The AI assistant has used 80 % of its monthly budget: {detail}")
             }
         }
         // Notification destinations

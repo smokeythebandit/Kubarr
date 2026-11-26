@@ -5,6 +5,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use sea_orm::DatabaseConnection;
 
+use crate::services::assistant::AssistantDeps;
 use crate::services::audit::AuditService;
 use crate::services::cadvisor::NamespaceNetworkMetrics;
 use crate::services::catalog::AppCatalog;
@@ -576,6 +577,8 @@ pub struct AppState {
     pub endpoint_cache: EndpointCache,
     pub network_metrics_cache: NetworkMetricsCache,
     pub network_metrics_tx: NetworkMetricsBroadcast,
+    /// AI assistant key store and Messages API client.
+    pub assistant: AssistantDeps,
 }
 
 impl AppState {
@@ -590,6 +593,7 @@ impl AppState {
         // Create broadcast channel for network metrics (capacity of 16 messages)
         let (network_metrics_tx, _) = broadcast::channel(16);
 
+        let assistant = AssistantDeps::new(k8s_client.clone());
         Self {
             db: Arc::new(RwLock::new(db)),
             k8s_client,
@@ -600,6 +604,7 @@ impl AppState {
             endpoint_cache: EndpointCache::new(60), // Cache endpoints for 60 seconds
             network_metrics_cache: NetworkMetricsCache::new(),
             network_metrics_tx,
+            assistant,
         }
     }
 

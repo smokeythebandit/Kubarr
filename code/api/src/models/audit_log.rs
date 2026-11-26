@@ -81,6 +81,8 @@ pub enum AuditAction {
     InviteCreated,
     InviteUsed,
     InviteDeleted,
+    /// The assistant's spend this month passed 80 % of its budget.
+    AssistantBudgetWarning,
 
     // Notification destinations
     NotificationVerificationSent,
@@ -149,7 +151,8 @@ impl AuditAction {
             | AuditAction::SystemSettingChanged
             | AuditAction::InviteCreated
             | AuditAction::InviteUsed
-            | AuditAction::InviteDeleted => true,
+            | AuditAction::InviteDeleted
+            | AuditAction::AssistantBudgetWarning => true,
         }
     }
 
@@ -201,6 +204,7 @@ impl std::fmt::Display for AuditAction {
             AuditAction::InviteCreated => write!(f, "invite_created"),
             AuditAction::InviteUsed => write!(f, "invite_used"),
             AuditAction::InviteDeleted => write!(f, "invite_deleted"),
+            AuditAction::AssistantBudgetWarning => write!(f, "assistant_budget_warning"),
             AuditAction::NotificationVerificationSent => {
                 write!(f, "notification_verification_sent")
             }
@@ -320,6 +324,10 @@ mod tests {
         );
         assert_eq!(AuditAction::InviteCreated.to_string(), "invite_created");
         assert_eq!(AuditAction::InviteUsed.to_string(), "invite_used");
+        assert_eq!(
+            AuditAction::AssistantBudgetWarning.to_string(),
+            "assistant_budget_warning"
+        );
         assert_eq!(AuditAction::InviteDeleted.to_string(), "invite_deleted");
         assert_eq!(AuditAction::ApiAccess.to_string(), "api_access");
     }

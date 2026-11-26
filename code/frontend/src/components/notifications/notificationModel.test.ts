@@ -227,12 +227,13 @@ const BACKEND_EVENT_TYPES: Record<string, 'updates' | 'apps' | 'security' | 'sys
   invite_created: 'security',
   invite_used: 'security',
   invite_deleted: 'security',
+  assistant_budget_warning: 'system',
 };
 
 describe('event labels', () => {
-  it('covers all 37 backend event types with a label and category', () => {
+  it('covers all 38 backend event types with a label and category', () => {
     const types = Object.keys(BACKEND_EVENT_TYPES);
-    expect(types).toHaveLength(37);
+    expect(types).toHaveLength(38);
     for (const type of types) {
       expect(EVENT_LABELS[type], type).toBeTruthy();
       expect(categoryOf(type), type).toBe(BACKEND_EVENT_TYPES[type]);

@@ -315,6 +315,8 @@ fn safe_resource_id(action: &AuditAction, resource_type: &ResourceType, id: Stri
             "registration_enabled"
                 | "registration_require_approval"
                 | "auto_update"
+                | "assistant"
+                | "assistant.api_key"
                 | "notification_routes"
         ),
         _ => id.parse::<i64>().is_ok() && id.len() <= 20,

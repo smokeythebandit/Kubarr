@@ -115,6 +115,9 @@ define_permissions! {
     /// Manage VPN providers and assign VPN to apps
     VpnManage => "vpn.manage",
 
+    // AI assistant
+    /// Chat with the AI assistant
+    AssistantUse => "assistant.use",
 }
 
 /// Extractor that requires a specific permission
@@ -271,6 +274,7 @@ mod tests {
         assert_eq!(NetworkingView::NAME, "networking.view");
         assert_eq!(VpnView::NAME, "vpn.view");
         assert_eq!(VpnManage::NAME, "vpn.manage");
+        assert_eq!(AssistantUse::NAME, "assistant.use");
     }
 
     #[test]

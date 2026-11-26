@@ -92,6 +92,7 @@ export const EVENT_LABELS: Record<string, string> = {
   vpn_assigned: 'VPN Assigned to App',
   vpn_removed: 'VPN Removed from App',
   system_setting_changed: 'System Setting Changed',
+  assistant_budget_warning: 'Assistant Budget Almost Used',
 };
 
 /** Human-readable name for an event type. */

@@ -3,6 +3,7 @@ pub mod app_operation;
 pub mod app_state;
 pub mod app_storage_config;
 pub mod app_vpn_config;
+pub mod assistant_usage;
 pub mod audit_log;
 pub mod audit_outbox;
 pub mod domain;
@@ -38,6 +39,7 @@ pub mod prelude {
     pub use super::app_state::{self, Entity as AppState};
     pub use super::app_storage_config::{self, Entity as AppStorageConfig};
     pub use super::app_vpn_config::{self, Entity as AppVpnConfig};
+    pub use super::assistant_usage::{self, Entity as AssistantUsage};
     pub use super::audit_log::{self, Entity as AuditLog};
     pub use super::audit_outbox::{self, Entity as AuditOutbox};
     pub use super::domain::{self, Entity as Domain};
